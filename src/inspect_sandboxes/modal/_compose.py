@@ -63,6 +63,8 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
     """Apply Modal-specific extensions to params dict.
 
     Supported extensions:
+        - gpu (str): GPU type ("A10G", "A100", "T4", "ANY", "A10G:2", etc.)
+                     Overrides GPU config from compose deploy.resources.
         - block_network (bool): Block all network access
         - cidr_allowlist (list[str]): Allowed CIDR blocks for network access
         - timeout (int): Sandbox timeout in seconds
@@ -89,6 +91,7 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
     modal_extensions = extensions.get("x-inspect_modal_sandbox", {})
 
     extension_keys = [
+        "gpu",
         "block_network",
         "cidr_allowlist",
         "timeout",
@@ -116,9 +119,13 @@ def _service_to_gpu(service: ComposeService) -> str | None:
 
     Returns:
         GPU specification string for Modal, or None if no GPU requested.
-        - "<count>": Number of GPUs (e.g., "2")
-        - "<id>,<id>": Specific device IDs (e.g., "0,1")
-        - "any": Any available GPU
+        - "ANY:<count>": Any GPU with specified count (e.g., "ANY:2")
+        - "ANY": Any single GPU
+
+    Note:
+        Compose GPU config doesn't specify GPU types (A10G, T4, etc.), so we
+        default to "ANY". Use x-inspect_modal_sandbox.gpu extension to specify
+        a particular GPU type, which will override this value.
     """
     if not service.deploy or not service.deploy.resources:
         return None
@@ -137,10 +144,12 @@ def _service_to_gpu(service: ComposeService) -> str | None:
         return None
 
     if gpu_device.count:
-        return str(gpu_device.count)
+        return f"ANY:{gpu_device.count}"
     if gpu_device.device_ids:
-        return ",".join(gpu_device.device_ids)
-    return "any"
+        # Modal doesn't support specific device IDs in cloud environments
+        # Convert to count based on number of device IDs specified
+        return f"ANY:{len(gpu_device.device_ids)}"
+    return "ANY"
 
 
 def _resolve_dockerfile_path(build: str | ComposeBuild, compose_dir: Path) -> Path:

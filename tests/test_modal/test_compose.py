@@ -128,7 +128,7 @@ def test_resolve_dockerfile_path(
                     }
                 }
             },
-            "2",
+            "ANY:2",
         ),
         # GPU with device_ids
         (
@@ -143,7 +143,7 @@ def test_resolve_dockerfile_path(
                     }
                 }
             },
-            "0,1",
+            "ANY:2",
         ),
         # GPU with no count or device_ids
         (
@@ -154,7 +154,7 @@ def test_resolve_dockerfile_path(
                     }
                 }
             },
-            "any",
+            "ANY",
         ),
     ],
 )
@@ -329,7 +329,7 @@ def test_convert_compose_service_selection(
                 },
             },
             None,
-            {"image": "registry:python:3.12", "gpu": "1"},
+            {"image": "registry:python:3.12", "gpu": "ANY:1"},
         ),
         # All parameters combined
         (
@@ -354,7 +354,7 @@ def test_convert_compose_service_selection(
                 "env": {"KEY": "VALUE"},
                 "memory": 1024,
                 "cpu": 2.0,
-                "gpu": "2",
+                "gpu": "ANY:2",
             },
         ),
     ],
