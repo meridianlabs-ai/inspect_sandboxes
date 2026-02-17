@@ -5,7 +5,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from inspect_ai.util import ComposeBuild, ComposeConfig, ComposeService
+from inspect_ai.util import (
+    ComposeBuild,
+    ComposeConfig,
+    ComposeService,
+    parse_compose_yaml,
+)
 from inspect_sandboxes.modal._compose import (
     _apply_modal_extensions,
     _convert_byte_value,
@@ -383,6 +388,91 @@ def test_convert_compose_to_modal_params(
         result = convert_compose_to_modal_params(config, compose_path)
 
     assert result == expected_params
+
+
+@pytest.mark.parametrize(
+    ("compose_yaml", "expected_cpu", "expected_memory"),
+    [
+        # Both reservations and limits (should return tuples)
+        (
+            """
+services:
+  default:
+    image: python:3.12
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.5"
+          memory: 512m
+        limits:
+          cpus: "2.0"
+          memory: 1g
+""",
+            (0.5, 2.0),
+            (512, 1024),
+        ),
+        # Limits only (should return single values)
+        (
+            """
+services:
+  default:
+    image: python:3.12
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+""",
+            2.0,
+            1024,
+        ),
+        # Reservations only (should return single values)
+        (
+            """
+services:
+  default:
+    image: python:3.12
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.5"
+          memory: 512m
+""",
+            0.5,
+            512,
+        ),
+        # Service-level fallback (v2 format - no deploy.resources)
+        (
+            """
+services:
+  default:
+    image: python:3.12
+    cpus: 2.0
+    mem_limit: 1g
+""",
+            2.0,
+            1024,
+        ),
+    ],
+)
+def test_convert_compose_resource_tuples(
+    tmp_path: Path,
+    compose_yaml: str,
+    expected_cpu: float | tuple[float, float],
+    expected_memory: int | tuple[int, int],
+) -> None:
+    """Test CPU and memory (request, limit) tuple handling."""
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text(compose_yaml)
+
+    config = parse_compose_yaml(str(compose_file), multiple_services=False)
+
+    with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+        mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
+        result = convert_compose_to_modal_params(config, None)
+
+    assert result["cpu"] == expected_cpu
+    assert result["memory"] == expected_memory
 
 
 def test_convert_compose_with_build() -> None:

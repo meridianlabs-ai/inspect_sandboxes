@@ -41,17 +41,16 @@ def convert_compose_to_modal_params(
     if service.environment:
         params["env"] = _parse_environment(service.environment)
 
-    if service.mem_limit:
-        try:
-            params["memory"] = _convert_byte_value(service.mem_limit)
-        except ValueError as e:
-            raise ValueError(f"Invalid mem_limit in service: {e}") from e
+    memory = _service_to_memory(service)
+    if memory is not None:
+        params["memory"] = memory
 
-    if service.cpus:
-        params["cpu"] = service.cpus
+    cpu = _service_to_cpu(service)
+    if cpu is not None:
+        params["cpu"] = cpu
 
     gpu = _service_to_gpu(service)
-    if gpu:
+    if gpu is not None:
         params["gpu"] = gpu
 
     _apply_modal_extensions(params, config.extensions)
@@ -109,6 +108,101 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
     for key in extension_keys:
         if modal_extensions.get(key) is not None:
             params[key] = modal_extensions[key]
+
+
+def _service_to_cpu(service: ComposeService) -> float | tuple[float, float] | None:
+    """Extract CPU configuration from compose service.
+
+    Args:
+        service: Compose service configuration.
+
+    Returns:
+        CPU specification for Modal, or None if no CPU config.
+        - float: Single CPU limit (e.g., 2.0)
+        - tuple[float, float]: (reservation, limit) for both soft and hard limits
+
+    Note:
+        Priority: deploy.resources.{reservations,limits}.cpus > service.cpus
+    """
+    cpu_reservation = None
+    cpu_limit = None
+
+    # Check deploy.resources (v3 format) first
+    if service.deploy and service.deploy.resources:
+        resources = service.deploy.resources
+
+        if resources.reservations and resources.reservations.cpus:
+            cpu_reservation = float(resources.reservations.cpus)
+
+        if resources.limits and resources.limits.cpus:
+            cpu_limit = float(resources.limits.cpus)
+
+    # Fall back to service-level field (v2 format)
+    if cpu_limit is None and service.cpus:
+        cpu_limit = service.cpus
+
+    # Return tuple if both, single value if only one
+    if cpu_reservation and cpu_limit:
+        return (cpu_reservation, cpu_limit)
+    elif cpu_limit:
+        return cpu_limit
+    elif cpu_reservation:
+        return cpu_reservation
+    return None
+
+
+def _service_to_memory(service: ComposeService) -> int | tuple[int, int] | None:
+    """Extract memory configuration from compose service.
+
+    Args:
+        service: Compose service configuration.
+
+    Returns:
+        Memory specification in MiB for Modal, or None if no memory config.
+        - int: Single memory limit in MiB (e.g., 1024)
+        - tuple[int, int]: (reservation, limit) in MiB for both soft and hard limits
+
+    Note:
+        Priority: deploy.resources.{reservations,limits}.memory > service.mem_limit
+    """
+    mem_reservation = None
+    mem_limit = None
+
+    # Check deploy.resources (v3 format) first
+    if service.deploy and service.deploy.resources:
+        resources = service.deploy.resources
+
+        if resources.reservations and resources.reservations.memory:
+            try:
+                mem_reservation = _convert_byte_value(resources.reservations.memory)
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid memory reservation in deploy.resources: {e}"
+                ) from e
+
+        if resources.limits and resources.limits.memory:
+            try:
+                mem_limit = _convert_byte_value(resources.limits.memory)
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid memory limit in deploy.resources: {e}"
+                ) from e
+
+    # Fall back to service-level field (v2 format)
+    if mem_limit is None and service.mem_limit:
+        try:
+            mem_limit = _convert_byte_value(service.mem_limit)
+        except ValueError as e:
+            raise ValueError(f"Invalid mem_limit in service: {e}") from e
+
+    # Return tuple if both, single value if only one
+    if mem_reservation and mem_limit:
+        return (mem_reservation, mem_limit)
+    elif mem_limit:
+        return mem_limit
+    elif mem_reservation:
+        return mem_reservation
+    return None
 
 
 def _service_to_gpu(service: ComposeService) -> str | None:
