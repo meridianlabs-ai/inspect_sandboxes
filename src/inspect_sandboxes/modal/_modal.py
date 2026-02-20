@@ -4,7 +4,6 @@ import asyncio
 import errno
 import os
 import sys
-import warnings
 from contextvars import ContextVar
 from logging import getLogger
 from pathlib import PurePosixPath
@@ -12,9 +11,13 @@ from typing import Any, Literal, cast, overload
 
 import modal
 import modal.exception
+from inspect_ai._util.logger import (
+    warn_once,  # noqa: PLC2701 TODO: switch to public import once released on PyPI
+)
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
+    OutputLimitExceededError,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
     SandboxEnvironmentLimits,
@@ -22,11 +25,7 @@ from inspect_ai.util import (
     is_dockerfile,
     parse_compose_yaml,
     sandboxenv,
-)
-from inspect_ai.util._sandbox.compose import COMPOSE_FILES, DOCKERFILE
-from inspect_ai.util._sandbox.limits import (
-    OutputLimitExceededError,
-    verify_exec_result_size,
+    trace_message,
 )
 from rich import box, print
 from rich.prompt import Confirm
@@ -45,6 +44,7 @@ from ._compose import convert_compose_to_modal_params
 logger = getLogger(__name__)
 
 MODAL_APP_NAME = "inspect_modal_sandbox"
+INSPECT_SANDBOX_TAG = {"created_by": "inspect-ai"}
 
 _running_sandboxes: ContextVar[list[str]] = ContextVar("modal_running_sandboxes")
 
@@ -57,9 +57,9 @@ def running_sandboxes() -> list[str]:
     return _running_sandboxes.get()
 
 
-# Retry decorator for file I/O and sandbox lifecycle op
+# Retry decorator for file I/O and sandbox lifecycle ops
 _standard_retry = retry(
-    stop=stop_after_attempt(2),
+    stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
 )
@@ -73,7 +73,13 @@ class ModalSandboxEnvironment(SandboxEnvironment):
 
     @classmethod
     def config_files(cls) -> list[str]:
-        return COMPOSE_FILES + [DOCKERFILE]
+        return [
+            "compose.yaml",
+            "compose.yml",
+            "docker-compose.yaml",
+            "docker-compose.yml",
+            "Dockerfile",
+        ]
 
     @classmethod
     def is_docker_compatible(cls) -> bool:
@@ -102,7 +108,9 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         }
 
         if config is None:
-            logger.debug(f"Using default Modal image for task '{task_name}'")
+            trace_message(
+                logger, "modal", f"Using default Modal image for task '{task_name}'"
+            )
         elif is_dockerfile(config):
             sandbox_params["image"] = modal.Image.from_dockerfile(config)
         elif is_compose_yaml(config):
@@ -120,6 +128,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             )
 
         sandbox = await cls._create_sandbox(sandbox_params)
+        await sandbox.set_tags.aio(INSPECT_SANDBOX_TAG)
         running_sandboxes().append(sandbox.object_id)
 
         return {"default": cls(sandbox)}
@@ -133,8 +142,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         environments: dict[str, SandboxEnvironment],
         interrupted: bool,
     ) -> None:
-        """Clean up Modal sandboxes after sample completion."""
-        if not environments:
+        if not environments or interrupted:
             return
 
         for env in environments.values():
@@ -144,15 +152,13 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 await cls._terminate_sandbox(sandbox)
 
             except Exception as e:
-                if not interrupted:
-                    # Normal case: log warnings so user knows what failed
-                    sandbox_id = cls._get_sandbox_id(sandbox)
-                    logger.warning(
-                        f"Error terminating Modal sandbox {sandbox_id} for task '{task_name}': {e}. "
-                        "Will retry in task_cleanup."
-                    )
-                # When interrupted: silently ignore to avoid terminal issues
-                # task_cleanup will handle it properly
+                sandbox_id = cls._get_sandbox_id(sandbox)
+                trace_message(
+                    logger,
+                    "modal",
+                    f"Error terminating Modal sandbox {sandbox_id} for task '{task_name}': {e}. "
+                    "Will retry in task_cleanup.",
+                )
 
     @override
     @classmethod
@@ -172,7 +178,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             try:
                 sandbox = await modal.Sandbox.from_id.aio(sandbox_id)
                 await cls._terminate_sandbox(sandbox)
-                logger.debug(f"Terminated sandbox {sandbox_id}")
+                trace_message(logger, "modal", f"Terminated sandbox {sandbox_id}")
 
             except Exception as e:
                 failed_ids.append(sandbox_id)
@@ -200,7 +206,9 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 sys.exit(1)
         else:
             # Bulk cleanup
-            sandboxes = [sb async for sb in modal.Sandbox.list.aio()]
+            sandboxes = [
+                sb async for sb in modal.Sandbox.list.aio(tags=INSPECT_SANDBOX_TAG)
+            ]
 
             if not sandboxes:
                 print("No Modal sandboxes found to clean up.")
@@ -263,25 +271,19 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         concurrency: bool = True,
     ) -> ExecResult[str]:
         if user is not None:
-            warnings.warn(
+            warn_once(
+                logger,
                 "The 'user' parameter is ignored in ModalSandboxEnvironment. "
                 "Commands will run as the container's default user.",
-                stacklevel=2,
-            )
-
-        if concurrency is False:
-            warnings.warn(
-                "The 'concurrency' parameter is not supported by ModalSandboxEnvironment.",
-                stacklevel=2,
             )
 
         # Modal requires absolute paths for workdir
         workdir = cwd
         if workdir is not None and not PurePosixPath(workdir).is_absolute():
-            warnings.warn(
+            warn_once(
+                logger,
                 f"Relative path '{workdir}' for cwd parameter was converted to absolute path '/{workdir}' "
                 "(relative to filesystem root). For clarity, consider using absolute paths.",
-                stacklevel=2,
             )
             workdir = f"/{workdir}"
 
@@ -298,11 +300,17 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 try:
                     data = input.encode("utf-8") if isinstance(input, str) else input
                     process.stdin.write(data)
-                    process.stdin.write_eof()
-                    await process.stdin.drain.aio()
                 except modal.exception.InternalError as e:
                     logger.warning(f"Modal InternalError while writing stdin: {e}.")
                     raise
+                finally:
+                    # No kill() on Modal's ContainerProcess
+                    # Close stdin to unblock the process
+                    try:
+                        process.stdin.write_eof()
+                        await process.stdin.drain.aio()
+                    except Exception:
+                        pass
 
             try:
                 stdout = await process.stdout.read.aio()
@@ -325,17 +333,14 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 stderr=stderr,
             )
 
-        # Determine if we should use retry for timeouts
-        # Per Inspect AI docs: "No more than 2 retries should be attempted and both
-        # with timeouts less than 60 seconds"
-        # See: https://inspect.aisi.org.uk/sandboxing.html
+        # Only retry short timeouts: https://inspect.aisi.org.uk/sandboxing.html
         use_retry = timeout_retry and timeout is not None and timeout < 60
 
         try:
             result: ExecResult[str] | None = None
             if use_retry:
                 async for attempt in AsyncRetrying(
-                    stop=stop_after_attempt(2),
+                    stop=stop_after_attempt(3),
                     wait=wait_exponential(multiplier=1, min=1, max=10),
                     retry=retry_if_exception_type(
                         (asyncio.TimeoutError, modal.exception.InternalError)
@@ -350,7 +355,6 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             else:
                 result = await _run()
 
-            verify_exec_result_size(result)
             return result
 
         except asyncio.TimeoutError as e:
@@ -358,13 +362,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
-        """Write contents to a file in the sandbox.
-
-        Parent directories are automatically created if they don't exist.
-
-        Args:
-            file: Path to the file to write.
-            contents: Data to write (str for text, bytes for binary).
+        """Creates parent directories automatically if they don't exist.
 
         Raises:
             IsADirectoryError: File path already exists as a directory.
@@ -374,7 +372,6 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             try:
                 await self.sandbox.mkdir.aio(parent, parents=True)
             except FileExistsError:
-                # Directory already exists, this is fine
                 pass
 
         try:
@@ -390,14 +387,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:
-        """Read file contents.
-
-        Args:
-            file: Path to the file to read.
-            text: If True, return str; if False, return bytes (default: True).
-
-        Returns:
-            File contents as str (if text=True) or bytes (if text=False).
+        """Read file from sandbox.
 
         Raises:
             FileNotFoundError: File does not exist.
@@ -445,17 +435,14 @@ class ModalSandboxEnvironment(SandboxEnvironment):
     @_standard_retry
     async def _terminate_sandbox(sandbox: modal.Sandbox) -> None:
         await sandbox.terminate.aio()
+        # Verify the sandbox stopped — poll() returns None if still running
+        if await sandbox.poll.aio() is None:
+            raise RuntimeError(
+                f"Sandbox {sandbox.object_id} still running after terminate()"
+            )
 
     @staticmethod
     def _get_sandbox_id(sandbox: modal.Sandbox | None) -> str:
-        """Get sandbox ID for sandbox object.
-
-        Args:
-            sandbox: Sandbox object or None.
-
-        Returns:
-            Sandbox ID or "unknown" if unavailable.
-        """
         if sandbox is None:
             return "unknown"
         return getattr(sandbox, "object_id", "unknown")
@@ -478,18 +465,6 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             return False
 
     async def _get_file_size(self, file: str) -> int:
-        """Get file size in bytes.
-
-        Args:
-            file: Path to the file.
-
-        Returns:
-            File size in bytes.
-
-        Raises:
-            FileNotFoundError: If file does not exist.
-            RuntimeError: If stat command fails for other reasons or output cannot be parsed.
-        """
         process = await self.sandbox.exec.aio("stat", "-c", "%s", file)
         stdout = await process.stdout.read.aio()
         await process.wait.aio()
@@ -508,15 +483,6 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             raise RuntimeError(f"Failed to parse file size for {file}") from e
 
     async def _verify_read_file_size(self, file: str) -> None:
-        """Verify the size of a file to be read into memory.
-
-        Args:
-            file: Path to the file.
-
-        Raises:
-            IsADirectoryError: If the path is a directory.
-            OutputLimitExceededError: If the file size exceeds the 100 MiB limit.
-        """
         if await self._is_directory(file):
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
 
@@ -524,6 +490,5 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         if file_size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
             raise OutputLimitExceededError(
                 limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
-                # The potentially large, and potentially binary content is not included.
                 truncated_output=None,
             )

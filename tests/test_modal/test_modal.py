@@ -11,10 +11,10 @@ from inspect_ai.util import (
     ComposeConfig,
     ComposeService,
     ExecResult,
+    OutputLimitExceededError,
     SandboxEnvironment,
     SandboxEnvironmentLimits,
 )
-from inspect_ai.util._sandbox.limits import OutputLimitExceededError
 from inspect_ai.util._sandbox.self_check import self_check
 from inspect_sandboxes.modal._modal import (
     ModalSandboxEnvironment,
@@ -59,6 +59,8 @@ def mock_modal_sandbox() -> MagicMock:
     sandbox.mkdir.aio = AsyncMock()
     sandbox.terminate = MagicMock()
     sandbox.terminate.aio = AsyncMock()
+    sandbox.set_tags = MagicMock()
+    sandbox.set_tags.aio = AsyncMock()
 
     return sandbox
 
@@ -126,9 +128,8 @@ async def test_full_lifecycle(
 async def test_sample_cleanup(
     interrupted: bool,
     mock_modal_sandbox: MagicMock,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Test sample_cleanup with interrupted=True/False."""
+    """Test sample_cleanup behaviour: skips terminate when interrupted, attempts it otherwise."""
     env = ModalSandboxEnvironment(mock_modal_sandbox)
 
     with patch.object(
@@ -136,18 +137,15 @@ async def test_sample_cleanup(
         "_terminate_sandbox",
         new_callable=AsyncMock,
         side_effect=Exception("Termination failed"),
-    ):
+    ) as mock_terminate:
         await ModalSandboxEnvironment.sample_cleanup(
             "test_task", None, {"default": env}, interrupted
         )
 
         if interrupted:
-            # Should silently ignore errors when interrupted
-            assert "Error terminating" not in caplog.text
+            mock_terminate.assert_not_called()
         else:
-            # Should log warnings when not interrupted
-            assert "Error terminating" in caplog.text
-            assert "Will retry in task_cleanup" in caplog.text
+            mock_terminate.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -333,27 +331,48 @@ async def test_exec_variations(
     assert result.returncode == returncode
 
 
-@pytest.mark.parametrize(
-    ("param_name", "param_value", "expected_warning"),
-    [
-        ("user", "root", "user' parameter is ignored"),
-        ("concurrency", False, "concurrency' parameter is not supported"),
-        ("cwd", "relative/path", "Relative path"),
-    ],
-)
 @pytest.mark.asyncio
-async def test_exec_warnings(
-    param_name: str,
-    param_value: Any,
-    expected_warning: str,
+async def test_exec_user_param_ignored(sandbox_env: ModalSandboxEnvironment) -> None:
+    """Test that exec runs successfully when user parameter is provided (it is ignored)."""
+    result = await sandbox_env.exec(["echo", "test"], user="root")
+    assert isinstance(result, ExecResult)
+
+
+@pytest.mark.asyncio
+async def test_exec_concurrency_param_ignored(
     sandbox_env: ModalSandboxEnvironment,
 ) -> None:
-    """Test that exec issues warnings for unsupported parameters."""
-    kwargs: dict[str, Any] = {"cmd": ["echo", "test"]}
-    kwargs[param_name] = param_value
+    """Test that exec runs successfully when concurrency=False (it is silently ignored)."""
+    result = await sandbox_env.exec(["echo", "test"], concurrency=False)
+    assert isinstance(result, ExecResult)
 
-    with pytest.warns(UserWarning, match=expected_warning):
-        await sandbox_env.exec(**kwargs)
+
+@pytest.mark.asyncio
+async def test_exec_relative_cwd_converted_to_absolute(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Test that a relative cwd is prefixed with / before being passed to Modal."""
+    captured_workdir: list[str | None] = []
+
+    async def capturing_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        captured_workdir.append(kwargs.get("workdir"))
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout = MagicMock()
+        process.stdout.read = AsyncMock(return_value="")
+        process.stderr = MagicMock()
+        process.stderr.read = AsyncMock(return_value="")
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.write_eof = MagicMock()
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = capturing_exec
+    await sandbox_env.exec(["echo", "test"], cwd="relative/path")
+    assert captured_workdir == ["/relative/path"]
 
 
 @pytest.mark.asyncio
@@ -522,7 +541,7 @@ async def test_cli_cleanup_bulk_with_sandboxes(
         mock_sb.object_id = sid
         mock_sandboxes.append(mock_sb)
 
-    async def mock_list_generator() -> AsyncGenerator[MagicMock, None]:
+    async def mock_list_generator(**kwargs: Any) -> AsyncGenerator[MagicMock, None]:
         for sb in mock_sandboxes:
             yield sb
 
@@ -572,10 +591,9 @@ async def test_cli_cleanup_bulk_no_sandboxes(
 ) -> None:
     """Test CLI bulk cleanup with no sandboxes."""
 
-    async def mock_list_generator():
-        # Create an async generator that yields nothing
+    async def mock_list_generator(**kwargs: Any) -> AsyncGenerator[MagicMock, None]:
         for _ in []:
-            yield
+            yield MagicMock()
 
     with patch("modal.Sandbox.list") as mock_list:
         mock_list.aio = mock_list_generator

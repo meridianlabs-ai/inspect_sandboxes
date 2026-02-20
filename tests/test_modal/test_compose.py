@@ -177,26 +177,26 @@ def test_service_to_gpu(
     [
         # No extensions
         ({}, {}),
-        # Empty x-inspect_modal_sandbox
-        ({"x-inspect_modal_sandbox": {}}, {}),
+        # Empty x-modal
+        ({"x-modal": {}}, {}),
         # Single extension
-        ({"x-inspect_modal_sandbox": {"timeout": 300}}, {"timeout": 300}),
+        ({"x-modal": {"timeout": 300}}, {"timeout": 300}),
         # Multiple extensions
         (
-            {"x-inspect_modal_sandbox": {"timeout": 300, "cloud": "aws"}},
+            {"x-modal": {"timeout": 300, "cloud": "aws"}},
             {"timeout": 300, "cloud": "aws"},
         ),
         # Extension with None (should not be applied)
-        ({"x-inspect_modal_sandbox": {"timeout": None}}, {}),
+        ({"x-modal": {"timeout": None}}, {}),
         # Mix of None and valid
         (
-            {"x-inspect_modal_sandbox": {"timeout": 300, "cloud": None}},
+            {"x-modal": {"timeout": 300, "cloud": None}},
             {"timeout": 300},
         ),
         # All supported extensions
         (
             {
-                "x-inspect_modal_sandbox": {
+                "x-modal": {
                     "block_network": True,
                     "cidr_allowlist": ["10.0.0.0/8"],
                     "timeout": 300,
@@ -541,7 +541,7 @@ def test_convert_compose_with_extensions() -> None:
     service = ComposeService(image="python:3.12")
     config = ComposeConfig(
         services={"default": service},
-        **{"x-inspect_modal_sandbox": {"timeout": 300, "cloud": "aws"}},
+        **{"x-modal": {"timeout": 300, "cloud": "aws"}},
     )
 
     with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:

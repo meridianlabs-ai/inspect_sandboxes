@@ -13,11 +13,8 @@ def convert_compose_to_modal_params(
 
     Args:
         config: Parsed compose configuration.
-        compose_path: Path to the compose file (for resolving relative paths).
-            None if config is a ComposeConfig object without an associated file.
-
-    Returns:
-        Dictionary of parameters for Modal Sandbox.create().
+        compose_path: Path to the compose file for resolving relative paths.
+            Pass None when using a ComposeConfig object directly.
     """
     # Select service (prefer x-default, then "default", then first)
     service = next((svc for svc in config.services.values() if svc.x_default), None)
@@ -87,21 +84,21 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
         params: Parameters dict to modify.
         extensions: Extensions dict from compose config.
     """
-    modal_extensions = extensions.get("x-inspect_modal_sandbox", {})
+    modal_extensions = extensions.get("x-modal", {})
 
     extension_keys = [
-        "gpu",
         "block_network",
         "cidr_allowlist",
-        "timeout",
         "cloud",
-        "region",
+        "custom_domain",
+        "encrypted_ports",
+        "gpu",
+        "h2_ports",
         "idle_timeout",
         "pty",
-        "encrypted_ports",
-        "h2_ports",
+        "region",
+        "timeout",
         "unencrypted_ports",
-        "custom_domain",
         "verbose",
     ]
 
@@ -112,9 +109,6 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
 
 def _service_to_cpu(service: ComposeService) -> float | tuple[float, float] | None:
     """Extract CPU configuration from compose service.
-
-    Args:
-        service: Compose service configuration.
 
     Returns:
         CPU specification for Modal, or None if no CPU config.
@@ -153,9 +147,6 @@ def _service_to_cpu(service: ComposeService) -> float | tuple[float, float] | No
 
 def _service_to_memory(service: ComposeService) -> int | tuple[int, int] | None:
     """Extract memory configuration from compose service.
-
-    Args:
-        service: Compose service configuration.
 
     Returns:
         Memory specification in MiB for Modal, or None if no memory config.
@@ -208,9 +199,6 @@ def _service_to_memory(service: ComposeService) -> int | tuple[int, int] | None:
 def _service_to_gpu(service: ComposeService) -> str | None:
     """Extract GPU configuration from compose service.
 
-    Args:
-        service: Compose service configuration.
-
     Returns:
         GPU specification string for Modal, or None if no GPU requested.
         - "ANY:<count>": Any GPU with specified count (e.g., "ANY:2")
@@ -218,8 +206,8 @@ def _service_to_gpu(service: ComposeService) -> str | None:
 
     Note:
         Compose GPU config doesn't specify GPU types (A10G, T4, etc.), so we
-        default to "ANY". Use x-inspect_modal_sandbox.gpu extension to specify
-        a particular GPU type, which will override this value.
+        default to "ANY". Use x-modal.gpu extension to specify a particular GPU
+        type, which will override this value.
     """
     if not service.deploy or not service.deploy.resources:
         return None
@@ -247,15 +235,6 @@ def _service_to_gpu(service: ComposeService) -> str | None:
 
 
 def _resolve_dockerfile_path(build: str | ComposeBuild, compose_dir: Path) -> Path:
-    """Resolve Dockerfile path from build configuration.
-
-    Args:
-        build: Build configuration (string or ComposeBuild object).
-        compose_dir: Directory containing the compose file.
-
-    Returns:
-        Path to the Dockerfile.
-    """
     if isinstance(build, str):
         return compose_dir / build / "Dockerfile"
     else:
@@ -290,13 +269,7 @@ def _parse_environment(
 def _convert_byte_value(mem_limit: str) -> int:
     """Convert memory limit string to MiB.
 
-    Supports formats like: "512m", "1g", "1.5gb", "1024k"
-
-    Args:
-        mem_limit: Memory limit string (e.g., "512m", "1g").
-
-    Returns:
-        Memory in MiB (mebibytes).
+    Supports formats: "512m", "1g", "1.5gb", "1024k"
     """
     mem_limit = mem_limit.lower().strip()
     match = re.match(r"^(\d+(?:\.\d+)?)\s*([kmgt]?)b?$", mem_limit)
