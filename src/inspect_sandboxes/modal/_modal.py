@@ -333,12 +333,12 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 stderr=stderr,
             )
 
-        # Only retry short timeouts: https://inspect.aisi.org.uk/sandboxing.html
-        use_retry = timeout_retry and timeout is not None and timeout < 60
+        use_retry = timeout_retry and timeout is not None
 
         try:
             result: ExecResult[str] | None = None
             if use_retry:
+                assert timeout is not None  # narrowing for type checker; guaranteed by use_retry
                 async for attempt in AsyncRetrying(
                     stop=stop_after_attempt(3),
                     wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -348,7 +348,8 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                     reraise=True,
                 ):
                     with attempt:
-                        result = await asyncio.wait_for(_run(), timeout=timeout)
+                        # Cap per-attempt timeout at 60s: https://inspect.aisi.org.uk/sandboxing.html
+                        result = await asyncio.wait_for(_run(), timeout=min(timeout, 60))
                 assert result is not None  # Should always be set after successful retry
             elif timeout:
                 result = await asyncio.wait_for(_run(), timeout=timeout)
