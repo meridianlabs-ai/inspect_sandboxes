@@ -7,7 +7,6 @@ Serverless container sandbox for [Inspect AI](https://inspect.ai-safety-institut
 Create a Modal account and authenticate:
 
 ```bash
-pip install modal
 python3 -m modal setup
 ```
 

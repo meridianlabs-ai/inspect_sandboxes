@@ -11,9 +11,6 @@ from typing import Any, Literal, cast, overload
 
 import modal
 import modal.exception
-from inspect_ai._util.logger import (
-    warn_once,  # noqa: PLC2701 TODO: switch to public import once released on PyPI
-)
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
@@ -26,14 +23,13 @@ from inspect_ai.util import (
     parse_compose_yaml,
     sandboxenv,
     trace_message,
+    warn_once,
 )
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
 from tenacity import (
-    AsyncRetrying,
     retry,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -333,37 +329,28 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 stderr=stderr,
             )
 
-        use_retry = timeout_retry and timeout is not None
+        # On timeout, retry with a capped timeout: first retry ≤60s, second ≤30s.
+        if timeout_retry:
+            t1 = min(timeout, 60) if timeout is not None else 60
+            t2 = min(timeout, 30) if timeout is not None else 30
+            attempt_timeouts: list[int | None] = [timeout, t1, t2]
+        else:
+            attempt_timeouts = [timeout]
 
-        try:
-            result: ExecResult[str] | None = None
-            if use_retry:
-                assert (
-                    timeout is not None
-                )  # narrowing for type checker; guaranteed by use_retry
-                async for attempt in AsyncRetrying(
-                    stop=stop_after_attempt(3),
-                    wait=wait_exponential(multiplier=1, min=1, max=10),
-                    retry=retry_if_exception_type(
-                        (asyncio.TimeoutError, modal.exception.InternalError)
-                    ),
-                    reraise=True,
-                ):
-                    with attempt:
-                        # Cap per-attempt timeout at 60s: https://inspect.aisi.org.uk/sandboxing.html
-                        result = await asyncio.wait_for(
-                            _run(), timeout=min(timeout, 60)
-                        )
-                assert result is not None  # Should always be set after successful retry
-            elif timeout:
-                result = await asyncio.wait_for(_run(), timeout=timeout)
-            else:
-                result = await _run()
+        last_timeout_exc: asyncio.TimeoutError | None = None
+        for t in attempt_timeouts:
+            try:
+                if t is not None:
+                    return await asyncio.wait_for(_run(), timeout=t)
+                else:
+                    return await _run()
+            except asyncio.TimeoutError as e:
+                last_timeout_exc = e
 
-            return result
-
-        except asyncio.TimeoutError as e:
-            raise TimeoutError(f"Command timed out after {timeout} seconds") from e
+        assert last_timeout_exc is not None
+        raise TimeoutError(
+            f"Command timed out after {timeout} seconds"
+        ) from last_timeout_exc
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
@@ -374,10 +361,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         """
         parent = str(PurePosixPath(file).parent)
         if parent and parent not in ("/", "."):
-            try:
-                await self.sandbox.mkdir.aio(parent, parents=True)
-            except FileExistsError:
-                pass
+            await self._create_parent_folder(parent)
 
         try:
             await self._write_file_content(file, contents)
@@ -461,13 +445,17 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             async with await self.sandbox.open.aio(file, "wb") as f:
                 await f.write.aio(contents)
 
-    async def _is_directory(self, file: str) -> bool:
+    @_standard_retry
+    async def _create_parent_folder(self, path: str) -> None:
         try:
-            process = await self.sandbox.exec.aio("test", "-d", file)
-            await process.wait.aio()
-            return process.returncode == 0
-        except Exception:
-            return False
+            await self.sandbox.mkdir.aio(path, parents=True)
+        except FileExistsError:
+            pass
+
+    async def _is_directory(self, file: str) -> bool:
+        process = await self.sandbox.exec.aio("test", "-d", file)
+        await process.wait.aio()
+        return process.returncode == 0
 
     async def _get_file_size(self, file: str) -> int:
         process = await self.sandbox.exec.aio("stat", "-c", "%s", file)
