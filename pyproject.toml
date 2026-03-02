@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "inspect_sandboxes"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Collection of sandboxes for Inspect AI"
 authors = [{ name = "Meridian Labs" }]
 readme = "README.md"
@@ -43,6 +43,15 @@ dev = [
     "ruff",
     "types-PyYAML",
 ]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/inspect_sandboxes/_version.py"
+
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version"
 
 [tool.hatch.build]
 only-packages = true
