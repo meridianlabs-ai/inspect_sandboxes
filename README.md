@@ -6,6 +6,7 @@ Collection of sandbox environments for [Inspect AI](https://inspect.ai-safety-in
 
 | Provider | Registry Name | Description | Requirements |
 |----------|---------------|-------------|--------------|
+| [Daytona](https://www.daytona.io) | `daytona` | Cloud development environment sandbox | Daytona account + API key |
 | [Modal](https://modal.com) | `modal` | Serverless container platform with GPU support | Modal account (free tier available) |
 
 ## Installation
@@ -20,6 +21,7 @@ uv pip install git+https://github.com/meridianlabs-ai/inspect_sandboxes.git
 
 ## Provider Documentation
 
+- [Daytona](src/inspect_sandboxes/daytona/README.md)
 - [Modal](src/inspect_sandboxes/modal/README.md)
 
 ## Development
