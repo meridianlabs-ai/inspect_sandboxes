@@ -6,111 +6,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from inspect_ai.util import (
-    ComposeBuild,
     ComposeConfig,
     ComposeService,
     parse_compose_yaml,
 )
 from inspect_sandboxes.modal._compose import (
     _apply_modal_extensions,
-    _convert_byte_value,
-    _parse_environment,
-    _resolve_dockerfile_path,
     _service_to_gpu,
     convert_compose_to_modal_params,
 )
-
-
-@pytest.mark.parametrize(
-    ("input_str", "expected"),
-    [
-        ("512m", 512),
-        ("1g", 1024),
-        ("2048k", 2),
-        ("1t", 1048576),
-        ("512mb", 512),
-        ("1.5g", 1536),
-        ("512M", 512),  # case insensitive
-        ("1G", 1024),
-        ("512", 512),  # no unit defaults to MiB
-        ("0.5g", 512),
-    ],
-)
-def test_convert_byte_value_valid(input_str: str, expected: int) -> None:
-    """Test valid memory string conversions."""
-    assert _convert_byte_value(input_str) == expected
-
-
-@pytest.mark.parametrize(
-    "input_str",
-    [
-        "abc",
-        "512x",
-        "m512",
-        "0m",
-        "-512m",
-        "",
-        "  ",
-    ],
-)
-def test_convert_byte_value_raises(input_str: str) -> None:
-    """Test that invalid inputs raise ValueError."""
-    with pytest.raises(ValueError):
-        _convert_byte_value(input_str)
-
-
-@pytest.mark.parametrize(
-    ("environment", "expected"),
-    [
-        # List format
-        (["KEY=VALUE", "FOO=BAR"], {"KEY": "VALUE", "FOO": "BAR"}),
-        (["KEY=value=with=equals"], {"KEY": "value=with=equals"}),
-        ([], {}),
-        # Dict format
-        ({"KEY": "VALUE"}, {"KEY": "VALUE"}),
-        ({"KEY": "VALUE", "FOO": "BAR"}, {"KEY": "VALUE", "FOO": "BAR"}),
-        # Dict with None values (should be excluded)
-        ({"KEY": "VALUE", "SKIP": None}, {"KEY": "VALUE"}),
-        ({}, {}),
-    ],
-)
-def test_parse_environment(
-    environment: list[str] | dict[str, str | None],
-    expected: dict[str, str],
-) -> None:
-    """Test environment variable parsing from list and dict formats."""
-    assert _parse_environment(environment) == expected
-
-
-@pytest.mark.parametrize(
-    ("build", "expected_relative"),
-    [
-        # String build
-        ("myapp", "myapp/Dockerfile"),
-        # ComposeBuild with defaults
-        (ComposeBuild(context=None, dockerfile=None), "./Dockerfile"),
-        # ComposeBuild with custom context
-        (ComposeBuild(context="app", dockerfile=None), "app/Dockerfile"),
-        # ComposeBuild with custom dockerfile
-        (
-            ComposeBuild(context=None, dockerfile="Custom.dockerfile"),
-            "./Custom.dockerfile",
-        ),
-        # ComposeBuild with both custom
-        (
-            ComposeBuild(context="app", dockerfile="Custom.dockerfile"),
-            "app/Custom.dockerfile",
-        ),
-    ],
-)
-def test_resolve_dockerfile_path(
-    build: str | ComposeBuild,
-    expected_relative: str,
-) -> None:
-    """Test Dockerfile path resolution for various build configurations."""
-    compose_dir = Path("/tmp/compose")
-    expected = compose_dir / expected_relative
-    assert _resolve_dockerfile_path(build, compose_dir) == expected
 
 
 @pytest.mark.parametrize(
@@ -492,7 +396,7 @@ def test_convert_compose_with_build() -> None:
 
         # Mock the dockerfile path
         with patch(
-            "inspect_sandboxes.modal._compose._resolve_dockerfile_path"
+            "inspect_sandboxes.modal._compose.resolve_dockerfile_path"
         ) as mock_resolve:
             mock_dockerfile_path = MagicMock(spec=Path)
             mock_dockerfile_path.exists.return_value = True
@@ -511,7 +415,7 @@ def test_convert_compose_missing_dockerfile() -> None:
     with (
         patch("inspect_sandboxes.modal._compose.Path") as mock_path,
         patch(
-            "inspect_sandboxes.modal._compose._resolve_dockerfile_path"
+            "inspect_sandboxes.modal._compose.resolve_dockerfile_path"
         ) as mock_resolve,
     ):
         mock_path_instance = MagicMock()

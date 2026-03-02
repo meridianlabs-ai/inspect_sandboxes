@@ -1,9 +1,14 @@
-import re
 from pathlib import Path
 from typing import Any
 
 import modal
-from inspect_ai.util import ComposeBuild, ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService
+
+from inspect_sandboxes._util.compose import (
+    parse_environment,
+    parse_memory,
+    resolve_dockerfile_path,
+)
 
 
 def convert_compose_to_modal_params(
@@ -25,7 +30,7 @@ def convert_compose_to_modal_params(
     compose_dir = Path(compose_path).parent if compose_path else Path.cwd()
 
     if service.build:
-        dockerfile_path = _resolve_dockerfile_path(service.build, compose_dir)
+        dockerfile_path = resolve_dockerfile_path(service.build, compose_dir)
         if not dockerfile_path.exists():
             raise FileNotFoundError(f"Dockerfile not found: {dockerfile_path}")
         params["image"] = modal.Image.from_dockerfile(str(dockerfile_path))
@@ -36,7 +41,7 @@ def convert_compose_to_modal_params(
         params["workdir"] = service.working_dir
 
     if service.environment:
-        params["env"] = _parse_environment(service.environment)
+        params["env"] = parse_environment(service.environment)
 
     memory = _service_to_memory(service)
     if memory is not None:
@@ -165,7 +170,7 @@ def _service_to_memory(service: ComposeService) -> int | tuple[int, int] | None:
 
         if resources.reservations and resources.reservations.memory:
             try:
-                mem_reservation = _convert_byte_value(resources.reservations.memory)
+                mem_reservation = parse_memory(resources.reservations.memory)
             except ValueError as e:
                 raise ValueError(
                     f"Invalid memory reservation in deploy.resources: {e}"
@@ -173,7 +178,7 @@ def _service_to_memory(service: ComposeService) -> int | tuple[int, int] | None:
 
         if resources.limits and resources.limits.memory:
             try:
-                mem_limit = _convert_byte_value(resources.limits.memory)
+                mem_limit = parse_memory(resources.limits.memory)
             except ValueError as e:
                 raise ValueError(
                     f"Invalid memory limit in deploy.resources: {e}"
@@ -182,7 +187,7 @@ def _service_to_memory(service: ComposeService) -> int | tuple[int, int] | None:
     # Fall back to service-level field (v2 format)
     if mem_limit is None and service.mem_limit:
         try:
-            mem_limit = _convert_byte_value(service.mem_limit)
+            mem_limit = parse_memory(service.mem_limit)
         except ValueError as e:
             raise ValueError(f"Invalid mem_limit in service: {e}") from e
 
@@ -232,63 +237,3 @@ def _service_to_gpu(service: ComposeService) -> str | None:
         # Convert to count based on number of device IDs specified
         return f"ANY:{len(gpu_device.device_ids)}"
     return "ANY"
-
-
-def _resolve_dockerfile_path(build: str | ComposeBuild, compose_dir: Path) -> Path:
-    if isinstance(build, str):
-        return compose_dir / build / "Dockerfile"
-    else:
-        context = build.context or "."
-        dockerfile = build.dockerfile or "Dockerfile"
-        return compose_dir / context / dockerfile
-
-
-def _parse_environment(
-    environment: list[str] | dict[str, str | None],
-) -> dict[str, str]:
-    """Parse environment variables from list or dict format.
-
-    Args:
-        environment: Environment variables as list of "KEY=VALUE" strings
-            or dict mapping keys to values.
-
-    Returns:
-        Dictionary of environment variables (excluding None values).
-    """
-    if isinstance(environment, list):
-        env_dict = {}
-        for item in environment:
-            if "=" in item:
-                key, value = item.split("=", 1)
-                env_dict[key] = value
-        return env_dict
-    else:
-        return {k: v for k, v in environment.items() if v is not None}
-
-
-def _convert_byte_value(mem_limit: str) -> int:
-    """Convert memory limit string to MiB.
-
-    Supports formats: "512m", "1g", "1.5gb", "1024k"
-    """
-    mem_limit = mem_limit.lower().strip()
-    match = re.match(r"^(\d+(?:\.\d+)?)\s*([kmgt]?)b?$", mem_limit)
-
-    if not match:
-        raise ValueError(
-            f"Invalid memory format: '{mem_limit}'. "
-            "Expected format: <number>[k|m|g|t][b] (e.g., '512m', '1g', '1.5gb')"
-        )
-
-    value = float(match.group(1))
-    unit = match.group(2)
-
-    # Convert to MiB (Modal's expected unit)
-    # k=kibibytes, m=mebibytes, g=gibibytes, t=tebibytes
-    multipliers = {"": 1, "k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 * 1024}
-    result = int(value * multipliers[unit])
-
-    if result <= 0:
-        raise ValueError(f"Memory limit must be positive, got: {mem_limit}")
-
-    return result
