@@ -40,6 +40,11 @@ def convert_compose_to_modal_params(
     elif service.image:
         params["image"] = modal.Image.from_registry(service.image)
 
+    if service.command:
+        import shlex
+        cmd = service.command if isinstance(service.command, list) else shlex.split(service.command)
+        params["_command"] = cmd
+
     if service.working_dir:
         params["workdir"] = service.working_dir
 

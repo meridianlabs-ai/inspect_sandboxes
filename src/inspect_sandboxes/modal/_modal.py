@@ -422,7 +422,9 @@ class ModalSandboxEnvironment(SandboxEnvironment):
     @staticmethod
     @_standard_retry
     async def _create_sandbox(sandbox_params: dict[str, Any]) -> modal.Sandbox:
-        return await modal.Sandbox.create.aio(**sandbox_params)
+        params = {k: v for k, v in sandbox_params.items() if k != "_command"}
+        command = sandbox_params.get("_command", [])
+        return await modal.Sandbox.create.aio(*command, **params)
 
     @staticmethod
     @_standard_retry
