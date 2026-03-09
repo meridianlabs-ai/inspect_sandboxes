@@ -30,6 +30,7 @@ from rich.prompt import Confirm
 from rich.table import Table
 from tenacity import (
     retry,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -53,10 +54,12 @@ def running_sandboxes() -> list[str]:
     return _running_sandboxes.get()
 
 
-# Retry decorator for file I/O and sandbox lifecycle ops
+# Retry decorator for file I/O and sandbox lifecycle ops.
+# RemoteError indicates permanent server-side failures (e.g. image build errors).
 _standard_retry = retry(
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_not_exception_type(modal.exception.RemoteError),
     reraise=True,
 )
 
@@ -86,6 +89,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
+        modal.enable_output()
         sandbox_cleanup_startup()
 
     @override
