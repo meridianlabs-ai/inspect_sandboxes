@@ -321,6 +321,40 @@ def test_convert_compose_labels_from_extension() -> None:
     assert sandbox_params.get("labels") == {"team": "ml", "project": "evals"}
 
 
+def test_network_mode_none_sets_block_all() -> None:
+    """Test that network_mode='none' translates to network_block_all=True."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12", network_mode="none")}
+    )
+
+    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+
+    assert sandbox_params.get("network_block_all") is True
+
+
+def test_network_mode_bridge_allows_network() -> None:
+    """Test that network_mode='bridge' translates to network_block_all=False."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12", network_mode="bridge")}
+    )
+
+    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+
+    assert sandbox_params.get("network_block_all") is False
+
+
+def test_x_daytona_overrides_network_mode() -> None:
+    """Test that x-daytona network_block_all overrides service network_mode."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12", network_mode="none")},
+        **{"x-daytona": {"network_block_all": False}},
+    )
+
+    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+
+    assert sandbox_params.get("network_block_all") is False
+
+
 def test_convert_compose_missing_image_and_build() -> None:
     """Test ValueError when service has neither image nor build."""
     config = ComposeConfig(

@@ -88,5 +88,5 @@ task = Task(
 ## Notes
 
 - **stderr**: The Daytona API returns a single combined output; `stderr` is always empty and all output appears in `stdout`.
-- **stdin**: The `input` parameter to `exec()` is not supported and will be ignored with a warning.
+- **stdin**: The `input` parameter to `exec()` is supported by uploading a temp file and piping it into the command.
 - **user**: The `user` parameter to `exec()` is not supported; use `os_user` in `x-daytona` to set the OS user.

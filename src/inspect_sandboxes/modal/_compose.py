@@ -1,3 +1,5 @@
+import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +13,22 @@ from inspect_sandboxes._util.compose import (
 )
 
 
+@dataclass
+class ModalSandboxParams:
+    """Parameters for modal.Sandbox.create().
+
+    Attributes:
+        command: Positional command args passed before **kwargs to Sandbox.create().
+        kwargs: Keyword arguments passed to Sandbox.create().
+    """
+
+    command: list[str] = field(default_factory=list)
+    kwargs: dict[str, Any] = field(default_factory=dict)
+
+
 def convert_compose_to_modal_params(
     config: ComposeConfig, compose_path: str | None
-) -> dict[str, Any]:
+) -> ModalSandboxParams:
     """Convert a ComposeConfig to Modal Sandbox.create() parameters.
 
     Args:
@@ -27,6 +42,7 @@ def convert_compose_to_modal_params(
         service = config.services.get("default") or next(iter(config.services.values()))
 
     params: dict[str, Any] = {}
+    command: list[str] = []
     compose_dir = Path(compose_path).parent if compose_path else Path.cwd()
 
     if service.build:
@@ -39,6 +55,13 @@ def convert_compose_to_modal_params(
         )
     elif service.image:
         params["image"] = modal.Image.from_registry(service.image)
+
+    if service.command:
+        command = (
+            service.command
+            if isinstance(service.command, list)
+            else shlex.split(service.command)
+        )
 
     if service.working_dir:
         params["workdir"] = service.working_dir
@@ -58,9 +81,14 @@ def convert_compose_to_modal_params(
     if gpu is not None:
         params["gpu"] = gpu
 
+    # Translate Docker network_mode to Modal block_network.
+    # Only set as a default; x-modal extensions can override below.
+    if service.network_mode is not None:
+        params["block_network"] = service.network_mode == "none"
+
     _apply_modal_extensions(params, config.extensions)
 
-    return params
+    return ModalSandboxParams(command=command, kwargs=params)
 
 
 def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) -> None:
