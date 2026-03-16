@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.1.0...v0.1.1) (2026-03-16)
+
+
+### Bug Fixes
+
+* improve Modal command passing, Daytona stdin support, and network_mode translation ([#7](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/7)) ([15cbe15](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/15cbe1508c11d61a881341e997b4699999cadb72))
+* pass build context to Modal image builds and skip retry on RemoteError ([1f190b3](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/1f190b33a2309cfe172fa719f7dd9d4d3087dbaf))
+
 ## 0.1.0 (2026-03-02)
 
 
