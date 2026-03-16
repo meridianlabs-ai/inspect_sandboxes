@@ -102,24 +102,27 @@ class ModalSandboxEnvironment(SandboxEnvironment):
     ) -> dict[str, SandboxEnvironment]:
         app = await cls._lookup_app(MODAL_APP_NAME)
 
-        sandbox_params: dict[str, Any] = {
+        sandbox_kwargs: dict[str, Any] = {
             "app": app,
             "timeout": 60 * 60 * 24,
         }
+        command: list[str] = []
 
         if config is None:
             trace_message(
                 logger, "modal", f"Using default Modal image for task '{task_name}'"
             )
         elif is_dockerfile(config):
-            sandbox_params["image"] = modal.Image.from_dockerfile(config)
+            sandbox_kwargs["image"] = modal.Image.from_dockerfile(config)
         elif is_compose_yaml(config):
             compose_config = parse_compose_yaml(config, multiple_services=False)
             modal_params = convert_compose_to_modal_params(compose_config, config)
-            sandbox_params.update(modal_params)
+            command = modal_params.command
+            sandbox_kwargs.update(modal_params.kwargs)
         elif isinstance(config, ComposeConfig):
             modal_params = convert_compose_to_modal_params(config, None)
-            sandbox_params.update(modal_params)
+            command = modal_params.command
+            sandbox_kwargs.update(modal_params.kwargs)
         else:
             raise ValueError(
                 f"Unrecognized config: {config}. "
@@ -127,7 +130,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 "ComposeConfig object, or None."
             )
 
-        sandbox = await cls._create_sandbox(sandbox_params)
+        sandbox = await cls._create_sandbox(command, sandbox_kwargs)
         await sandbox.set_tags.aio(INSPECT_SANDBOX_TAG)
         running_sandboxes().append(sandbox.object_id)
 
@@ -421,10 +424,10 @@ class ModalSandboxEnvironment(SandboxEnvironment):
 
     @staticmethod
     @_standard_retry
-    async def _create_sandbox(sandbox_params: dict[str, Any]) -> modal.Sandbox:
-        params = {k: v for k, v in sandbox_params.items() if k != "_command"}
-        command = sandbox_params.get("_command", [])
-        return await modal.Sandbox.create.aio(*command, **params)
+    async def _create_sandbox(
+        command: list[str], kwargs: dict[str, Any]
+    ) -> modal.Sandbox:
+        return await modal.Sandbox.create.aio(*command, **kwargs)
 
     @staticmethod
     @_standard_retry

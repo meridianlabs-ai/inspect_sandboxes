@@ -145,27 +145,27 @@ def test_apply_modal_extensions(
 @pytest.mark.parametrize(
     ("services", "expected_service_name"),
     [
-        # Service with x_default=True
+        # Service with x-default=True
         (
             {
-                "web": {"x_default": False},
-                "api": {"x_default": True},
+                "web": {"x-default": False, "working_dir": "/web"},
+                "api": {"x-default": True, "working_dir": "/api"},
             },
             "api",
         ),
         # Service named "default" when no x_default
         (
             {
-                "web": {},
-                "default": {},
+                "web": {"working_dir": "/web"},
+                "default": {"working_dir": "/default"},
             },
             "default",
         ),
         # First service when no "default" or x_default
         (
             {
-                "web": {},
-                "api": {},
+                "web": {"working_dir": "/web"},
+                "api": {"working_dir": "/api"},
             },
             "web",  # First in iteration order
         ),
@@ -176,7 +176,6 @@ def test_convert_compose_service_selection(
     expected_service_name: str,
 ) -> None:
     """Test that the correct service is selected based on priority."""
-    # Build ComposeService objects
     compose_services = {
         name: ComposeService(**config) for name, config in services.items()
     }
@@ -185,8 +184,7 @@ def test_convert_compose_service_selection(
     with patch("inspect_sandboxes.modal._compose.Path"):
         result = convert_compose_to_modal_params(config, None)
 
-    # Verify the function runs without error
-    assert isinstance(result, dict)
+    assert result.kwargs["workdir"] == f"/{expected_service_name}"
 
 
 @pytest.mark.parametrize(
@@ -291,7 +289,7 @@ def test_convert_compose_to_modal_params(
 
         result = convert_compose_to_modal_params(config, compose_path)
 
-    assert result == expected_params
+    assert result.kwargs == expected_params
 
 
 @pytest.mark.parametrize(
@@ -375,8 +373,8 @@ def test_convert_compose_resource_tuples(
         mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
         result = convert_compose_to_modal_params(config, None)
 
-    assert result["cpu"] == expected_cpu
-    assert result["memory"] == expected_memory
+    assert result.kwargs["cpu"] == expected_cpu
+    assert result.kwargs["memory"] == expected_memory
 
 
 def test_convert_compose_with_build() -> None:
@@ -404,7 +402,47 @@ def test_convert_compose_with_build() -> None:
 
             result = convert_compose_to_modal_params(config, "/tmp/compose.yml")
 
-    assert "image" in result
+    assert "image" in result.kwargs
+
+
+def test_network_mode_none_sets_block_network() -> None:
+    """Test that network_mode='none' translates to block_network=True."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12", network_mode="none")}
+    )
+
+    with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+        mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
+        result = convert_compose_to_modal_params(config, None)
+
+    assert result.kwargs.get("block_network") is True
+
+
+def test_network_mode_bridge_allows_network() -> None:
+    """Test that network_mode='bridge' translates to block_network=False."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12", network_mode="bridge")}
+    )
+
+    with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+        mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
+        result = convert_compose_to_modal_params(config, None)
+
+    assert result.kwargs.get("block_network") is False
+
+
+def test_x_modal_overrides_network_mode() -> None:
+    """Test that x-modal block_network overrides service network_mode."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12", network_mode="none")},
+        **{"x-modal": {"block_network": False}},
+    )
+
+    with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+        mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
+        result = convert_compose_to_modal_params(config, None)
+
+    assert result.kwargs.get("block_network") is False
 
 
 def test_convert_compose_missing_dockerfile() -> None:
@@ -453,5 +491,34 @@ def test_convert_compose_with_extensions() -> None:
 
         result = convert_compose_to_modal_params(config, None)
 
-    assert result["timeout"] == 300
-    assert result["cloud"] == "aws"
+    assert result.kwargs["timeout"] == 300
+    assert result.kwargs["cloud"] == "aws"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_command"),
+    [
+        # String command is split via shlex
+        ("echo hello world", ["echo", "hello", "world"]),
+        # List command is passed through
+        (["echo", "hello world"], ["echo", "hello world"]),
+        # No command
+        (None, []),
+    ],
+)
+def test_convert_compose_command(
+    command: str | list[str] | None,
+    expected_command: list[str],
+) -> None:
+    """Test that service command is parsed into ModalSandboxParams.command."""
+    service_kwargs: dict[str, Any] = {"image": "python:3.12"}
+    if command is not None:
+        service_kwargs["command"] = command
+    service = ComposeService(**service_kwargs)
+    config = ComposeConfig(services={"default": service})
+
+    with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+        mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
+        result = convert_compose_to_modal_params(config, None)
+
+    assert result.command == expected_command

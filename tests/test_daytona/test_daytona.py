@@ -708,6 +708,48 @@ async def test_cli_cleanup_bulk_partial_failure(
     assert "Failed to delete: 1" in captured.out
 
 
+@pytest.mark.asyncio
+async def test_exec_with_stdin_string(mock_sandbox: MagicMock) -> None:
+    """Test exec pipes string stdin through a temp file with pipefail."""
+    env = DaytonaSandboxEnvironment(mock_sandbox)
+    await env.exec(["cat"], input="hello")
+
+    # Verify file was uploaded with UTF-8 encoded content
+    mock_sandbox.fs.upload_file.assert_called_once()
+    call_args = mock_sandbox.fs.upload_file.call_args
+    assert call_args[0][0] == b"hello"
+    stdin_path = call_args[0][1]
+    assert stdin_path.startswith("/tmp/.inspect-stdin-")
+
+    # Verify the command uses pipefail and cleans up the temp file
+    exec_command = mock_sandbox.process.exec.call_args[0][0]
+    assert "set -o pipefail" in exec_command
+    assert f"cat {stdin_path}" in exec_command
+    assert f"rm -f {stdin_path}" in exec_command
+
+
+@pytest.mark.asyncio
+async def test_exec_with_stdin_bytes(mock_sandbox: MagicMock) -> None:
+    """Test exec pipes bytes stdin through a temp file."""
+    env = DaytonaSandboxEnvironment(mock_sandbox)
+    await env.exec(["wc", "-c"], input=b"\x00\x01\x02")
+
+    call_args = mock_sandbox.fs.upload_file.call_args
+    assert call_args[0][0] == b"\x00\x01\x02"
+
+
+@pytest.mark.asyncio
+async def test_exec_without_stdin_no_upload(mock_sandbox: MagicMock) -> None:
+    """Test exec without stdin does not upload any file."""
+    env = DaytonaSandboxEnvironment(mock_sandbox)
+    await env.exec(["echo", "hi"])
+
+    mock_sandbox.fs.upload_file.assert_not_called()
+    command = mock_sandbox.process.exec.call_args[0][0]
+    assert command == "echo hi"
+    assert "pipefail" not in command
+
+
 def test_get_sandbox_id_none() -> None:
     """Test _get_sandbox_id returns 'unknown' for None."""
     assert DaytonaSandboxEnvironment._get_sandbox_id(None) == "unknown"

@@ -4,6 +4,7 @@ import errno
 import os
 import shlex
 import sys
+import uuid
 from contextvars import ContextVar
 from logging import getLogger
 from pathlib import PurePosixPath
@@ -306,14 +307,18 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
                 "Commands will run as the container's default user.",
             )
 
+        # Daytona's process.exec() doesn't support stdin natively.
+        # When input is provided, write it to a temp file and pipe it into the command.
         if input is not None:
-            warn_once(
-                logger,
-                "The 'input' (stdin) parameter is not supported in DaytonaSandboxEnvironment "
-                "and will be ignored.",
+            data = input.encode("utf-8") if isinstance(input, str) else input
+            stdin_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
+            await self.sandbox.fs.upload_file(data, stdin_file)
+            command = (
+                f"set -o pipefail; cat {shlex.quote(stdin_file)} | {shlex.join(cmd)}"
+                f"; _ec=$?; rm -f {shlex.quote(stdin_file)}; exit $_ec"
             )
-
-        command = shlex.join(cmd)
+        else:
+            command = shlex.join(cmd)
 
         async def _run(t: int | None) -> ExecResult[str]:
             response = await self.sandbox.process.exec(

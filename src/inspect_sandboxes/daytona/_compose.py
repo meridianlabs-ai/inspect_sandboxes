@@ -57,6 +57,11 @@ def convert_compose_to_daytona_params(
     if service.user:
         sandbox_params["os_user"] = service.user
 
+    # Translate Docker network_mode to Daytona network_block_all.
+    # Only set as a default; x-daytona extensions can override below.
+    if service.network_mode is not None and "network_block_all" not in sandbox_params:
+        sandbox_params["network_block_all"] = service.network_mode == "none"
+
     _apply_daytona_extensions(sandbox_params, config.extensions)
 
     return image, resources, sandbox_params
