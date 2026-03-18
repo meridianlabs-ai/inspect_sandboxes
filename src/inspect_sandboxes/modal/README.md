@@ -81,6 +81,14 @@ task = Task(
 )
 ```
 
+## Notes
+
+- **network_mode**: Docker Compose `network_mode` is automatically translated to Modal's `block_network` parameter. `network_mode: none` blocks all network access; any other value (e.g. `bridge`) allows it. The `x-modal` extension `block_network` takes precedence if set.
+
+## Known Limitations
+
+- **Single service**: Only one compose service is supported per sandbox. Multi-service compose files will raise a `ValueError`.
+
 ## Credits
 
 Based on [@anthonyduong9](https://github.com/anthonyduong9)'s work.

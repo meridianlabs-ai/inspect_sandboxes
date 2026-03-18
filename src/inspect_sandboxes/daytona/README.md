@@ -90,3 +90,11 @@ task = Task(
 - **stderr**: The Daytona API returns a single combined output; `stderr` is always empty and all output appears in `stdout`.
 - **stdin**: The `input` parameter to `exec()` is supported by uploading a temp file and piping it into the command.
 - **user**: The `user` parameter to `exec()` is not supported; use `os_user` in `x-daytona` to set the OS user.
+- **network_mode**: Docker Compose `network_mode` is automatically translated to Daytona's `network_block_all` parameter. `network_mode: none` blocks all network access; any other value (e.g. `bridge`) allows it. The `x-daytona` extension `network_block_all` takes precedence if set.
+
+## Known Limitations
+
+- **Architecture**: Daytona runners use `linux/amd64`. Tasks with arm64-only base images cannot run on Daytona. The image publisher must add amd64 support.
+- **Resource limits**: Daytona enforces per-sandbox limits. Tasks requesting more will fail with `CPU request N exceeds maximum` or `Memory request exceeds maximum`. Use `override_cpus` / `override_memory_mb` task args to cap resources, or contact Daytona support for higher limits.
+- **Single service**: Only one service is supported per sandbox. Multi-service compose files are not supported.
+- **Internet access**: Outbound internet access from sandboxes depends on your Daytona billing tier. Lower tiers (Tier 1–2) have restricted network access that cannot be overridden by the `network_block_all` parameter. If tasks fail with `curl: (35) Recv failure: Connection reset by peer` or similar network errors despite `network_block_all: false`, upgrade to a higher tier (Tier 3+) for full outbound internet access.
