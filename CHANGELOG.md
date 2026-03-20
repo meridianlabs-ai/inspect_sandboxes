@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.1.1...v0.1.2) (2026-03-18)
+
+
+### Documentation
+
+* add network_mode notes and known limitations to READMEs ([#9](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/9)) ([e17230f](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/e17230f512b0dccbce75b6d1bdd517f3701b197b))
+
 ## [0.1.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.1.0...v0.1.1) (2026-03-16)
 
 
