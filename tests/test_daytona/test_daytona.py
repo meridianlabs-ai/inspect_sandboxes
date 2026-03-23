@@ -16,8 +16,18 @@ from inspect_sandboxes.daytona._daytona import (
     DaytonaSandboxEnvironment,
     _daytona_client,
     _init_context,
+    _run_id,
     _running_sandboxes,
 )
+
+
+def _assert_has_run_labels(labels: dict[str, str] | None) -> None:
+    """Assert labels contain INSPECT_SANDBOX_LABEL entries and an inspect_run_id."""
+    assert labels is not None
+    for key, value in INSPECT_SANDBOX_LABEL.items():
+        assert labels[key] == value
+    assert "inspect_run_id" in labels
+    assert len(labels["inspect_run_id"]) == 32  # uuid4 hex
 
 
 def make_mock_sandbox(sandbox_id: str = "sb-test-123") -> MagicMock:
@@ -154,7 +164,7 @@ async def test_sample_init_no_config_uses_snapshot_params(
     assert isinstance(call_args, CreateSandboxFromSnapshotParams)
     assert call_args.snapshot is None
     assert call_args.auto_stop_interval == 0
-    assert call_args.labels == INSPECT_SANDBOX_LABEL
+    _assert_has_run_labels(call_args.labels)
 
 
 @pytest.mark.asyncio
@@ -177,7 +187,7 @@ async def test_sample_init_dockerfile_uses_image_params(
     call_args = mock_client.create.call_args[0][0]
     assert isinstance(call_args, CreateSandboxFromImageParams)
     assert call_args.auto_stop_interval == 0
-    assert call_args.labels == INSPECT_SANDBOX_LABEL
+    _assert_has_run_labels(call_args.labels)
 
 
 @pytest.mark.asyncio
@@ -216,7 +226,7 @@ services:
     assert call_args.resources.cpu == 2
     assert call_args.resources.memory == 2
     assert call_args.auto_stop_interval == 0
-    assert call_args.labels == INSPECT_SANDBOX_LABEL
+    _assert_has_run_labels(call_args.labels)
 
 
 @pytest.mark.asyncio
@@ -257,7 +267,7 @@ async def test_sample_init_compose_config_uses_image_params(
     assert call_args.resources.cpu == 4
     assert call_args.resources.memory == 4
     assert call_args.auto_stop_interval == 0
-    assert call_args.labels == INSPECT_SANDBOX_LABEL
+    _assert_has_run_labels(call_args.labels)
 
 
 @pytest.mark.asyncio
@@ -404,6 +414,92 @@ async def test_task_cleanup_handles_sandbox_failures(
 
     assert _running_sandboxes.get() == []
     assert "Failed to cleanup" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_task_init_generates_run_id() -> None:
+    """Test that task_init generates a unique run_id."""
+    mock_sb = make_mock_sandbox()
+    mock_client = make_mock_client(mock_sb)
+
+    with patch(
+        "inspect_sandboxes.daytona._daytona.AsyncDaytona", return_value=mock_client
+    ):
+        await DaytonaSandboxEnvironment.task_init("test_task", None)
+
+    run_id = _run_id.get()
+    assert isinstance(run_id, str)
+    assert len(run_id) == 32  # uuid4 hex
+
+
+@pytest.mark.asyncio
+async def test_sandbox_labels_include_run_id(
+    mock_client: MagicMock,
+    mock_sandbox: MagicMock,
+) -> None:
+    """Test that sandbox labels include inspect_run_id matching the task's run ID."""
+    with patch(
+        "inspect_sandboxes.daytona._daytona.AsyncDaytona", return_value=mock_client
+    ):
+        await DaytonaSandboxEnvironment.task_init("test_task", None)
+        await DaytonaSandboxEnvironment.sample_init("test_task", None, {})
+
+    call_args = mock_client.create.call_args[0][0]
+    assert call_args.labels["inspect_run_id"] == _run_id.get()
+
+
+@pytest.mark.asyncio
+async def test_task_cleanup_deletes_orphaned_sandboxes() -> None:
+    """Test that task_cleanup finds and deletes build-failed orphaned sandboxes."""
+    orphan = make_mock_sandbox()
+    orphan.id = "sb-orphan"
+    orphan.state = "build_failed"
+
+    paginated = MagicMock()
+    paginated.items = [orphan]
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=Exception("not tracked"))
+    mock_client.list = AsyncMock(return_value=paginated)
+    mock_client.delete = AsyncMock()
+    mock_client.close = AsyncMock()
+
+    with patch(
+        "inspect_sandboxes.daytona._daytona.AsyncDaytona", return_value=mock_client
+    ):
+        await DaytonaSandboxEnvironment.task_init("test_task", None)
+        # No sample_init — simulating the case where create failed
+        await DaytonaSandboxEnvironment.task_cleanup("test_task", None, cleanup=True)
+
+    # The orphan should have been found via list and deleted
+    mock_client.list.assert_called_once_with(labels={"inspect_run_id": _run_id.get()})
+    mock_client.delete.assert_called_once_with(orphan)
+
+
+@pytest.mark.asyncio
+async def test_task_cleanup_skips_already_deleted_in_orphan_pass(
+    mock_sandbox: MagicMock,
+) -> None:
+    """Test that task_cleanup doesn't double-delete sandboxes found in both passes."""
+    # The sandbox is tracked AND appears in the list response
+    paginated = MagicMock()
+    paginated.items = [mock_sandbox]
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=mock_sandbox)
+    mock_client.list = AsyncMock(return_value=paginated)
+    mock_client.delete = AsyncMock()
+    mock_client.close = AsyncMock()
+
+    with patch(
+        "inspect_sandboxes.daytona._daytona.AsyncDaytona", return_value=mock_client
+    ):
+        await DaytonaSandboxEnvironment.task_init("test_task", None)
+        _running_sandboxes.set([mock_sandbox.id])
+        await DaytonaSandboxEnvironment.task_cleanup("test_task", None, cleanup=True)
+
+    # Should only be deleted once (in the first pass), not again in the orphan pass
+    mock_client.delete.assert_called_once_with(mock_sandbox)
 
 
 @pytest.mark.parametrize(
