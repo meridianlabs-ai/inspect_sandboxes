@@ -55,6 +55,7 @@ _daytona_client: ContextVar[AsyncDaytona | None] = ContextVar(
     "daytona_client", default=None
 )
 _running_sandboxes: ContextVar[list[str]] = ContextVar("daytona_running_sandboxes")
+_run_id: ContextVar[str] = ContextVar("daytona_run_id")
 
 # Retry decorator for sandbox lifecycle and file I/O operations
 _standard_retry = retry(
@@ -68,6 +69,11 @@ _standard_retry = retry(
 def _init_context() -> None:
     _daytona_client.set(None)
     _running_sandboxes.set([])
+    _run_id.set(uuid.uuid4().hex)
+
+
+def _run_labels() -> dict[str, str]:
+    return {**INSPECT_SANDBOX_LABEL, "inspect_run_id": _run_id.get()}
 
 
 @sandboxenv(name="daytona")
@@ -118,14 +124,14 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
         if config is None:
             params = CreateSandboxFromSnapshotParams(
                 snapshot=None,
-                labels=INSPECT_SANDBOX_LABEL,
+                labels=_run_labels(),
                 auto_stop_interval=0,
             )
         elif is_dockerfile(config):
             image = Image.from_dockerfile(config)
             params = CreateSandboxFromImageParams(
                 image=image,
-                labels=INSPECT_SANDBOX_LABEL,
+                labels=_run_labels(),
                 auto_stop_interval=0,
             )
         elif is_compose_yaml(config):
@@ -189,14 +195,17 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
             return
 
         failed_ids: list[str] = []
+        deleted_ids: set[str] = set()
 
         for sandbox_id in _running_sandboxes.get().copy():
             try:
                 sandbox = await client.get(sandbox_id)
                 await cls._delete_sandbox(client, sandbox)
+                deleted_ids.add(sandbox_id)
                 trace_message(logger, "daytona", f"Deleted sandbox {sandbox_id}")
             except DaytonaNotFoundError:
                 # Already deleted (e.g. by sample_cleanup) — nothing to do.
+                deleted_ids.add(sandbox_id)
                 trace_message(
                     logger,
                     "daytona",
@@ -205,6 +214,29 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
             except Exception as e:
                 failed_ids.append(sandbox_id)
                 logger.error(f"Failed to delete sandbox {sandbox_id}: {e}")
+
+        # Second pass: find orphaned sandboxes by run label.
+        # This catches sandboxes where creation failed (e.g. build_failed)
+        # and the ID was never tracked in _running_sandboxes.
+        run_id = _run_id.get()
+        if run_id:
+            try:
+                paginated = await client.list(labels={"inspect_run_id": run_id})
+                for sb in paginated.items:
+                    if sb.id in deleted_ids:
+                        continue
+                    try:
+                        await cls._delete_sandbox(client, sb)
+                        trace_message(
+                            logger,
+                            "daytona",
+                            f"Deleted orphaned sandbox {sb.id} (state={sb.state})",
+                        )
+                    except Exception as e:
+                        failed_ids.append(sb.id)
+                        logger.error(f"Failed to delete orphaned sandbox {sb.id}: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to list sandboxes for cleanup: {e}")
 
         if failed_ids:
             logger.warning(
@@ -439,7 +471,7 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
         return CreateSandboxFromImageParams(
             image=image,
             resources=resources,
-            labels={**x_labels, **INSPECT_SANDBOX_LABEL},
+            labels={**x_labels, **_run_labels()},
             **sandbox_params,
         )
 
