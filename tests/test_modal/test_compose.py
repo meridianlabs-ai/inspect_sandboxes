@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from inspect_ai.util import (
@@ -140,6 +140,32 @@ def test_apply_modal_extensions(
     params: dict[str, Any] = {}
     _apply_modal_extensions(params, extensions)
     assert params == expected_params
+
+
+@pytest.mark.parametrize(
+    ("secret_config", "expected_names"),
+    [
+        ("service-secret", ["service-secret"]),
+        (["service-secret", "shared-secret"], ["service-secret", "shared-secret"]),
+    ],
+)
+def test_apply_modal_extensions_secrets(
+    secret_config: str | list[str],
+    expected_names: list[str],
+) -> None:
+    """Test x-modal secrets are converted via modal.Secret.from_name."""
+    params: dict[str, Any] = {}
+    secret_objects = [MagicMock(name=f"secret:{name}") for name in expected_names]
+
+    with patch(
+        "inspect_sandboxes.modal._compose.modal.Secret.from_name"
+    ) as mock_secret:
+        mock_secret.side_effect = secret_objects
+
+        _apply_modal_extensions(params, {"x-modal": {"secrets": secret_config}})
+
+    assert mock_secret.call_args_list == [call(name) for name in expected_names]
+    assert params["secrets"] == secret_objects
 
 
 @pytest.mark.parametrize(
@@ -493,6 +519,34 @@ def test_convert_compose_with_extensions() -> None:
 
     assert result.kwargs["timeout"] == 300
     assert result.kwargs["cloud"] == "aws"
+
+
+def test_convert_compose_with_secret_extensions() -> None:
+    """Test that x-modal secrets are converted and included in kwargs."""
+    service = ComposeService(image="python:3.12")
+    config = ComposeConfig(
+        services={"default": service},
+        **{"x-modal": {"secrets": ["service-secret", "shared-secret"]}},
+    )
+    secret_objects = [
+        MagicMock(name="secret:service-secret"),
+        MagicMock(name="secret:shared-secret"),
+    ]
+
+    with (
+        patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image,
+        patch("inspect_sandboxes.modal._compose.modal.Secret.from_name") as mock_secret,
+    ):
+        mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
+        mock_secret.side_effect = secret_objects
+
+        result = convert_compose_to_modal_params(config, None)
+
+    assert mock_secret.call_args_list == [
+        call("service-secret"),
+        call("shared-secret"),
+    ]
+    assert result.kwargs["secrets"] == secret_objects
 
 
 @pytest.mark.parametrize(

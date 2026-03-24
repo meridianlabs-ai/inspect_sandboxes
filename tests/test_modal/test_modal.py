@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncGenerator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import modal
 import pytest
@@ -288,6 +288,61 @@ services:
                 mock_from_dockerfile.assert_called_once()
             elif config_type in ("compose_yaml", "compose_config"):
                 mock_from_registry.assert_called_once_with("python:3.12")
+
+
+@pytest.mark.asyncio
+async def test_sample_init_compose_config_with_secret_extensions(
+    mock_modal_app: MagicMock,
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """Test that compose x-modal secrets are passed to sandbox creation."""
+    sandbox_cleanup_startup()
+
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+        **{"x-modal": {"secrets": ["service-secret", "shared-secret"]}},
+    )
+    secret_objects = [
+        MagicMock(name="secret:service-secret"),
+        MagicMock(name="secret:shared-secret"),
+    ]
+
+    with (
+        patch.object(
+            ModalSandboxEnvironment,
+            "_lookup_app",
+            new_callable=AsyncMock,
+            return_value=mock_modal_app,
+        ),
+        patch.object(
+            ModalSandboxEnvironment,
+            "_create_sandbox",
+            new_callable=AsyncMock,
+            return_value=mock_modal_sandbox,
+        ) as mock_create_sandbox,
+        patch("modal.Image.from_registry") as mock_from_registry,
+        patch("modal.Secret.from_name") as mock_secret,
+    ):
+        image = MagicMock(spec=modal.Image)
+        mock_from_registry.return_value = image
+        mock_secret.side_effect = secret_objects
+
+        result = await ModalSandboxEnvironment.sample_init("test_task", config, {})
+
+    assert "default" in result
+    mock_from_registry.assert_called_once_with("python:3.12")
+    assert mock_secret.call_args_list == [
+        call("service-secret"),
+        call("shared-secret"),
+    ]
+    mock_create_sandbox.assert_awaited_once()
+    assert mock_create_sandbox.await_args is not None
+    command, sandbox_kwargs = mock_create_sandbox.await_args.args
+    assert command == []
+    assert sandbox_kwargs["app"] == mock_modal_app
+    assert sandbox_kwargs["timeout"] == 60 * 60 * 24
+    assert sandbox_kwargs["image"] == image
+    assert sandbox_kwargs["secrets"] == secret_objects
 
 
 @pytest.mark.parametrize(
