@@ -39,6 +39,7 @@ from rich.prompt import Confirm
 from rich.table import Table
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -57,11 +58,29 @@ _daytona_client: ContextVar[AsyncDaytona | None] = ContextVar(
 _running_sandboxes: ContextVar[list[str]] = ContextVar("daytona_running_sandboxes")
 _run_id: ContextVar[str] = ContextVar("daytona_run_id")
 
+# ---------------------------------------------------------------------------
+# Underlying SDK retry (for reference):
+#   The Daytona SDK has NO built-in retry. HTTP retry (aiohttp_retry) is
+#   disabled by default (Configuration.retries is None), and POST requests
+#   (including exec) are excluded from aiohttp_retry even if enabled.
+#   Rate-limit errors (429) raise DaytonaRateLimitError immediately.
+# ---------------------------------------------------------------------------
+
 # Retry decorator for sandbox lifecycle and file I/O operations
 _standard_retry = retry(
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     retry=retry_if_exception_type(DaytonaError),
+    reraise=True,
+)
+
+# Retry decorator for exec operations
+_exec_retry = retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception(
+        lambda e: isinstance(e, DaytonaError) and not isinstance(e, DaytonaTimeoutError)
+    ),  # excludes DaytonaTimeoutError which is handled by exec()'s timeout retry loop
     reraise=True,
 )
 
@@ -344,7 +363,7 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
         if input is not None:
             data = input.encode("utf-8") if isinstance(input, str) else input
             stdin_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
-            await self.sandbox.fs.upload_file(data, stdin_file)
+            await self._write_file_content(stdin_file, data)
             command = (
                 f"set -o pipefail; cat {shlex.quote(stdin_file)} | {shlex.join(cmd)}"
                 f"; _ec=$?; rm -f {shlex.quote(stdin_file)}; exit $_ec"
@@ -352,6 +371,7 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
         else:
             command = shlex.join(cmd)
 
+        @_exec_retry
         async def _run(t: int | None) -> ExecResult[str]:
             response = await self.sandbox.process.exec(
                 command,

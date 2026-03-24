@@ -54,12 +54,35 @@ def running_sandboxes() -> list[str]:
     return _running_sandboxes.get()
 
 
+# ---------------------------------------------------------------------------
+# Underlying SDK retry (for reference):
+#   The Modal gRPC layer retries DEADLINE_EXCEEDED, UNAVAILABLE, CANCELLED,
+#   INTERNAL, and UNKNOWN with 3 attempts and 0.1–1 s exponential backoff.
+#   It does NOT retry RESOURCE_EXHAUSTED (rate limiting). If the SDK's retry
+#   is exhausted the error reaches this layer for additional retry.
+# ---------------------------------------------------------------------------
+
 # Retry decorator for file I/O and sandbox lifecycle ops.
 # RemoteError indicates permanent server-side failures (e.g. image build errors).
 _standard_retry = retry(
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     retry=retry_if_not_exception_type(modal.exception.RemoteError),
+    reraise=True,
+)
+
+# Retry decorator for exec operations
+_exec_retry = retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_not_exception_type(
+        (
+            modal.exception.RemoteError,
+            UnicodeDecodeError,  # permanent decode failure in command output
+            asyncio.TimeoutError,  # handled by exec()'s timeout retry loop
+            asyncio.CancelledError,  # handled by exec()'s timeout retry loop
+        )
+    ),
     reraise=True,
 )
 
@@ -290,6 +313,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             )
             workdir = f"/{workdir}"
 
+        @_exec_retry
         async def _run() -> ExecResult[str]:
             modal_env = cast(dict[str, str | None] | None, env)
 
@@ -394,8 +418,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         await self._verify_read_file_size(file)
 
         try:
-            async with await self.sandbox.open.aio(file, "rb") as f:
-                contents_bytes = await f.read.aio()
+            contents_bytes = await self._read_file_content(file)
         except modal.exception.FilesystemExecutionError as e:
             if await self._is_directory(file):
                 raise IsADirectoryError(errno.EISDIR, "Is a directory", file) from e
@@ -455,17 +478,24 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 await f.write.aio(contents)
 
     @_standard_retry
+    async def _read_file_content(self, file: str) -> bytes:
+        async with await self.sandbox.open.aio(file, "rb") as f:
+            return await f.read.aio()
+
+    @_standard_retry
     async def _create_parent_folder(self, path: str) -> None:
         try:
             await self.sandbox.mkdir.aio(path, parents=True)
         except FileExistsError:
             pass
 
+    @_standard_retry
     async def _is_directory(self, file: str) -> bool:
         process = await self.sandbox.exec.aio("test", "-d", file)
         await process.wait.aio()
         return process.returncode == 0
 
+    @_standard_retry
     async def _get_file_size(self, file: str) -> int:
         process = await self.sandbox.exec.aio("stat", "-c", "%s", file)
         stdout = await process.stdout.read.aio()
