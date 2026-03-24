@@ -136,11 +136,20 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
         "timeout",
         "unencrypted_ports",
         "verbose",
+        "secrets",
     ]
 
     for key in extension_keys:
         if modal_extensions.get(key) is not None:
             params[key] = modal_extensions[key]
+
+    if modal_extensions.get("secrets") is not None:
+        secrets = (
+            modal_extensions["secrets"]
+            if isinstance(modal_extensions["secrets"], list)
+            else [modal_extensions["secrets"]]
+        )
+        params["secrets"] = [modal.Secret.from_name(secret) for secret in secrets]
 
 
 def _service_to_cpu(service: ComposeService) -> float | tuple[float, float] | None:
