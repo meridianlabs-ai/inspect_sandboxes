@@ -109,9 +109,9 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
         - unencrypted_ports (list[int]): HTTP ports
         - custom_domain (str): Custom domain for web services
         - verbose (bool): Enable verbose logging
+        - secrets (str | list[str]): Modal secret name(s) to attach
 
     Unsupported Modal parameters:
-        - secrets: Requires modal.Secret objects
         - network_file_systems: Requires modal.NetworkFileSystem objects
         - volumes: Requires modal.Volume or modal.CloudBucketMount objects
         - proxy: Requires modal.Proxy object
@@ -141,15 +141,13 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
 
     for key in extension_keys:
         if modal_extensions.get(key) is not None:
-            params[key] = modal_extensions[key]
-
-    if modal_extensions.get("secrets") is not None:
-        secrets = (
-            modal_extensions["secrets"]
-            if isinstance(modal_extensions["secrets"], list)
-            else [modal_extensions["secrets"]]
-        )
-        params["secrets"] = [modal.Secret.from_name(secret) for secret in secrets]
+            if key == "secrets":
+                secrets = modal_extensions[key]
+                if not isinstance(secrets, list):
+                    secrets = [secrets]
+                params[key] = [modal.Secret.from_name(s) for s in secrets]
+            else:
+                params[key] = modal_extensions[key]
 
 
 def _service_to_cpu(service: ComposeService) -> float | tuple[float, float] | None:
