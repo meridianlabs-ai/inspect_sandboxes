@@ -609,6 +609,117 @@ async def test_get_sandbox_id_none() -> None:
     assert ModalSandboxEnvironment._get_sandbox_id(None) == "unknown"
 
 
+@pytest.mark.asyncio
+async def test_exec_retries_transient_error(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Test that exec retries on transient Modal errors."""
+    call_count = 0
+
+    async def flaky_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise modal.exception.InternalError("transient gRPC failure")
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout = MagicMock()
+        process.stdout.read = AsyncMock(return_value="ok")
+        process.stderr = MagicMock()
+        process.stderr.read = AsyncMock(return_value="")
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.write_eof = MagicMock()
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = flaky_exec
+
+    result = await sandbox_env.exec(["echo", "test"])
+    assert result.success
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_exec_does_not_retry_remote_error(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Test that exec does NOT retry permanent RemoteError."""
+
+    async def failing_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        raise modal.exception.RemoteError("permanent failure")
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = failing_exec
+
+    with pytest.raises(modal.exception.RemoteError):
+        await sandbox_env.exec(["echo", "test"])
+
+
+@pytest.mark.asyncio
+async def test_exec_does_not_retry_unicode_decode_error(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Test that exec does NOT retry UnicodeDecodeError."""
+
+    async def decode_error_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout = MagicMock()
+        process.stdout.read.aio = AsyncMock(
+            side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        )
+        process.stderr = MagicMock()
+        process.stderr.read = AsyncMock(return_value="")
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.write_eof = MagicMock()
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = decode_error_exec
+
+    with pytest.raises(UnicodeDecodeError):
+        await sandbox_env.exec(["echo", "test"])
+
+
+@pytest.mark.asyncio
+async def test_read_file_retries_transient_error(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Test that read_file retries on transient errors via _read_file_content."""
+    call_count = 0
+
+    async def flaky_open(path: str, mode: str) -> AsyncMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise modal.exception.InternalError("transient")
+        mock_file = AsyncMock()
+        mock_file.read.aio = AsyncMock(return_value=b"content")
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_file)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        return ctx
+
+    with (
+        patch.object(
+            sandbox_env, "_is_directory", new_callable=AsyncMock, return_value=False
+        ),
+        patch.object(sandbox_env, "_get_file_size", return_value=7),
+    ):
+        sandbox_env.sandbox.open = MagicMock()
+        sandbox_env.sandbox.open.aio = AsyncMock(side_effect=flaky_open)
+
+        result = await sandbox_env.read_file("/test.txt")
+        assert result == "content"
+        assert call_count == 2
+
+
 @pytest_asyncio.fixture
 async def modal_sandbox_environment() -> AsyncGenerator[SandboxEnvironment, None]:
     """Create a real Modal sandbox environment for integration testing."""

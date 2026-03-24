@@ -4,6 +4,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from daytona_sdk import DaytonaError, DaytonaTimeoutError
 from inspect_ai.util import (
     ComposeConfig,
     ComposeService,
@@ -854,3 +855,52 @@ def test_get_sandbox_id_none() -> None:
 def test_get_sandbox_id_valid(mock_sandbox: MagicMock) -> None:
     """Test _get_sandbox_id returns the sandbox ID."""
     assert DaytonaSandboxEnvironment._get_sandbox_id(mock_sandbox) == "sb-test-123"
+
+
+@pytest.mark.asyncio
+async def test_exec_retries_transient_error(mock_sandbox: MagicMock) -> None:
+    """Test that exec retries on transient DaytonaError."""
+    call_count = 0
+    success_response = MagicMock()
+    success_response.exit_code = 0
+    success_response.result = "ok"
+
+    async def flaky_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise DaytonaError("transient API failure")
+        return success_response
+
+    mock_sandbox.process.exec = AsyncMock(side_effect=flaky_exec)
+    env = DaytonaSandboxEnvironment(mock_sandbox)
+    result = await env.exec(["echo", "test"])
+
+    assert result.success
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_exec_does_not_retry_timeout(mock_sandbox: MagicMock) -> None:
+    """Test that exec does NOT retry DaytonaTimeoutError inside _run (outer loop handles it)."""
+    mock_sandbox.process.exec = AsyncMock(side_effect=DaytonaTimeoutError("timed out"))
+    env = DaytonaSandboxEnvironment(mock_sandbox)
+
+    with pytest.raises(TimeoutError):
+        await env.exec(["sleep", "100"], timeout=5)
+
+    # Outer timeout loop makes 3 attempts (original, 5s cap, 5s cap)
+    assert mock_sandbox.process.exec.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_exec_does_not_retry_non_daytona_error(mock_sandbox: MagicMock) -> None:
+    """Test that exec does NOT retry non-DaytonaError exceptions."""
+    mock_sandbox.process.exec = AsyncMock(side_effect=RuntimeError("unexpected"))
+    env = DaytonaSandboxEnvironment(mock_sandbox)
+
+    with pytest.raises(RuntimeError, match="unexpected"):
+        await env.exec(["echo", "test"])
+
+    # Called only once — no retry
+    assert mock_sandbox.process.exec.call_count == 1
