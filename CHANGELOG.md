@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.1.2...v0.2.0) (2026-03-24)
+
+
+### Features
+
+* **daytona:** clean up orphaned sandboxes on build failure ([#11](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/11)) ([30ccafc](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/30ccafca92bdec41d5959891b01c6f381b629abc))
+* **modal,daytona:** add transient error retry to exec and fill retry gaps ([#14](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/14)) ([93b016d](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/93b016d737404ebca72ed5fdb4ba24caf914a131))
+* **modal:** add support for modal secrets from compose files ([#13](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/13)) ([b8b1045](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/b8b10456a010c91843aa261e9ef1268227750afa))
+
 ## [0.1.2](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.1.1...v0.1.2) (2026-03-18)
 
 
