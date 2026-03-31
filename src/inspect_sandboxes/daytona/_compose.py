@@ -2,7 +2,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from daytona_sdk import Image, Resources
+from daytona_sdk import CreateSandboxFromImageParams, Image, Resources
 from inspect_ai.util import ComposeConfig, ComposeService
 
 from inspect_sandboxes._util.compose import (
@@ -12,25 +12,20 @@ from inspect_sandboxes._util.compose import (
 )
 
 
-def convert_compose_to_daytona_params(
-    config: ComposeConfig, compose_path: str | None
-) -> tuple[str | Image, Resources | None, dict[str, Any]]:
-    """Convert a ComposeConfig to Daytona sandbox creation parameters.
+def create_single_service_params(
+    config: ComposeConfig,
+    compose_path: str | None,
+    labels: dict[str, str],
+) -> CreateSandboxFromImageParams:
+    """Create Daytona sandbox params from a single-service compose config.
 
     Args:
         config: Parsed compose configuration.
         compose_path: Path to the compose file for resolving relative paths.
             Pass None when using a ComposeConfig object directly.
-
-    Returns:
-        Tuple of (image, resources, sandbox_params) where:
-            - image: Docker image name or Image object
-            - resources: Resources config, or None if not specified
-            - sandbox_params: Extra sandbox params (env_vars, network settings, etc.)
+        labels: Labels to apply (merged with x-daytona labels).
     """
-    service = next((svc for svc in config.services.values() if svc.x_default), None)
-    if service is None:
-        service = config.services.get("default") or next(iter(config.services.values()))
+    _, service = find_default_service(config)
 
     compose_dir = Path(compose_path).parent if compose_path else Path.cwd()
 
@@ -62,12 +57,62 @@ def convert_compose_to_daytona_params(
     if service.network_mode is not None and "network_block_all" not in sandbox_params:
         sandbox_params["network_block_all"] = service.network_mode == "none"
 
-    _apply_daytona_extensions(sandbox_params, config.extensions)
+    apply_daytona_extensions(sandbox_params, config.extensions)
 
-    return image, resources, sandbox_params
+    sandbox_params.setdefault("auto_stop_interval", 0)
+    x_labels = sandbox_params.pop("labels", {})
+    return CreateSandboxFromImageParams(
+        image=image,
+        resources=resources,
+        labels={**x_labels, **labels},
+        **sandbox_params,
+    )
 
 
-def _apply_daytona_extensions(
+def find_default_service(config: ComposeConfig) -> tuple[str, ComposeService]:
+    """Find the default service in a compose config.
+
+    Priority: x-default: true -> service named "default" or "main" -> first service.
+
+    Returns:
+        Tuple of (service_name, service_config).
+    """
+    for name, svc in config.services.items():
+        if svc.x_default:
+            return name, svc
+    for candidate in ("default", "main"):
+        if candidate in config.services:
+            return candidate, config.services[candidate]
+    name = next(iter(config.services))
+    return name, config.services[name]
+
+
+def aggregate_resources(config: ComposeConfig) -> Resources | None:
+    """Sum per-service resources across all services + (Docker daemon) overhead."""
+    total_cpu = 0
+    total_memory = 0
+    total_gpu = 0
+    has_any = False
+
+    for svc in config.services.values():
+        r = _service_to_resources(svc)
+        if r:
+            has_any = True
+            total_cpu += r.cpu or 0
+            total_memory += r.memory or 0
+            total_gpu += r.gpu or 0
+
+    if not has_any:
+        return None
+
+    return Resources(
+        cpu=total_cpu + 1,
+        memory=total_memory + 1,
+        gpu=total_gpu or None,
+    )
+
+
+def apply_daytona_extensions(
     params: dict[str, Any], extensions: dict[str, Any]
 ) -> None:
     """Apply Daytona-specific extensions from x-daytona compose key.
@@ -88,6 +133,8 @@ def _apply_daytona_extensions(
             x-daytona values take precedence over service-level environment.
         - labels (dict): Custom labels. Merged by the caller with inspect's own labels,
             which take precedence.
+        - dind_snapshot (str): Pre-created Daytona snapshot name for DinD sandboxes.
+            Overrides auto-snapshot creation.
         - volumes: Not yet supported.
 
     Args:
@@ -108,6 +155,7 @@ def _apply_daytona_extensions(
         "ephemeral",
         "timeout",
         "labels",
+        "dind_snapshot",
     ]
 
     for key in simple_keys:
