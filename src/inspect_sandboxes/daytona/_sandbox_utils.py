@@ -18,12 +18,21 @@ from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 from ._retry import exec_retry, standard_retry
 
 
-def build_stdin_command(cmd: list[str], stdin_file: str) -> str:
-    """Build a shell command that pipes a temp file into *cmd* and cleans up."""
-    return (
-        f"set -o pipefail; cat {shlex.quote(stdin_file)} | {shlex.join(cmd)}"
-        f"; _ec=$?; rm -f {shlex.quote(stdin_file)}; exit $_ec"
-    )
+def build_stdin_command(cmd: list[str], stdin_file: str, cleanup: bool = True) -> str:
+    """Build a shell command that redirects a temp file as stdin into *cmd*.
+
+    Args:
+        cmd: Command to redirect stdin into.
+        stdin_file: Path to the temp file containing stdin data.
+        cleanup: If True, remove the temp file after the command.
+            Set to False when the caller handles cleanup separately
+            (e.g., when running as a different user who can't delete the file).
+    """
+    quoted_file = shlex.quote(stdin_file)
+    base = f"{shlex.join(cmd)} < {quoted_file}"
+    if cleanup:
+        return f"{base}; _ec=$?; rm -f {quoted_file}; exit $_ec"
+    return f"{base}; _ec=$?; exit $_ec"
 
 
 async def verify_file_size(

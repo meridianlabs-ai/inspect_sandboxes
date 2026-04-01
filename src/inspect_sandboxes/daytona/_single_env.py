@@ -15,7 +15,6 @@ from inspect_ai.util import (
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
     trace_message,
-    warn_once,
 )
 from typing_extensions import override
 
@@ -87,22 +86,25 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             stderr is always empty. The Daytona API returns a single combined
             output field; stdout and stderr are not distinguished.
         """
-        if user is not None:
-            warn_once(
-                logger,
-                "The 'user' parameter is ignored in DaytonaSingleServiceEnvironment. "
-                "Commands will run as the container's default user.",
-            )
-
         # Daytona's process.exec() doesn't support stdin natively.
         # When input is provided, write it to a temp file and pipe it into the command.
+        stdin_file: str | None = None
         if input is not None:
             data = input.encode("utf-8") if isinstance(input, str) else input
             stdin_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
             await self._write_file_content(stdin_file, data)
-            command = build_stdin_command(cmd, stdin_file)
+            command = build_stdin_command(cmd, stdin_file, cleanup=user is None)
         else:
             command = shlex.join(cmd)
+
+        # Daytona's process.exec() has no user param — wrap with su.
+        # Resolve numeric UIDs to usernames since su requires a username.
+        if user is not None:
+            if user.isdigit():
+                user_arg = f"$(getent passwd {user} | cut -d: -f1)"
+            else:
+                user_arg = shlex.quote(user)
+            command = f"su {user_arg} -s /bin/bash -c {shlex.quote(command)}"
 
         @exec_retry
         async def _run(t: int | None) -> ExecResult[str]:
@@ -119,7 +121,15 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
                 stderr="",
             )
 
-        return await run_with_timeout_retry(_run, timeout, timeout_retry)
+        try:
+            return await run_with_timeout_retry(_run, timeout, timeout_retry)
+        finally:
+            # When running as a different user, the su'd process can't delete
+            # root-owned temp files in sticky /tmp. Clean up as the default user.
+            if stdin_file is not None and user is not None:
+                await self.sandbox.process.exec(
+                    f"rm -f {shlex.quote(stdin_file)}", timeout=10
+                )
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:

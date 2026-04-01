@@ -202,13 +202,20 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             for k, v in env.items():
                 exec_cmd.extend(["-e", f"{k}={shlex.quote(v)}"])
 
-        # Stdin: upload temp file to sandbox VM, pipe into command
-        stdin_file: str | None = None
+        # Stdin: two-hop upload (VM temp -> compose cp -> container), then pipe
+        stdin_vm_file: str | None = None
+        stdin_container_file: str | None = None
         if input is not None:
             data = input.encode("utf-8") if isinstance(input, str) else input
-            stdin_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
-            await sdk_upload(self.project.sandbox, stdin_file, data)
-            stdin_cmd = build_stdin_command(cmd, stdin_file)
+            stdin_vm_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
+            stdin_container_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
+            await sdk_upload(self.project.sandbox, stdin_vm_file, data)
+            await compose_exec(
+                self.project,
+                ["cp", stdin_vm_file, f"{self.service}:{stdin_container_file}"],
+                timeout=30,
+            )
+            stdin_cmd = build_stdin_command(cmd, stdin_container_file)
             exec_cmd.extend([self.service, "sh", "-c", stdin_cmd])
         else:
             exec_cmd.extend([self.service, *cmd])
@@ -227,10 +234,10 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)
         finally:
-            if stdin_file is not None:
+            if stdin_vm_file is not None:
                 await vm_exec(
                     self.project.sandbox,
-                    f"rm -f {shlex.quote(stdin_file)}",
+                    f"rm -f {shlex.quote(stdin_vm_file)}",
                     timeout=10,
                 )
 
