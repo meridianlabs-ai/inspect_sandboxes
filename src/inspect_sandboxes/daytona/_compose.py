@@ -2,7 +2,12 @@ import math
 from pathlib import Path
 from typing import Any
 
-from daytona_sdk import CreateSandboxFromImageParams, Image, Resources
+from daytona_sdk import (
+    CreateSandboxFromImageParams,
+    CreateSandboxFromSnapshotParams,
+    Image,
+    Resources,
+)
 from inspect_ai.util import ComposeConfig, ComposeService
 
 from inspect_sandboxes._util.compose import (
@@ -16,7 +21,7 @@ def create_single_service_params(
     config: ComposeConfig,
     compose_path: str | None,
     labels: dict[str, str],
-) -> CreateSandboxFromImageParams:
+) -> CreateSandboxFromImageParams | CreateSandboxFromSnapshotParams:
     """Create Daytona sandbox params from a single-service compose config.
 
     Args:
@@ -40,7 +45,7 @@ def create_single_service_params(
     else:
         raise ValueError("Compose service must specify either 'image' or 'build'")
 
-    # Resources
+    # Resources (from service, may be overridden by x-daytona.resources below)
     resources = _service_to_resources(service)
 
     # Sandbox-level params
@@ -61,10 +66,30 @@ def create_single_service_params(
 
     sandbox_params.setdefault("auto_stop_interval", 0)
     x_labels = sandbox_params.pop("labels", {})
+    merged_labels = {**x_labels, **labels}
+
+    # x-daytona.resources overrides service-level resources
+    resources_override = sandbox_params.pop("resources", None)
+    if resources_override:
+        resources = Resources(
+            cpu=resources_override.get("cpu"),
+            memory=resources_override.get("memory"),
+            gpu=resources_override.get("gpu"),
+        )
+
+    # x-daytona.snapshot: use pre-built snapshot instead of building from image
+    snapshot = sandbox_params.pop("snapshot", None)
+    if snapshot:
+        return CreateSandboxFromSnapshotParams(
+            snapshot=snapshot,
+            labels=merged_labels,
+            **sandbox_params,
+        )
+
     return CreateSandboxFromImageParams(
         image=image,
         resources=resources,
-        labels={**x_labels, **labels},
+        labels=merged_labels,
         **sandbox_params,
     )
 
@@ -133,8 +158,10 @@ def apply_daytona_extensions(
             x-daytona values take precedence over service-level environment.
         - labels (dict): Custom labels. Merged by the caller with inspect's own labels,
             which take precedence.
-        - dind_snapshot (str): Pre-created Daytona snapshot name for DinD sandboxes.
-            Overrides auto-snapshot creation.
+        - snapshot (str): Pre-created Daytona snapshot name. For single-service,
+            skips image building. For DinD, uses as the DinD VM snapshot.
+        - resources (dict): Sandbox-level resource overrides (cpu, memory, gpu).
+            For DinD, overrides the per-service aggregation.
         - volumes: Not yet supported.
 
     Args:
@@ -155,7 +182,8 @@ def apply_daytona_extensions(
         "ephemeral",
         "timeout",
         "labels",
-        "dind_snapshot",
+        "snapshot",
+        "resources",
     ]
 
     for key in simple_keys:

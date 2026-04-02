@@ -47,6 +47,7 @@ _SERVICE_TIMEOUT = 120
 @dataclass
 class DaytonaDinDProject:
     """Shared state for all per-service environments in one DinD sample."""
+
     sandbox: AsyncSandbox
     project_name: str
     compose_path: str
@@ -114,8 +115,7 @@ async def _wait_for_docker_daemon(sandbox: AsyncSandbox) -> None:
         await asyncio.sleep(_DAEMON_POLL_INTERVAL)
 
     raise RuntimeError(
-        f"Docker daemon not ready after {_DAEMON_TIMEOUT}s. "
-        f"Last output: {last_output}"
+        f"Docker daemon not ready after {_DAEMON_TIMEOUT}s. Last output: {last_output}"
     )
 
 
@@ -267,7 +267,9 @@ async def _upload_build_contexts(
                 service.build.context = remote
 
     # Write rewritten compose YAML to sandbox
-    data = config_copy.model_dump(by_alias=True, exclude_none=True, exclude_defaults=True)
+    data = config_copy.model_dump(
+        by_alias=True, exclude_none=True, exclude_defaults=True
+    )
     rewritten_yaml = yaml.dump(data, sort_keys=False)
     rewritten_remote = f"{COMPOSE_DIR}/compose.yaml"
 
@@ -382,11 +384,11 @@ async def create_dind_project(
     # 2. Create sandbox from snapshot or image
     params: CreateSandboxFromSnapshotParams | CreateSandboxFromImageParams
     if snapshot:
-        params  = CreateSandboxFromSnapshotParams(
-                snapshot=snapshot,
-                labels=labels,
-                network_block_all=False,
-                **extra,
+        params = CreateSandboxFromSnapshotParams(
+            snapshot=snapshot,
+            labels=labels,
+            network_block_all=False,
+            **extra,
         )
     else:
         params = CreateSandboxFromImageParams(
@@ -443,7 +445,9 @@ async def create_dind_project(
 
         # 7. Verify services are running
         expected_services = list(config.services.keys())
-        await _wait_for_services(project, expected_services, timeout=healthcheck_timeout)
+        await _wait_for_services(
+            project, expected_services, timeout=healthcheck_timeout
+        )
         project.services = expected_services
 
         return project
@@ -453,7 +457,9 @@ async def create_dind_project(
         try:
             await delete_sandbox(client, sandbox)
         except Exception as cleanup_err:
-            logger.warning("Failed to clean up DinD sandbox %s: %s", sandbox.id, cleanup_err)
+            logger.warning(
+                "Failed to clean up DinD sandbox %s: %s", sandbox.id, cleanup_err
+            )
         raise
 
 

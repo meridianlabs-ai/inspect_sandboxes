@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import os
 import shlex
 import shutil
 import tempfile
@@ -13,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, overload
 
 import yaml
-from daytona_sdk import AsyncDaytona
+from daytona_sdk import AsyncDaytona, Resources
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
@@ -118,13 +117,19 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             x_labels = sandbox_params.pop("labels", {})
             merged_labels = {**x_labels, **labels}
 
-            # Snapshot override: x-daytona.dind_snapshot or DAYTONA_DIND_SNAPSHOT env var
-            snapshot = sandbox_params.pop("dind_snapshot", None) or os.environ.get(
-                "DAYTONA_DIND_SNAPSHOT"
-            )
+            # Snapshot override from x-daytona.snapshot
+            snapshot = sandbox_params.pop("snapshot", None)
 
-            # Aggregate resources across all services
-            resources = aggregate_resources(config)
+            # Resources: x-daytona.resources overrides per-service aggregation
+            resources_override = sandbox_params.pop("resources", None)
+            if resources_override:
+                resources = Resources(
+                    cpu=resources_override.get("cpu"),
+                    memory=resources_override.get("memory"),
+                    gpu=resources_override.get("gpu"),
+                )
+            else:
+                resources = aggregate_resources(config)
 
             project = await create_dind_project(
                 client,
@@ -227,9 +232,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             exec_cmd.extend([self.service, *cmd])
 
         async def _run(t: int | None) -> ExecResult[str]:
-            exit_code, output = await compose_exec(
-                self.project, exec_cmd, timeout=t
-            )
+            exit_code, output = await compose_exec(self.project, exec_cmd, timeout=t)
             return ExecResult(
                 success=exit_code == 0,
                 returncode=exit_code,
@@ -273,7 +276,9 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
                     f"docker compose cp to {self.service}:{file} failed: {output}"
                 )
         finally:
-            await vm_exec(self.project.sandbox, f"rm -f {shlex.quote(temp)}", timeout=10)
+            await vm_exec(
+                self.project.sandbox, f"rm -f {shlex.quote(temp)}", timeout=10
+            )
 
     @overload
     async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
@@ -305,7 +310,9 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
                 )
             contents_bytes = await sdk_download(self.project.sandbox, temp)
         finally:
-            await vm_exec(self.project.sandbox, f"rm -f {shlex.quote(temp)}", timeout=10)
+            await vm_exec(
+                self.project.sandbox, f"rm -f {shlex.quote(temp)}", timeout=10
+            )
 
         return decode_file_content(contents_bytes, file, text)
 
@@ -332,9 +339,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             timeout=10,
         )
         if exit_code != 0:
-            raise FileNotFoundError(
-                errno.ENOENT, "No such file or directory", path
-            )
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", path)
         try:
             return int(output.strip())
         except ValueError as e:

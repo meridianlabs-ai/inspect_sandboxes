@@ -59,12 +59,19 @@ async def run_with_timeout_retry(
     else:
         attempt_timeouts = [timeout]
 
-    last_timeout_exc: DaytonaTimeoutError | None = None
+    last_timeout_exc: DaytonaError | None = None
     for t in attempt_timeouts:
         try:
             return await run_fn(t)
         except DaytonaTimeoutError as e:
             last_timeout_exc = e
+        except DaytonaError as e:
+            # The SDK sometimes raises DaytonaError (not DaytonaTimeoutError)
+            # for exec timeouts — detect via message.
+            if "timeout" in str(e).lower():
+                last_timeout_exc = e
+            else:
+                raise
 
     assert last_timeout_exc is not None
     raise TimeoutError(

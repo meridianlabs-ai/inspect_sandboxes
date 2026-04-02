@@ -100,14 +100,19 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         else:
             command = shlex.join(cmd)
 
-        # Daytona's process.exec() has no user param — wrap with su.
-        # Resolve numeric UIDs to usernames since su requires a username.
+        # Daytona's process.exec() has no user param — use sudo -u to switch.
         if user is not None:
             if user.isdigit():
-                user_arg = f"$(getent passwd {user} | cut -d: -f1)"
+                user_arg = f"#{user}"
             else:
                 user_arg = shlex.quote(user)
-            command = f"su {user_arg} -s /bin/bash -c {shlex.quote(command)}"
+            command = f"sudo -u {user_arg} bash -c {shlex.quote(command)}"
+
+        # Workaround: Daytona SDK truncates env var values at spaces.
+        # Double-quoting values preserves them through the shell.
+        # See: https://github.com/daytonaio/daytona/issues/4316
+        if env:
+            env = {k: f'"{v}"' for k, v in env.items()}
 
         @exec_retry
         async def _run(t: int | None) -> ExecResult[str]:
@@ -173,6 +178,12 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
 
         return decode_file_content(contents_bytes, file, text)
 
+    @staticmethod
+    def _check_permission_error(e: DaytonaError, path: str) -> None:
+        """Translate Daytona permission errors to PermissionError."""
+        if e.status_code == 403 or "permission denied" in str(e).lower():
+            raise PermissionError(errno.EACCES, "Permission denied", path) from e
+
     @standard_retry
     async def _get_file_size(self, file: str) -> int:
         try:
@@ -182,6 +193,9 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             raise FileNotFoundError(
                 errno.ENOENT, "No such file or directory", file
             ) from e
+        except DaytonaError as e:
+            self._check_permission_error(e, file)
+            raise
 
     @standard_retry
     async def _is_directory(self, file: str) -> bool:
@@ -190,6 +204,9 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             return bool(info.is_dir)
         except DaytonaNotFoundError:
             return False
+        except DaytonaError as e:
+            self._check_permission_error(e, file)
+            raise
 
     @standard_retry
     async def _download_file(self, file: str) -> bytes:
@@ -199,16 +216,24 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             raise FileNotFoundError(
                 errno.ENOENT, "No such file or directory", file
             ) from e
+        except DaytonaError as e:
+            self._check_permission_error(e, file)
+            raise
 
     @standard_retry
     async def _create_parent_folder(self, path: str) -> None:
         try:
             await self.sandbox.fs.create_folder(path, "755")
         except DaytonaError as e:
-            # No DaytonaConflictError subclass exists, so we check status_code.
-            if e.status_code != 409:  # 409 = directory already exists
-                raise
+            if e.status_code == 409:  # directory already exists
+                return
+            self._check_permission_error(e, path)
+            raise
 
     @standard_retry
     async def _write_file_content(self, file: str, contents: bytes) -> None:
-        await self.sandbox.fs.upload_file(contents, file)
+        try:
+            await self.sandbox.fs.upload_file(contents, file)
+        except DaytonaError as e:
+            self._check_permission_error(e, file)
+            raise
