@@ -48,6 +48,9 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         if not environments or interrupted:
             return
 
+        # Deferred import to avoid circular dependency:
+        # _daytona.py imports _single_env.py (for DaytonaSingleServiceEnvironment),
+        # and _single_env.py needs _daytona_client from _daytona.py for cleanup.
         from ._daytona import _daytona_client
 
         client = _daytona_client.get()

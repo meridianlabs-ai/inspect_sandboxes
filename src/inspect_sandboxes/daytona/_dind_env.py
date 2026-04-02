@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import shlex
+import shutil
 import tempfile
 import uuid
 from logging import getLogger
@@ -84,8 +85,8 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         """
         # When a ComposeConfig object is passed without a compose file path,
         # serialize it to a temporary YAML file for the DinD build context.
+        tmp_dir: Path | None = None
         if compose_file is None:
-            tmp_dir: Path | None = None
             try:
                 tmp_dir = Path(tempfile.mkdtemp(prefix="inspect-compose-"))
                 tmp_path = tmp_dir / "compose.yaml"
@@ -96,45 +97,47 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
                 compose_file = str(tmp_path)
             except Exception as e:
                 if tmp_dir is not None:
-                    import shutil
-
                     shutil.rmtree(tmp_dir, ignore_errors=True)
                 raise RuntimeError(
                     "Failed to serialize ComposeConfig to a temporary compose file."
                 ) from e
 
-        # Extract x-daytona sandbox-level params
-        sandbox_params: dict[str, Any] = {}
-        apply_daytona_extensions(sandbox_params, config.extensions)
+        try:
+            # Extract x-daytona sandbox-level params
+            sandbox_params: dict[str, Any] = {}
+            apply_daytona_extensions(sandbox_params, config.extensions)
 
-        # DinD sandbox must have network — warn if user tried to block it
-        if sandbox_params.pop("network_block_all", None):
-            logger.warning(
-                "network_block_all is ignored for DinD multi-service sandboxes "
-                "(Docker daemon requires network access for image pulls)."
+            # DinD sandbox must have network — warn if user tried to block it
+            if sandbox_params.pop("network_block_all", None):
+                logger.warning(
+                    "network_block_all is ignored for DinD multi-service sandboxes "
+                    "(Docker daemon requires network access for image pulls)."
+                )
+
+            # Merge labels
+            x_labels = sandbox_params.pop("labels", {})
+            merged_labels = {**x_labels, **labels}
+
+            # Snapshot override: x-daytona.dind_snapshot or DAYTONA_DIND_SNAPSHOT env var
+            snapshot = sandbox_params.pop("dind_snapshot", None) or os.environ.get(
+                "DAYTONA_DIND_SNAPSHOT"
             )
 
-        # Merge labels
-        x_labels = sandbox_params.pop("labels", {})
-        merged_labels = {**x_labels, **labels}
+            # Aggregate resources across all services
+            resources = aggregate_resources(config)
 
-        # Snapshot override: x-daytona.dind_snapshot or DAYTONA_DIND_SNAPSHOT env var
-        snapshot = sandbox_params.pop("dind_snapshot", None) or os.environ.get(
-            "DAYTONA_DIND_SNAPSHOT"
-        )
-
-        # Aggregate resources across all services
-        resources = aggregate_resources(config)
-
-        project = await create_dind_project(
-            client,
-            config,
-            compose_file,
-            labels=merged_labels,
-            resources=resources,
-            sandbox_params=sandbox_params,
-            snapshot=snapshot,
-        )
+            project = await create_dind_project(
+                client,
+                config,
+                compose_file,
+                labels=merged_labels,
+                resources=resources,
+                sandbox_params=sandbox_params,
+                snapshot=snapshot,
+            )
+        finally:
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # Build per-service environments with default first
         default_name, _ = find_default_service(config)
@@ -158,6 +161,9 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         if not environments or interrupted:
             return
 
+        # Deferred import to avoid circular dependency:
+        # _daytona.py imports _dind_env.py (for DaytonaDinDServiceEnvironment),
+        # and _dind_env.py needs _daytona_client from _daytona.py for cleanup.
         from ._daytona import _daytona_client
 
         client = _daytona_client.get()
@@ -200,7 +206,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             exec_cmd.extend(["--user", user])
         if env:
             for k, v in env.items():
-                exec_cmd.extend(["-e", f"{k}={shlex.quote(v)}"])
+                exec_cmd.extend(["-e", f"{k}={v}"])
 
         # Stdin: two-hop upload (VM temp -> compose cp -> container), then pipe
         stdin_vm_file: str | None = None
