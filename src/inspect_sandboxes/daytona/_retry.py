@@ -1,9 +1,9 @@
 """Shared retry utilities for the Daytona sandbox provider.
 
-The Daytona SDK has NO built-in retry. HTTP retry (aiohttp_retry) is
-disabled by default (Configuration.retries is None), and POST requests
-(including exec) are excluded from aiohttp_retry even if enabled.
-Rate-limit errors (429) raise DaytonaRateLimitError immediately.
+The Daytona SDK has no built-in retry, so we handle it here.
+All DaytonaError subclasses (including DaytonaRateLimitError)
+are retried with exponential backoff, except DaytonaTimeoutError which
+is handled separately by run_with_timeout_retry.
 """
 
 from __future__ import annotations
