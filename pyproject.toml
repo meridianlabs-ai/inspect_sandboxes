@@ -102,6 +102,9 @@ ignore = [
     "D415", # first line should end with a period, question mark, or exclamation point
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D103"]  # missing docstring in public function
+
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
@@ -111,6 +114,7 @@ relative_files = true
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
 markers = [
-    "integration: marks tests that require real Modal resources (deselect with '-m \"not integration\"')",
+    "integration: marks tests that require real Modal/Daytona resources (run with '-m integration')",
 ]

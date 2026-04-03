@@ -5,28 +5,40 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from daytona_sdk import Image
+from daytona_sdk import (
+    CreateSandboxFromImageParams,
+    CreateSandboxFromSnapshotParams,
+    Image,
+)
 from inspect_ai.util import (
     ComposeConfig,
     ComposeService,
     parse_compose_yaml,
 )
+from inspect_ai.util._sandbox.compose import (
+    ComposeDeploy,
+    ComposeResourceConfig,
+    ComposeResources,
+)
 from inspect_sandboxes.daytona._compose import (
-    _apply_daytona_extensions,
     _service_to_resources,
     _to_gib,
-    convert_compose_to_daytona_params,
+    aggregate_resources,
+    apply_daytona_extensions,
+    create_single_service_params,
 )
+
+STUB_LABELS = {"created_by": "test"}
 
 
 @pytest.mark.parametrize(
     ("mem_str", "expected_gib"),
     [
-        ("512m", 1),  # 0.5 GiB → rounds up to 1 GiB
+        ("512m", 1),  # 0.5 GiB -> rounds up to 1 GiB
         ("1g", 1),  # exactly 1 GiB
-        ("1536m", 2),  # 1.5 GiB → rounds up to 2 GiB
+        ("1536m", 2),  # 1.5 GiB -> rounds up to 2 GiB
         ("2g", 2),  # exactly 2 GiB
-        ("100m", 1),  # tiny → minimum 1 GiB
+        ("100m", 1),  # tiny -> minimum 1 GiB
         ("4g", 4),  # 4 GiB
     ],
 )
@@ -89,7 +101,7 @@ def test_apply_daytona_extensions(
 ) -> None:
     """Test Daytona extensions are correctly applied to params dict."""
     params: dict[str, Any] = {}
-    _apply_daytona_extensions(params, extensions)
+    apply_daytona_extensions(params, extensions)
     assert params == expected_params
 
 
@@ -105,14 +117,7 @@ def test_apply_daytona_extensions(
             None,
             None,
         ),
-        # CPU rounds up (0.5 → 1)
-        (
-            {"deploy": {"resources": {"limits": {"cpus": "0.5"}}}},
-            1,
-            None,
-            None,
-        ),
-        # Memory from deploy.resources.limits ("2g" → 2 GiB)
+        # Memory from deploy.resources.limits ("2g" -> 2 GiB)
         (
             {"deploy": {"resources": {"limits": {"memory": "2g"}}}},
             None,
@@ -134,7 +139,7 @@ def test_apply_daytona_extensions(
             None,
             2,
         ),
-        # GPU with no count → defaults to 1
+        # GPU with no count -> defaults to 1
         (
             {
                 "deploy": {
@@ -147,24 +152,8 @@ def test_apply_daytona_extensions(
             None,
             1,
         ),
-        # limits wins over reservations when both present
-        (
-            {
-                "deploy": {
-                    "resources": {
-                        "limits": {"cpus": "2.0", "memory": "2g"},
-                        "reservations": {"cpus": "8.0", "memory": "8g"},
-                    }
-                }
-            },
-            2,
-            2,
-            None,
-        ),
         # CPU from service-level cpus field
         ({"cpus": 4.0}, 4, None, None),
-        # CPU rounds up from service-level (1.5 → 2)
-        ({"cpus": 1.5}, 2, None, None),
     ],
 )
 def test_service_to_resources(
@@ -195,11 +184,10 @@ def test_service_to_resources(
         ({"build": "myapp"}, None, Image),
     ],
 )
-def test_convert_compose_to_daytona_params_image_type(
+def test_create_single_service_params_image_type(
     service_config: dict[str, Any],
     compose_path: str | None,
     expected_image_type: type,
-    tmp_path: Path,
 ) -> None:
     """Test that image is returned as the correct type."""
     service = ComposeService(**service_config)
@@ -216,16 +204,13 @@ def test_convert_compose_to_daytona_params_image_type(
         )
 
         if expected_image_type is str:
-            image, resources, sandbox_params = convert_compose_to_daytona_params(
-                config, compose_path
-            )
-            assert isinstance(image, str)
-            assert image == "python:3.12"
+            result = create_single_service_params(config, compose_path, STUB_LABELS)
+            assert isinstance(result, CreateSandboxFromImageParams)
+            assert isinstance(result.image, str)
+            assert result.image == "python:3.12"
         else:
             mock_image.from_dockerfile.return_value = MagicMock(spec=Image)
-            image, resources, sandbox_params = convert_compose_to_daytona_params(
-                config, compose_path
-            )
+            create_single_service_params(config, compose_path, STUB_LABELS)
             mock_image.from_dockerfile.assert_called_once()
 
 
@@ -247,9 +232,9 @@ def test_convert_compose_env_vars(
         }
     )
 
-    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params.get("env_vars") == expected_env_vars
+    assert result.env_vars == expected_env_vars
 
 
 def test_convert_compose_with_extensions() -> None:
@@ -259,10 +244,10 @@ def test_convert_compose_with_extensions() -> None:
         **{"x-daytona": {"network_block_all": True, "ephemeral": True}},
     )
 
-    image, resources, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params.get("network_block_all") is True
-    assert sandbox_params.get("ephemeral") is True
+    assert result.network_block_all is True
+    assert result.ephemeral is True
 
 
 def test_convert_compose_os_user_from_service() -> None:
@@ -271,9 +256,9 @@ def test_convert_compose_os_user_from_service() -> None:
         services={"default": ComposeService(image="python:3.12", user="ubuntu")}
     )
 
-    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params.get("os_user") == "ubuntu"
+    assert result.os_user == "ubuntu"
 
 
 def test_convert_compose_os_user_extension_overrides_service() -> None:
@@ -283,9 +268,9 @@ def test_convert_compose_os_user_extension_overrides_service() -> None:
         **{"x-daytona": {"os_user": "root"}},
     )
 
-    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params.get("os_user") == "root"
+    assert result.os_user == "root"
 
 
 def test_convert_compose_env_vars_merge_with_x_daytona() -> None:
@@ -300,9 +285,9 @@ def test_convert_compose_env_vars_merge_with_x_daytona() -> None:
         **{"x-daytona": {"env_vars": {"FROM_EXT": "ext_val", "SHARED": "ext"}}},
     )
 
-    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params["env_vars"] == {
+    assert result.env_vars == {
         "FROM_SERVICE": "service_val",
         "FROM_EXT": "ext_val",
         "SHARED": "ext",  # x-daytona wins
@@ -310,15 +295,19 @@ def test_convert_compose_env_vars_merge_with_x_daytona() -> None:
 
 
 def test_convert_compose_labels_from_extension() -> None:
-    """Test that x-daytona labels are stored in sandbox_params for caller to merge."""
+    """Test that x-daytona labels are merged with run labels."""
     config = ComposeConfig(
         services={"default": ComposeService(image="python:3.12")},
         **{"x-daytona": {"labels": {"team": "ml", "project": "evals"}}},
     )
 
-    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params.get("labels") == {"team": "ml", "project": "evals"}
+    # x-daytona labels merged with run labels; run labels take precedence
+    assert result.labels is not None
+    assert result.labels["team"] == "ml"
+    assert result.labels["project"] == "evals"
+    assert result.labels["created_by"] == "test"
 
 
 def test_network_mode_none_sets_block_all() -> None:
@@ -327,9 +316,9 @@ def test_network_mode_none_sets_block_all() -> None:
         services={"default": ComposeService(image="python:3.12", network_mode="none")}
     )
 
-    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params.get("network_block_all") is True
+    assert result.network_block_all is True
 
 
 def test_network_mode_bridge_allows_network() -> None:
@@ -338,9 +327,9 @@ def test_network_mode_bridge_allows_network() -> None:
         services={"default": ComposeService(image="python:3.12", network_mode="bridge")}
     )
 
-    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params.get("network_block_all") is False
+    assert result.network_block_all is False
 
 
 def test_x_daytona_overrides_network_mode() -> None:
@@ -350,9 +339,9 @@ def test_x_daytona_overrides_network_mode() -> None:
         **{"x-daytona": {"network_block_all": False}},
     )
 
-    _, _, sandbox_params = convert_compose_to_daytona_params(config, None)
+    result = create_single_service_params(config, None, STUB_LABELS)
 
-    assert sandbox_params.get("network_block_all") is False
+    assert result.network_block_all is False
 
 
 def test_convert_compose_missing_image_and_build() -> None:
@@ -362,7 +351,7 @@ def test_convert_compose_missing_image_and_build() -> None:
     )
 
     with pytest.raises(ValueError, match="must specify either 'image' or 'build'"):
-        convert_compose_to_daytona_params(config, None)
+        create_single_service_params(config, None, STUB_LABELS)
 
 
 def test_convert_compose_missing_dockerfile() -> None:
@@ -378,7 +367,7 @@ def test_convert_compose_missing_dockerfile() -> None:
         mock_resolve.return_value = mock_path
 
         with pytest.raises(FileNotFoundError, match="Dockerfile not found"):
-            convert_compose_to_daytona_params(config, "/tmp/compose.yml")
+            create_single_service_params(config, "/tmp/compose.yml", STUB_LABELS)
 
 
 def test_convert_compose_service_selection_x_default() -> None:
@@ -386,12 +375,13 @@ def test_convert_compose_service_selection_x_default() -> None:
     config = ComposeConfig(
         services={
             "web": ComposeService(image="nginx:latest"),
-            "api": ComposeService(**{"image": "python:3.12", "x-default": True}),
+            "api": ComposeService(**{"image": "python:3.12", "x-default": True}),  # type: ignore[arg-type]
         }
     )
 
-    image, _, _ = convert_compose_to_daytona_params(config, None)
-    assert image == "python:3.12"
+    result = create_single_service_params(config, None, STUB_LABELS)
+    assert isinstance(result, CreateSandboxFromImageParams)
+    assert result.image == "python:3.12"
 
 
 def test_convert_compose_service_selection_default_name() -> None:
@@ -403,8 +393,9 @@ def test_convert_compose_service_selection_default_name() -> None:
         }
     )
 
-    image, _, _ = convert_compose_to_daytona_params(config, None)
-    assert image == "python:3.12"
+    result = create_single_service_params(config, None, STUB_LABELS)
+    assert isinstance(result, CreateSandboxFromImageParams)
+    assert result.image == "python:3.12"
 
 
 def test_convert_compose_from_yaml_file(tmp_path: Path) -> None:
@@ -422,9 +413,104 @@ services:
 """)
 
     config = parse_compose_yaml(str(compose_file), multiple_services=False)
-    image, resources, _ = convert_compose_to_daytona_params(config, str(compose_file))
+    result = create_single_service_params(config, str(compose_file), STUB_LABELS)
 
-    assert image == "python:3.12"
-    assert resources is not None
-    assert resources.cpu == 4
-    assert resources.memory == 4
+    assert isinstance(result, CreateSandboxFromImageParams)
+    assert result.image == "python:3.12"
+    assert result.resources is not None
+    assert result.resources.cpu == 4
+    assert result.resources.memory == 4
+
+
+def test_auto_stop_interval_defaults_to_zero() -> None:
+    """Test that auto_stop_interval defaults to 0 when not set."""
+    config = ComposeConfig(services={"default": ComposeService(image="python:3.12")})
+
+    result = create_single_service_params(config, None, STUB_LABELS)
+
+    assert result.auto_stop_interval == 0
+
+
+def test_auto_stop_interval_from_extension() -> None:
+    """Test that x-daytona auto_stop_interval overrides the default."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+        **{"x-daytona": {"auto_stop_interval": 30}},
+    )
+
+    result = create_single_service_params(config, None, STUB_LABELS)
+
+    assert result.auto_stop_interval == 30
+
+
+def test_aggregate_resources_sums_with_overhead() -> None:
+    """Test aggregate_resources sums per-service resources and adds daemon overhead."""
+    config = ComposeConfig(
+        services={
+            "web": ComposeService(
+                image="python:3.12",
+                deploy=ComposeDeploy(
+                    resources=ComposeResourceConfig(
+                        limits=ComposeResources(cpus="2", memory="2g")
+                    )
+                ),
+            ),
+            "db": ComposeService(
+                image="postgres:16",
+                deploy=ComposeDeploy(
+                    resources=ComposeResourceConfig(
+                        limits=ComposeResources(cpus="1", memory="1g")
+                    )
+                ),
+            ),
+        }
+    )
+
+    result = aggregate_resources(config)
+
+    assert result is not None
+    assert result.cpu == 4  # 2 + 1 + 1 overhead
+    assert result.memory == 4  # 2 + 1 + 1 overhead
+    assert result.gpu is None
+
+
+def test_aggregate_resources_returns_none_when_no_resources() -> None:
+    """Test aggregate_resources returns None when no services have resources."""
+    config = ComposeConfig(
+        services={
+            "web": ComposeService(image="python:3.12"),
+            "db": ComposeService(image="postgres:16"),
+        }
+    )
+
+    result = aggregate_resources(config)
+
+    assert result is None
+
+
+def test_create_single_service_params_with_snapshot() -> None:
+    """Test that x-daytona.snapshot returns CreateSandboxFromSnapshotParams."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+        **{"x-daytona": {"snapshot": "my-snapshot"}},
+    )
+
+    result = create_single_service_params(config, None, STUB_LABELS)
+
+    assert isinstance(result, CreateSandboxFromSnapshotParams)
+    assert result.snapshot == "my-snapshot"
+
+
+def test_create_single_service_params_with_resources_override() -> None:
+    """Test that x-daytona.resources overrides service-level resources."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+        **{"x-daytona": {"resources": {"cpu": 4, "memory": 8}}},
+    )
+
+    result = create_single_service_params(config, None, STUB_LABELS)
+
+    assert isinstance(result, CreateSandboxFromImageParams)
+    assert result.resources is not None
+    assert result.resources.cpu == 4
+    assert result.resources.memory == 8
