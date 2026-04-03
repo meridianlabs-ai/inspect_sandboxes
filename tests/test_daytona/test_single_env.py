@@ -111,7 +111,7 @@ async def test_exec_with_numeric_user_resolves_via_getent(
     await env.exec(["whoami"], user="1000")
 
     command = mock_sandbox.process.exec.call_args[0][0]
-    assert "sudo -u #1000" in command
+    assert "sudo -u '#1000'" in command
 
 
 @pytest.mark.asyncio

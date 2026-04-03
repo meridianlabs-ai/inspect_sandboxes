@@ -221,11 +221,15 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             stdin_vm_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
             stdin_container_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
             await sdk_upload(self.project.sandbox, stdin_vm_file, data)
-            await compose_exec(
+            cp_exit, cp_output = await compose_exec(
                 self.project,
                 ["cp", stdin_vm_file, f"{self.service}:{stdin_container_file}"],
                 timeout=30,
             )
+            if cp_exit != 0:
+                raise RuntimeError(
+                    f"Failed to copy stdin to {self.service}: {cp_output}"
+                )
             stdin_cmd = build_stdin_command(cmd, stdin_container_file)
             exec_cmd.extend([self.service, "sh", "-c", stdin_cmd])
         else:

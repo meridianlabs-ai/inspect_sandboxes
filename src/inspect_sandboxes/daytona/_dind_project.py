@@ -114,8 +114,14 @@ async def _wait_for_docker_daemon(sandbox: AsyncSandbox) -> None:
         last_output = output
         await asyncio.sleep(_DAEMON_POLL_INTERVAL)
 
+    # Include daemon log to help diagnose startup failures
+    _, daemon_log = await vm_exec(
+        sandbox, "tail -20 /var/log/dockerd.log 2>/dev/null || true", timeout=5
+    )
     raise RuntimeError(
-        f"Docker daemon not ready after {_DAEMON_TIMEOUT}s. Last output: {last_output}"
+        f"Docker daemon not ready after {_DAEMON_TIMEOUT}s.\n"
+        f"Last 'docker info' output: {last_output}\n"
+        f"dockerd log:\n{daemon_log}"
     )
 
 
@@ -246,7 +252,7 @@ async def _upload_build_contexts(
 
     # Rewrite compose YAML with remote context paths
     config_copy = deepcopy(config)
-    for _, service in config_copy.services.items():
+    for service in config_copy.services.values():
         if not service.build:
             continue
 
@@ -286,7 +292,7 @@ def _compute_healthcheck_timeout(
     """Compute the maximum wait time from compose healthcheck configs."""
     max_time = 0
 
-    for _, service in services.items():
+    for service in services.values():
         hc = service.healthcheck
         if hc is None:
             continue
@@ -424,7 +430,7 @@ async def create_dind_project(
             compose_path=compose_remote_path,
         )
 
-        # 5. Build services
+        # 6. Build services
         logger.debug("Building compose services in DinD sandbox %s...", sandbox.id)
         exit_code, output = await compose_exec(
             project, ["build"], timeout=BUILD_TIMEOUT
@@ -432,7 +438,7 @@ async def create_dind_project(
         if exit_code != 0:
             raise RuntimeError(f"docker compose build failed:\n{output}")
 
-        # 6. Start services
+        # 7. Start services
         healthcheck_timeout = _compute_healthcheck_timeout(config.services)
         logger.debug("Starting compose services in DinD sandbox %s...", sandbox.id)
         exit_code, output = await compose_exec(
@@ -443,7 +449,7 @@ async def create_dind_project(
         if exit_code != 0:
             raise RuntimeError(f"docker compose up failed:\n{output}")
 
-        # 7. Verify services are running
+        # 8. Verify services are running
         expected_services = list(config.services.keys())
         await _wait_for_services(
             project, expected_services, timeout=healthcheck_timeout

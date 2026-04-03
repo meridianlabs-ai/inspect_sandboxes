@@ -103,7 +103,7 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         # Daytona's process.exec() has no user param — use sudo -u to switch.
         if user is not None:
             if user.isdigit():
-                user_arg = f"#{user}"
+                user_arg = shlex.quote(f"#{user}")
             else:
                 user_arg = shlex.quote(user)
             command = f"sudo -u {user_arg} bash -c {shlex.quote(command)}"
