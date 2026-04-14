@@ -589,3 +589,55 @@ async def test_self_check_single_service(
     ]
     results = await self_check(daytona_single_env)
     _check_self_check_results(results, known_failures)
+
+
+@pytest_asyncio.fixture
+async def daytona_dind_env() -> AsyncGenerator[SandboxEnvironment, None]:
+    """Create a real DinD Daytona sandbox for integration testing.
+
+    Uses a two-service ComposeConfig so the dispatcher routes to DinD.
+    """
+    config = ComposeConfig(
+        services={
+            "default": ComposeService(
+                image="python:3.12-slim", command="sleep infinity"
+            ),
+            "helper": ComposeService(
+                image="python:3.12-slim", command="sleep infinity"
+            ),
+        }
+    )
+    await DaytonaSandboxEnvironment.task_init("test_self_check_dind", None)
+    envs = await DaytonaSandboxEnvironment.sample_init(
+        "test_self_check_dind", config, {}
+    )
+    yield envs["default"]
+    try:
+        await DaytonaSandboxEnvironment.sample_cleanup(
+            "test_self_check_dind", config, envs, False
+        )
+        await DaytonaSandboxEnvironment.task_cleanup(
+            "test_self_check_dind", None, cleanup=True
+        )
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_self_check_dind(
+    daytona_dind_env: SandboxEnvironment,
+) -> None:
+    """Run inspect_ai's self-check suite against a DinD Daytona sandbox."""
+    known_failures = [
+        "test_exec_stderr",  # DinD routes through compose exec; stderr merged
+        "test_exec_permission_error",  # exit code 126, not translated to PermissionError
+        "test_exec_output",  # trailing newline stripped by compose exec
+        "test_exec_env_vars",  # trailing newline stripped
+        "test_write_text_file_without_permissions",  # root user in container
+        "test_write_binary_file_without_permissions",  # same
+        "test_read_file_not_allowed",  # root user
+        "test_exec_as_user",  # adduser/useradd may not be available
+    ]
+    results = await self_check(daytona_dind_env)
+    _check_self_check_results(results, known_failures)

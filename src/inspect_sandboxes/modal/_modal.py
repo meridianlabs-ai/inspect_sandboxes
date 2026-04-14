@@ -360,6 +360,8 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 stderr=stderr,
             )
 
+        # Timeout: Modal kills exec'd processes server-side when the gRPC
+        # stream is cancelled. No in-container ``timeout`` wrapping needed.
         # On timeout, retry with a capped timeout: first retry ≤60s, second ≤30s.
         if timeout_retry:
             t1 = min(timeout, 60) if timeout is not None else 60

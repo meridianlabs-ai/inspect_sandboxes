@@ -88,6 +88,10 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         Note:
             stderr is always empty. The Daytona API returns a single combined
             output field; stdout and stderr are not distinguished.
+
+        Timeout: The Daytona server enforces timeouts server-side, killing
+            the process tree. No in-container ``timeout`` wrapping needed
+            (unlike the Docker sandbox).
         """
         # Daytona's process.exec() doesn't support stdin natively.
         # When input is provided, write it to a temp file and pipe it into the command.
