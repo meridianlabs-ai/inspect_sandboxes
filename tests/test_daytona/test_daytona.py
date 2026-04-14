@@ -599,8 +599,12 @@ async def daytona_dind_env() -> AsyncGenerator[SandboxEnvironment, None]:
     """
     config = ComposeConfig(
         services={
-            "default": ComposeService(image="python:3.12-slim", command="sleep infinity"),
-            "helper": ComposeService(image="python:3.12-slim", command="sleep infinity"),
+            "default": ComposeService(
+                image="python:3.12-slim", command="sleep infinity"
+            ),
+            "helper": ComposeService(
+                image="python:3.12-slim", command="sleep infinity"
+            ),
         }
     )
     await DaytonaSandboxEnvironment.task_init("test_self_check_dind", None)
