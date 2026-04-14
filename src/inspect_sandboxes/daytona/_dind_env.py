@@ -200,6 +200,10 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
+        # Timeout: The Daytona server kills the VM-level process tree on
+        # timeout, which tears down the docker compose exec session and its
+        # in-container processes. No in-container ``timeout`` wrapping needed.
+
         # Resolve working directory
         workdir = cwd if cwd is not None else self._working_dir
         if not PurePosixPath(workdir).is_absolute():
