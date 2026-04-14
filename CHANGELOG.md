@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.2.0...v0.2.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* add DinD self-check test and document timeout cleanup behavior ([#16](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/16)) ([60dfe1e](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/60dfe1e78f01602f90b25006216233599daad3f0))
+
 ## [0.2.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.1.2...v0.2.0) (2026-04-03)
 
 
