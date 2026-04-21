@@ -87,9 +87,7 @@ async def test_exec_passes_cwd_and_env(mock_sandbox: MagicMock) -> None:
 
     call_kwargs = mock_sandbox.process.exec.call_args[1]
     assert call_kwargs["cwd"] == "/workspace"
-    assert call_kwargs["env"] == {
-        "MY_VAR": '"value"'
-    }  # double-quoted for Daytona SDK bug
+    assert call_kwargs["env"] == {"MY_VAR": "value"}
 
 
 @pytest.mark.asyncio
