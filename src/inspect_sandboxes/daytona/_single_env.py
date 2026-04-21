@@ -112,12 +112,6 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
                 user_arg = shlex.quote(user)
             command = f"sudo -u {user_arg} bash -c {shlex.quote(command)}"
 
-        # Workaround: Daytona SDK truncates env var values at spaces.
-        # Double-quoting values preserves them through the shell.
-        # See: https://github.com/daytonaio/daytona/issues/4316
-        if env:
-            env = {k: f'"{v}"' for k, v in env.items()}
-
         @exec_retry
         async def _run(t: int | None) -> ExecResult[str]:
             response = await self.sandbox.process.exec(
