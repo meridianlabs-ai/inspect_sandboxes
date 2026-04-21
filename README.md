@@ -16,11 +16,11 @@
 | src/inspect\_sandboxes/daytona/\_dind\_project.py  |      224 |       95 |       68 |        6 |     52% |142-\>154, 149-150, 170-186, 204-285, 326-356, 385-\>392, 393, 439, 450, 465-466, 484-\>exit, 486-487, 498-509 |
 | src/inspect\_sandboxes/daytona/\_retry.py          |       26 |        4 |        6 |        1 |     78% | 60, 71-74 |
 | src/inspect\_sandboxes/daytona/\_sandbox\_utils.py |       48 |        5 |        8 |        0 |     91% |60-61, 85, 103, 108 |
-| src/inspect\_sandboxes/daytona/\_single\_env.py    |      121 |       23 |       22 |        1 |     80% |154-\>157, 188-189, 196-202, 209-213, 223-225, 231-235, 241-243 |
+| src/inspect\_sandboxes/daytona/\_single\_env.py    |      119 |       23 |       20 |        1 |     80% |148-\>151, 182-183, 190-196, 203-207, 217-219, 225-229, 235-237 |
 | src/inspect\_sandboxes/modal/\_\_init\_\_.py       |        0 |        0 |        0 |        0 |    100% |           |
 | src/inspect\_sandboxes/modal/\_compose.py          |      119 |        5 |       72 |        3 |     96% |212-213, 220-221, 263-\>268, 264-\>263, 269 |
 | src/inspect\_sandboxes/modal/\_modal.py            |      270 |       54 |       64 |        6 |     79% |98, 108, 260-265, 327-340, 371, 381-384, 397, 401-402, 424-427, 434-435, 448, 455, 460-463, 489-492, 496-498, 502-517, 521 |
-| **TOTAL**                                          | **1272** |  **241** |  **402** |   **43** | **79%** |           |
+| **TOTAL**                                          | **1270** |  **241** |  **400** |   **43** | **79%** |           |
 
 
 ## Setup coverage badge
