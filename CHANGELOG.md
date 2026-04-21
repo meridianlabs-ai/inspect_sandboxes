@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.2.1...v0.2.2) (2026-04-21)
+
+
+### Bug Fixes
+
+* **daytona:** remove env var space-splitting workaround ([#18](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/18)) ([9a18e16](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/9a18e165ca1893590ec87a9d2bdb333c60a277c6))
+
 ## [0.2.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.2.0...v0.2.1) (2026-04-14)
 
 
