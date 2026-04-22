@@ -899,8 +899,8 @@ wheels = [
 
 [[package]]
 name = "inspect-ai"
-version = "0.3.206.dev73+ge09f3266"
-source = { git = "https://github.com/UKGovernmentBEIS/inspect_ai.git?rev=main#e09f3266b43da6580ebb93d672fb5c23732dfc48" }
+version = "0.3.210"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aioboto3" },
     { name = "aiohttp" },
@@ -940,6 +940,10 @@ dependencies = [
     { name = "zipp" },
     { name = "zstandard" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/ec/9d3ba9c6d55f68c6dd98281a9ac8ad2230c9c10d4b92a1cc314b78127ce7/inspect_ai-0.3.210.tar.gz", hash = "sha256:67987643d8545ed3373da9dfbc8f30abd3b9ca39615c296fdef8c6250f1d2d2b", size = 45243939, upload-time = "2026-04-22T10:45:03.89Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/81/d439aa515dafa9fe6a07bc3f44ceccd66e5cf11870d71f17222b0d072543/inspect_ai-0.3.210-py3-none-any.whl", hash = "sha256:ce8d8736575ece05e680dae944da4739b1778e0f6465211cc2728bd14d73e6a3", size = 35958925, upload-time = "2026-04-22T10:44:57.432Z" },
+]
 
 [[package]]
 name = "inspect-sandboxes"
@@ -966,7 +970,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "daytona-sdk", specifier = ">=0.166.0" },
-    { name = "inspect-ai", git = "https://github.com/UKGovernmentBEIS/inspect_ai.git?rev=main" },
+    { name = "inspect-ai", specifier = ">=0.3.210" },
     { name = "modal", specifier = ">=1.3.3" },
     { name = "tenacity", specifier = ">=9.1.4" },
 ]
