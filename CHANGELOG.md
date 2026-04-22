@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.2.2...v0.2.3) (2026-04-22)
+
+
+### Bug Fixes
+
+* replace inspect-ai git dep with PyPI version ([#20](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/20)) ([9722e3c](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/9722e3c0315ac51e52a438382cdb87f3ccd026a3))
+
 ## [0.2.2](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.2.1...v0.2.2) (2026-04-21)
 
 
