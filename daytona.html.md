@@ -1,0 +1,192 @@
+# Daytona – Inspect Sandboxes
+
+Cloud development environment sandbox for [Inspect AI](https://inspect.aisi.org.uk/) using [Daytona](https://www.daytona.io/).
+
+## Setup
+
+Create a Daytona account and set your API key:
+
+``` bash
+export DAYTONA_API_KEY=your_api_key
+```
+
+## Usage
+
+### Default snapshot
+
+> **NOTE: NoteWhat’s a snapshot?**
+>
+> A Daytona *snapshot* is a sandbox template built from a Docker/OCI image, bundled with resource allocation, entrypoint, and lifecycle metadata. Functionally similar to a container image, but Daytona-managed so sandboxes can be started from it quickly. See [Daytona’s snapshots docs](https://www.daytona.io/docs/en/snapshots).
+
+A minimal eval that uses Daytona’s default snapshot (`daytonaio/sandbox`), which comes with Python, Node.js, their language servers, and common packages (pandas, torch, anthropic, langchain, typescript, bun, etc.).
+
+``` python
+from inspect_ai import Task, eval
+from inspect_ai.solver import generate, system_message
+
+task = Task(
+    dataset=[{"input": "What is 2+2?", "target": "4"}],
+    solver=[
+        system_message("You are a helpful assistant."),
+        generate(),
+    ],
+    sandbox="daytona",  # Uses Daytona's default snapshot
+)
+
+eval(task)
+```
+
+> **NOTE: Note**
+>
+> The default snapshot is only used when no config is specified AND no `Dockerfile` / `compose.yaml` / `compose.yml` / `docker-compose.yaml` / `docker-compose.yml` is present in the task’s source directory — if one is found there, it is auto-detected and used instead.
+
+### Dockerfile
+
+Build the sandbox image from a local Dockerfile.
+
+``` python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("daytona", "path/to/Dockerfile"),
+)
+```
+
+### Docker Compose
+
+Configure the sandbox via a Docker Compose file. A file with a single service gets a single Daytona sandbox; a file with two or more services automatically switches to Docker-in-Docker (DinD). Daytona-specific settings go under the top-level `x-daytona` key — see [Configuration](#configuration).
+
+#### Single-service
+
+``` yaml
+# compose.yaml
+services:
+  default:
+    image: python:3.12
+    environment:
+      - MY_VAR=hello
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              count: 1
+```
+
+``` python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("daytona", "path/to/compose.yaml"),
+)
+```
+
+#### Multi-service (DinD)
+
+When a compose file defines more than one service, the provider automatically uses Docker-in-Docker: a single Daytona sandbox runs a Docker daemon, and services are brought up via `docker compose` inside it. Each service is exposed as a separate `SandboxEnvironment`.
+
+``` yaml
+# compose.yaml
+services:
+  default:
+    image: python:3.12
+    x-default: true
+  helper:
+    image: redis:7
+```
+
+``` python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("daytona", "path/to/compose.yaml"),
+)
+
+# In a solver, access services by name:
+default_env = sandbox()          # the x-default service
+helper_env = sandbox("helper")
+```
+
+**Default service selection** (priority): `x-default: true` \> service named `"default"` or `"main"` \> first service in the file.
+
+**Resources**: Per-service resources are summed across all services plus 1 CPU and 1 GiB overhead for the Docker daemon. Ensure the total fits within your Daytona per-sandbox limits.
+
+**DinD image**: The DinD sandbox uses `docker:28.3.3-dind` as the base image.
+
+**DinD snapshots**: The provider auto-creates a Daytona snapshot for the DinD base image. You can also provide a pre-created snapshot via `x-daytona.snapshot`.
+
+**Image caching**: Each DinD sandbox gets a fresh Docker daemon with no image cache. `docker compose build` rebuilds from scratch every sample. For faster startup, pre-build your images and push them to a registry, then use `image:` instead of `build:` in your compose file. Daytona does not support snapshotting a running sandbox or shared volumes across sandboxes, so registry-based caching is the recommended approach.
+
+## Configuration
+
+The top-level `x-daytona` key on a compose file passes settings to the Daytona sandbox.
+
+| Setting | Type | Default | Description |
+|----|----|----|----|
+| `auto_stop_interval` | int (minutes) | `0` (disabled) | Minutes of inactivity before the sandbox auto-stops. Daytona’s own default is 15 minutes; `inspect_sandboxes` disables auto-stop. |
+| `auto_archive_interval` | int (minutes) | `10080` (7 days) | Minutes before a stopped sandbox auto-archives. |
+| `auto_delete_interval` | int (minutes) | Never | Minutes before a stopped sandbox auto-deletes. Unset = sandboxes are never auto-deleted. |
+| `network_block_all` | bool | `False` | Block all network access. Overrides compose `network_mode`. |
+| `network_allow_list` | str | `None` | Comma-separated CIDR allowlist. |
+| `language` | str | `None` | Hint for language-aware features (e.g. `"python"`, `"typescript"`). |
+| `os_user` | str | `daytona` | OS user for commands. Overrides the service-level `user` field. |
+| `public` | bool | `False` | Whether the sandbox is publicly accessible. |
+| `ephemeral` | bool | `False` | If `True`, the sandbox is auto-deleted when stopped. |
+| `timeout` | float (seconds) | `60` | Seconds to wait for the sandbox creation API call to complete. For DinD, this covers only the VM provisioning — dockerd boot, image pulls, and `docker compose build`/`up` have their own internal timeouts and are not affected. |
+| `snapshot` | str | `None` | Pre-created Daytona snapshot name. Skips image build for single-service; used as the DinD VM snapshot for multi-service. |
+| `resources` | dict | per-service aggregation | Sandbox-level resource overrides (`cpu`, `memory`, `gpu`). For DinD, overrides the per-service sum. |
+| `env_vars` | dict | `{}` | Extra env vars. Single-service: merged with service `environment` (x-daytona wins). DinD: set on the VM, not on compose services. |
+| `labels` | dict | `{}` | Custom labels, merged with `inspect_sandboxes`’ own labels (which take precedence). |
+
+Example:
+
+``` yaml
+x-daytona:
+  auto_stop_interval: 10
+  resources:
+    cpu: 4
+    memory: 8
+    gpu: 1
+  env_vars:
+    EXTRA_VAR: "value"
+```
+
+Unsupported Daytona parameters: `volumes`.
+
+## Finding sandboxes
+
+Every sandbox created by `inspect_sandboxes` is named and labeled so you can locate it in the Daytona dashboard for debugging, audit, or manual cleanup.
+
+**Sandbox names** follow `inspect-{task_id}-{sample_id}-{hex}` (e.g. `inspect-my_eval-42-a1b2c3d4`). The 8-character hex suffix guarantees uniqueness across re-runs. If `task_id` or `sample_id` is unavailable, that segment is dropped; if both are unavailable, the name is just `inspect-{hex}`. The `sample_id` segment requires `inspect-ai >= 0.3.211` ([PR \#3619](https://github.com/UKGovernmentBEIS/inspect_ai/pull/3619)); on older versions it’s silently omitted.
+
+**Labels** applied to every sandbox:
+
+- `created_by: inspect-ai` — identifies sandboxes created by this package.
+- `inspect_run_id: <hex>` — a per-task-run identifier; all sandboxes for the same eval run share this value.
+
+User labels from `x-daytona.labels` are merged in; the two above always take precedence.
+
+**DinD snapshot names** are deterministic, derived from aggregated per-service resources: `inspect-dind-<cpu>cpu-<mem>gb-<gpu>gpu` (e.g. `inspect-dind-2cpu-4gb-0gpu`). Samples with matching resource profiles reuse the same snapshot.
+
+**Bulk cleanup** via the Inspect CLI — finds and deletes every sandbox tagged `created_by: inspect-ai`:
+
+``` bash
+inspect sandbox cleanup daytona                 # delete all
+inspect sandbox cleanup daytona <sandbox-id>    # delete one
+```
+
+## Notes
+
+- **Default user**: The default sandbox user is `daytona` (not root), with passwordless `sudo`.
+- **`user` parameter**: Supported via `sudo -u` in single-service mode and `docker compose exec --user` in DinD mode. Numeric UIDs are supported. Requires `sudo` with passwordless access (configured by default).
+- **`stdin` (input)**: Supported via input redirection from a temp file. POSIX-compatible.
+- **Network**: Outbound internet depends on your Daytona subscription tier. Tiers 1-2 restrict to essential services (Docker Hub, npm, PyPI, GitHub, AI providers); tiers 3-4 have full internet. Compose `network_mode` is translated to Daytona’s `network_block_all`; `x-daytona.network_block_all` takes precedence. For DinD, the VM always has network enabled (needed for `docker pull`); service-level isolation is via compose `network_mode`.
+- **DinD startup latency**: Docker daemon boot + image pulls + compose up can take 30s+. `inspect_sandboxes` auto-creates a Daytona snapshot of the `docker:28.3.3-dind` base so subsequent samples skip the VM bring-up cost (see **DinD snapshots** above). Building the DinD image on-demand per sample (the fallback path when a snapshot isn’t available) is prohibitively slow for eval workloads — not recommended.
+
+## Limitations
+
+- **Architecture**: Daytona runners use `linux/amd64`. arm64-only images are not supported.
+- **`stderr`**: The Daytona API returns combined stdout+stderr; `stderr` is always empty.

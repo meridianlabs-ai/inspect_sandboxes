@@ -1,0 +1,290 @@
+[
+  {
+    "objectID": "modal.html",
+    "href": "modal.html",
+    "title": "Modal",
+    "section": "",
+    "text": "Serverless container sandbox for Inspect AI using Modal.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Modal"
+    ]
+  },
+  {
+    "objectID": "modal.html#setup",
+    "href": "modal.html#setup",
+    "title": "Modal",
+    "section": "Setup",
+    "text": "Setup\nCreate a Modal account and authenticate:\npython3 -m modal setup",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Modal"
+    ]
+  },
+  {
+    "objectID": "modal.html#usage",
+    "href": "modal.html#usage",
+    "title": "Modal",
+    "section": "Usage",
+    "text": "Usage\n\nDefault image\nA minimal eval that uses Modal’s default sandbox image — no Dockerfile or compose file provided.\nfrom inspect_ai import Task, eval\nfrom inspect_ai.solver import generate, system_message\n\ntask = Task(\n    dataset=[{\"input\": \"What is 2+2?\", \"target\": \"4\"}],\n    solver=[\n      system_message(\"You are a helpful assistant.\"),\n      generate(),\n    ],\n    sandbox=\"modal\",  # Uses Modal's default image (Debian Linux + local Python version)\n)\n\neval(task)\n\n\n\n\n\n\nNote\n\n\n\nThe default image is only used when no config is specified AND no Dockerfile / compose.yaml / compose.yml / docker-compose.yaml / docker-compose.yml is present in the task’s source directory — if one is found there, it is auto-detected and used instead.\n\n\n\n\nDockerfile\nBuild the sandbox image from a local Dockerfile.\ntask = Task(\n    dataset=[...],\n    solver=[...],\n    sandbox=(\"modal\", \"path/to/Dockerfile\"),\n)\n\n\nDocker Compose\nConfigure the sandbox via a Docker Compose file. Modal-specific settings go under the top-level x-modal key — see Configuration.\n# compose.yaml\nservices:\n  default:\n    image: python:3.11\n    # Your service configuration...\ntask = Task(\n    dataset=[...],\n    solver=[...],\n    sandbox=(\"modal\", \"path/to/compose.yaml\"),\n)\nGPU can be requested via standard Compose deploy resources (defaults to ANY type). x-modal.gpu takes precedence if both are set:\nservices:\n  default:\n    image: pytorch/pytorch:latest\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - capabilities: [gpu]\n              count: 1",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Modal"
+    ]
+  },
+  {
+    "objectID": "modal.html#configuration",
+    "href": "modal.html#configuration",
+    "title": "Modal",
+    "section": "Configuration",
+    "text": "Configuration\nThe top-level x-modal key on a compose file passes settings to modal.Sandbox.create. Values here override the corresponding compose defaults (e.g. x-modal.block_network overrides Compose network_mode).\n\n\n\n\n\n\n\n\n\n\nSetting\nType\nDefault\nDescription\n\n\n\n\ntimeout\nint (seconds)\n86400 (24 h)\nMaximum sandbox lifetime. Modal’s own default is 300; inspect_sandboxes raises it to 24 hours.\n\n\nidle_timeout\nint (seconds)\nNone\nSeconds of inactivity before the sandbox is terminated. None means no idle timeout.\n\n\ngpu\nstr\nNone\nGPU type, e.g. \"A10G\", \"A100\", \"T4\", \"H100\", \"ANY\", or with a count like \"A10G:2\". Overrides the GPU type derived from compose deploy.resources.\n\n\ncloud\nstr\nNone\nCloud provider: \"aws\", \"gcp\", \"oci\", or \"auto\".\n\n\nregion\nstr or list[str]\nNone\nRegion or regions to run the sandbox on.\n\n\nblock_network\nbool\nFalse\nBlock all network access from the sandbox.\n\n\ncidr_allowlist\nlist[str]\nNone\nCIDR blocks the sandbox is allowed to reach. None allows all.\n\n\nsecrets\nstr or list[str]\nNone\nName(s) of Modal secrets to inject as environment variables.\n\n\npty\nbool\nFalse\nEnable a pseudo-TTY.\n\n\nencrypted_ports\nlist[int]\n[]\nPorts to tunnel into the sandbox over TLS.\n\n\nh2_ports\nlist[int]\n[]\nEncrypted ports to tunnel via HTTP/2.\n\n\nunencrypted_ports\nlist[int]\n[]\nPorts to tunnel without encryption.\n\n\ncustom_domain\nstr\nNone\nCustom subdomain parent for sandbox connections.\n\n\nverbose\nbool\nFalse\nEnable verbose Modal logging.\n\n\n\n\nExample:\nx-modal:\n  timeout: 3600\n  idle_timeout: 300\n  cloud: \"aws\"\n  gpu: \"A10G\"\n  secrets: [\"openai-api-key\"]\nUnsupported Modal parameters (require SDK objects, not compose-representable): network_file_systems, volumes, proxy.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Modal"
+    ]
+  },
+  {
+    "objectID": "modal.html#finding-sandboxes",
+    "href": "modal.html#finding-sandboxes",
+    "title": "Modal",
+    "section": "Finding sandboxes",
+    "text": "Finding sandboxes\nEvery sandbox created by inspect_sandboxes is named and tagged so you can locate it in the Modal dashboard for debugging, audit, or manual cleanup.\nSandbox names follow inspect-{task_id}-{sample_id}-{hex} (e.g. inspect-my_eval-42-a1b2c3d4). The 8-character hex suffix guarantees uniqueness — Modal requires sandbox names to be unique within an app, and all inspect_sandboxes sandboxes share one app. If task_id or sample_id is unavailable, that segment is dropped; if both are unavailable, the name is just inspect-{hex}. The sample_id segment requires inspect-ai &gt;= 0.3.211 (PR #3619); on older versions it’s silently omitted.\nModal app: All sandboxes are created under the app named inspect_modal_sandbox (visible in your Modal dashboard).\nTags applied to every sandbox:\n\ncreated_by: inspect-ai — identifies sandboxes created by this package.\n\nBulk cleanup via the Inspect CLI — finds and terminates every sandbox tagged created_by: inspect-ai:\ninspect sandbox cleanup modal                   # terminate all\ninspect sandbox cleanup modal &lt;sandbox-id&gt;      # terminate one",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Modal"
+    ]
+  },
+  {
+    "objectID": "modal.html#notes",
+    "href": "modal.html#notes",
+    "title": "Modal",
+    "section": "Notes",
+    "text": "Notes\n\nNetwork mode: Docker Compose network_mode is automatically translated to Modal’s block_network. network_mode: none blocks all network access; any other value (e.g. bridge) allows it. x-modal.block_network takes precedence if set.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Modal"
+    ]
+  },
+  {
+    "objectID": "modal.html#modal-limitations",
+    "href": "modal.html#modal-limitations",
+    "title": "Modal",
+    "section": "Limitations",
+    "text": "Limitations\n\nSingle service only: Multi-service compose files raise a ValueError. Modal sandboxes run on gVisor, a user-space kernel that restricts the low-level network operations Docker needs to connect containers together — specifically, creating virtual ethernet pairs between containers and setting up NAT rules. Modal’s alpha experimental_options={\"enable_docker\": True} doesn’t currently lift these restrictions, so compose services can’t share a private network or reach each other by service name. For multi-service workloads, use the Daytona provider, which supports multi-service compose via Docker-in-Docker.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Modal"
+    ]
+  },
+  {
+    "objectID": "daytona.html",
+    "href": "daytona.html",
+    "title": "Daytona",
+    "section": "",
+    "text": "Cloud development environment sandbox for Inspect AI using Daytona.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Daytona"
+    ]
+  },
+  {
+    "objectID": "daytona.html#setup",
+    "href": "daytona.html#setup",
+    "title": "Daytona",
+    "section": "Setup",
+    "text": "Setup\nCreate a Daytona account and set your API key:\nexport DAYTONA_API_KEY=your_api_key",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Daytona"
+    ]
+  },
+  {
+    "objectID": "daytona.html#usage",
+    "href": "daytona.html#usage",
+    "title": "Daytona",
+    "section": "Usage",
+    "text": "Usage\n\nDefault snapshot\n\n\n\n\n\n\nNoteWhat’s a snapshot?\n\n\n\nA Daytona snapshot is a sandbox template built from a Docker/OCI image, bundled with resource allocation, entrypoint, and lifecycle metadata. Functionally similar to a container image, but Daytona-managed so sandboxes can be started from it quickly. See Daytona’s snapshots docs.\n\n\nA minimal eval that uses Daytona’s default snapshot (daytonaio/sandbox), which comes with Python, Node.js, their language servers, and common packages (pandas, torch, anthropic, langchain, typescript, bun, etc.).\nfrom inspect_ai import Task, eval\nfrom inspect_ai.solver import generate, system_message\n\ntask = Task(\n    dataset=[{\"input\": \"What is 2+2?\", \"target\": \"4\"}],\n    solver=[\n        system_message(\"You are a helpful assistant.\"),\n        generate(),\n    ],\n    sandbox=\"daytona\",  # Uses Daytona's default snapshot\n)\n\neval(task)\n\n\n\n\n\n\nNote\n\n\n\nThe default snapshot is only used when no config is specified AND no Dockerfile / compose.yaml / compose.yml / docker-compose.yaml / docker-compose.yml is present in the task’s source directory — if one is found there, it is auto-detected and used instead.\n\n\n\n\nDockerfile\nBuild the sandbox image from a local Dockerfile.\ntask = Task(\n    dataset=[...],\n    solver=[...],\n    sandbox=(\"daytona\", \"path/to/Dockerfile\"),\n)\n\n\nDocker Compose\nConfigure the sandbox via a Docker Compose file. A file with a single service gets a single Daytona sandbox; a file with two or more services automatically switches to Docker-in-Docker (DinD). Daytona-specific settings go under the top-level x-daytona key — see Configuration.\n\nSingle-service\n# compose.yaml\nservices:\n  default:\n    image: python:3.12\n    environment:\n      - MY_VAR=hello\n    deploy:\n      resources:\n        limits:\n          cpus: \"2.0\"\n          memory: 4g\n        reservations:\n          devices:\n            - capabilities: [gpu]\n              count: 1\ntask = Task(\n    dataset=[...],\n    solver=[...],\n    sandbox=(\"daytona\", \"path/to/compose.yaml\"),\n)\n\n\nMulti-service (DinD)\nWhen a compose file defines more than one service, the provider automatically uses Docker-in-Docker: a single Daytona sandbox runs a Docker daemon, and services are brought up via docker compose inside it. Each service is exposed as a separate SandboxEnvironment.\n# compose.yaml\nservices:\n  default:\n    image: python:3.12\n    x-default: true\n  helper:\n    image: redis:7\ntask = Task(\n    dataset=[...],\n    solver=[...],\n    sandbox=(\"daytona\", \"path/to/compose.yaml\"),\n)\n\n# In a solver, access services by name:\ndefault_env = sandbox()          # the x-default service\nhelper_env = sandbox(\"helper\")\nDefault service selection (priority): x-default: true &gt; service named \"default\" or \"main\" &gt; first service in the file.\nResources: Per-service resources are summed across all services plus 1 CPU and 1 GiB overhead for the Docker daemon. Ensure the total fits within your Daytona per-sandbox limits.\nDinD image: The DinD sandbox uses docker:28.3.3-dind as the base image.\nDinD snapshots: The provider auto-creates a Daytona snapshot for the DinD base image. You can also provide a pre-created snapshot via x-daytona.snapshot.\nImage caching: Each DinD sandbox gets a fresh Docker daemon with no image cache. docker compose build rebuilds from scratch every sample. For faster startup, pre-build your images and push them to a registry, then use image: instead of build: in your compose file. Daytona does not support snapshotting a running sandbox or shared volumes across sandboxes, so registry-based caching is the recommended approach.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Daytona"
+    ]
+  },
+  {
+    "objectID": "daytona.html#configuration",
+    "href": "daytona.html#configuration",
+    "title": "Daytona",
+    "section": "Configuration",
+    "text": "Configuration\nThe top-level x-daytona key on a compose file passes settings to the Daytona sandbox.\n\n\n\n\n\n\n\n\n\n\nSetting\nType\nDefault\nDescription\n\n\n\n\nauto_stop_interval\nint (minutes)\n0 (disabled)\nMinutes of inactivity before the sandbox auto-stops. Daytona’s own default is 15 minutes; inspect_sandboxes disables auto-stop.\n\n\nauto_archive_interval\nint (minutes)\n10080 (7 days)\nMinutes before a stopped sandbox auto-archives.\n\n\nauto_delete_interval\nint (minutes)\nNever\nMinutes before a stopped sandbox auto-deletes. Unset = sandboxes are never auto-deleted.\n\n\nnetwork_block_all\nbool\nFalse\nBlock all network access. Overrides compose network_mode.\n\n\nnetwork_allow_list\nstr\nNone\nComma-separated CIDR allowlist.\n\n\nlanguage\nstr\nNone\nHint for language-aware features (e.g. \"python\", \"typescript\").\n\n\nos_user\nstr\ndaytona\nOS user for commands. Overrides the service-level user field.\n\n\npublic\nbool\nFalse\nWhether the sandbox is publicly accessible.\n\n\nephemeral\nbool\nFalse\nIf True, the sandbox is auto-deleted when stopped.\n\n\ntimeout\nfloat (seconds)\n60\nSeconds to wait for the sandbox creation API call to complete. For DinD, this covers only the VM provisioning — dockerd boot, image pulls, and docker compose build/up have their own internal timeouts and are not affected.\n\n\nsnapshot\nstr\nNone\nPre-created Daytona snapshot name. Skips image build for single-service; used as the DinD VM snapshot for multi-service.\n\n\nresources\ndict\nper-service aggregation\nSandbox-level resource overrides (cpu, memory, gpu). For DinD, overrides the per-service sum.\n\n\nenv_vars\ndict\n{}\nExtra env vars. Single-service: merged with service environment (x-daytona wins). DinD: set on the VM, not on compose services.\n\n\nlabels\ndict\n{}\nCustom labels, merged with inspect_sandboxes’ own labels (which take precedence).\n\n\n\n\nExample:\nx-daytona:\n  auto_stop_interval: 10\n  resources:\n    cpu: 4\n    memory: 8\n    gpu: 1\n  env_vars:\n    EXTRA_VAR: \"value\"\nUnsupported Daytona parameters: volumes.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Daytona"
+    ]
+  },
+  {
+    "objectID": "daytona.html#finding-sandboxes",
+    "href": "daytona.html#finding-sandboxes",
+    "title": "Daytona",
+    "section": "Finding sandboxes",
+    "text": "Finding sandboxes\nEvery sandbox created by inspect_sandboxes is named and labeled so you can locate it in the Daytona dashboard for debugging, audit, or manual cleanup.\nSandbox names follow inspect-{task_id}-{sample_id}-{hex} (e.g. inspect-my_eval-42-a1b2c3d4). The 8-character hex suffix guarantees uniqueness across re-runs. If task_id or sample_id is unavailable, that segment is dropped; if both are unavailable, the name is just inspect-{hex}. The sample_id segment requires inspect-ai &gt;= 0.3.211 (PR #3619); on older versions it’s silently omitted.\nLabels applied to every sandbox:\n\ncreated_by: inspect-ai — identifies sandboxes created by this package.\ninspect_run_id: &lt;hex&gt; — a per-task-run identifier; all sandboxes for the same eval run share this value.\n\nUser labels from x-daytona.labels are merged in; the two above always take precedence.\nDinD snapshot names are deterministic, derived from aggregated per-service resources: inspect-dind-&lt;cpu&gt;cpu-&lt;mem&gt;gb-&lt;gpu&gt;gpu (e.g. inspect-dind-2cpu-4gb-0gpu). Samples with matching resource profiles reuse the same snapshot.\nBulk cleanup via the Inspect CLI — finds and deletes every sandbox tagged created_by: inspect-ai:\ninspect sandbox cleanup daytona                 # delete all\ninspect sandbox cleanup daytona &lt;sandbox-id&gt;    # delete one",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Daytona"
+    ]
+  },
+  {
+    "objectID": "daytona.html#notes",
+    "href": "daytona.html#notes",
+    "title": "Daytona",
+    "section": "Notes",
+    "text": "Notes\n\nDefault user: The default sandbox user is daytona (not root), with passwordless sudo.\nuser parameter: Supported via sudo -u in single-service mode and docker compose exec --user in DinD mode. Numeric UIDs are supported. Requires sudo with passwordless access (configured by default).\nstdin (input): Supported via input redirection from a temp file. POSIX-compatible.\nNetwork: Outbound internet depends on your Daytona subscription tier. Tiers 1-2 restrict to essential services (Docker Hub, npm, PyPI, GitHub, AI providers); tiers 3-4 have full internet. Compose network_mode is translated to Daytona’s network_block_all; x-daytona.network_block_all takes precedence. For DinD, the VM always has network enabled (needed for docker pull); service-level isolation is via compose network_mode.\nDinD startup latency: Docker daemon boot + image pulls + compose up can take 30s+. inspect_sandboxes auto-creates a Daytona snapshot of the docker:28.3.3-dind base so subsequent samples skip the VM bring-up cost (see DinD snapshots above). Building the DinD image on-demand per sample (the fallback path when a snapshot isn’t available) is prohibitively slow for eval workloads — not recommended.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Daytona"
+    ]
+  },
+  {
+    "objectID": "daytona.html#daytona-limitations",
+    "href": "daytona.html#daytona-limitations",
+    "title": "Daytona",
+    "section": "Limitations",
+    "text": "Limitations\n\nArchitecture: Daytona runners use linux/amd64. arm64-only images are not supported.\nstderr: The Daytona API returns combined stdout+stderr; stderr is always empty.",
+    "crumbs": [
+      "Getting Started",
+      "Providers",
+      "Daytona"
+    ]
+  },
+  {
+    "objectID": "CHANGELOG.html",
+    "href": "CHANGELOG.html",
+    "title": "Changelog",
+    "section": "",
+    "text": "quarto docs site, sandbox naming, and x-daytona.timeout fix (#22) (bc0e84d)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section",
+    "href": "CHANGELOG.html#section",
+    "title": "Changelog",
+    "section": "",
+    "text": "quarto docs site, sandbox naming, and x-daytona.timeout fix (#22) (bc0e84d)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section-1",
+    "href": "CHANGELOG.html#section-1",
+    "title": "Changelog",
+    "section": "0.2.3 (2026-04-22)",
+    "text": "0.2.3 (2026-04-22)\n\nBug Fixes\n\nreplace inspect-ai git dep with PyPI version (#20) (9722e3c)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section-2",
+    "href": "CHANGELOG.html#section-2",
+    "title": "Changelog",
+    "section": "0.2.2 (2026-04-21)",
+    "text": "0.2.2 (2026-04-21)\n\nBug Fixes\n\ndaytona: remove env var space-splitting workaround (#18) (9a18e16)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section-3",
+    "href": "CHANGELOG.html#section-3",
+    "title": "Changelog",
+    "section": "0.2.1 (2026-04-14)",
+    "text": "0.2.1 (2026-04-14)\n\nBug Fixes\n\nadd DinD self-check test and document timeout cleanup behavior (#16) (60dfe1e)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section-4",
+    "href": "CHANGELOG.html#section-4",
+    "title": "Changelog",
+    "section": "0.2.0 (2026-04-03)",
+    "text": "0.2.0 (2026-04-03)\n\nFeatures\n\ndaytona: add multi-service DinD support (#15) (a1fcca6)\ndaytona: clean up orphaned sandboxes on build failure (#11) (30ccafc)\nmodal,daytona: add transient error retry to exec and fill retry gaps (#14) (93b016d)\nmodal: add support for modal secrets from compose files (#13) (b8b1045)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section-5",
+    "href": "CHANGELOG.html#section-5",
+    "title": "Changelog",
+    "section": "0.1.2 (2026-03-18)",
+    "text": "0.1.2 (2026-03-18)\n\nDocumentation\n\nadd network_mode notes and known limitations to READMEs (#9) (e17230f)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section-6",
+    "href": "CHANGELOG.html#section-6",
+    "title": "Changelog",
+    "section": "0.1.1 (2026-03-16)",
+    "text": "0.1.1 (2026-03-16)\n\nBug Fixes\n\nimprove Modal command passing, Daytona stdin support, and network_mode translation (#7) (15cbe15)\npass build context to Modal image builds and skip retry on RemoteError (1f190b3)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section-7",
+    "href": "CHANGELOG.html#section-7",
+    "title": "Changelog",
+    "section": "0.1.0 (2026-03-02)",
+    "text": "0.1.0 (2026-03-02)\n\nFeatures\n\nadd Daytona sandbox implementation (#2) (d6a9908)\nadd Modal sandbox implementation (#1) (f3c8e73)\nadd PyPI publishing with release-please automation (#3) (3cec1bc)"
+  },
+  {
+    "objectID": "CHANGELOG.html#section-8",
+    "href": "CHANGELOG.html#section-8",
+    "title": "Changelog",
+    "section": "0.1.0 (2026-03-02)",
+    "text": "0.1.0 (2026-03-02)\n\nFeatures\n\nInitial release of inspect_sandboxes\nDaytona sandbox implementation\nModal sandbox implementation"
+  },
+  {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "Inspect Sandboxes",
+    "section": "",
+    "text": "The inspect-sandboxes Python package provides cloud sandbox environments for Inspect AI evaluations. Each sample runs in a managed sandbox on your provider of choice while the Inspect process runs locally on your machine.\nThis lets you run evaluations without a local Docker daemon or your own Kubernetes cluster, and scale to many concurrent samples beyond what fits on a single machine.\nFor sandbox concepts and the SandboxEnvironment API, see the Inspect AI sandboxing guide.",
+    "crumbs": [
+      "Getting Started"
+    ]
+  },
+  {
+    "objectID": "index.html#providers",
+    "href": "index.html#providers",
+    "title": "Inspect Sandboxes",
+    "section": "Providers",
+    "text": "Providers\n\n\n\nProvider\nRegistry Name\nMulti-service compose\nRequirements\n\n\n\n\nDaytona\ndaytona\nYes (DinD)\nDaytona account + API key\n\n\nModal\nmodal\nNo (why?)\nModal account",
+    "crumbs": [
+      "Getting Started"
+    ]
+  },
+  {
+    "objectID": "index.html#installation",
+    "href": "index.html#installation",
+    "title": "Inspect Sandboxes",
+    "section": "Installation",
+    "text": "Installation\n# Using pip\npip install inspect-sandboxes\n\n# Using uv\nuv pip install inspect-sandboxes",
+    "crumbs": [
+      "Getting Started"
+    ]
+  },
+  {
+    "objectID": "index.html#quick-start-modal",
+    "href": "index.html#quick-start-modal",
+    "title": "Inspect Sandboxes",
+    "section": "Quick start (Modal)",
+    "text": "Quick start (Modal)\nAuthenticate with Modal (one-time):\npython3 -m modal setup\nRun a minimal evaluation:\nfrom inspect_ai import Task, eval\nfrom inspect_ai.solver import generate\n\ntask = Task(\n    dataset=[{\"input\": \"What is 2+2?\", \"target\": \"4\"}],\n    solver=[generate()],\n    sandbox=\"modal\",\n)\n\neval(task)\nFor each sample in the dataset, a fresh Modal sandbox is provisioned, used to run the solver, and terminated when the sample completes. Since no image is specified here, Modal’s default sandbox image is used (Debian Linux with Python matching your local interpreter’s minor version) — place a Dockerfile or compose.yaml alongside the task (auto-detected) or pass one explicitly via sandbox=(\"modal\", \"path/to/Dockerfile\") to provide your own.\nSee the Modal provider page for full configuration options.",
+    "crumbs": [
+      "Getting Started"
+    ]
+  },
+  {
+    "objectID": "index.html#development",
+    "href": "index.html#development",
+    "title": "Inspect Sandboxes",
+    "section": "Development",
+    "text": "Development\n# Install dependencies\nmake install\n\n# Run tests (skips integration tests)\nmake test\n\n# Run all tests including integration tests\nmake test-all\n\n# Run type checking and linting\nmake check",
+    "crumbs": [
+      "Getting Started"
+    ]
+  }
+]
