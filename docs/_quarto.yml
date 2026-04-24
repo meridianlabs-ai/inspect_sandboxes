@@ -1,0 +1,17 @@
+project:
+  type: meridianlabs-ai/inspect-docs
+
+inspect-docs:
+  title: "Inspect Sandboxes"
+  description: "Cloud sandbox environments for Inspect AI evaluations"
+  url: https://meridianlabs-ai.github.io/inspect_sandboxes/
+  module: inspect_sandboxes
+  repo: meridianlabs-ai/inspect_sandboxes
+  org: Meridian Labs
+  navigation:
+    - text: Getting Started
+      href: index.qmd
+    - text: Providers
+      contents:
+        - href: daytona.qmd
+        - href: modal.qmd

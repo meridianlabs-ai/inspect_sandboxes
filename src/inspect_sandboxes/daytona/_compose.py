@@ -21,6 +21,7 @@ def create_single_service_params(
     config: ComposeConfig,
     compose_path: str | None,
     labels: dict[str, str],
+    name: str | None = None,
 ) -> CreateSandboxFromImageParams | CreateSandboxFromSnapshotParams:
     """Create Daytona sandbox params from a single-service compose config.
 
@@ -29,6 +30,7 @@ def create_single_service_params(
         compose_path: Path to the compose file for resolving relative paths.
             Pass None when using a ComposeConfig object directly.
         labels: Labels to apply (merged with x-daytona labels).
+        name: Optional sandbox name (visible in the Daytona dashboard).
     """
     _, service = find_default_service(config)
 
@@ -82,12 +84,14 @@ def create_single_service_params(
     if snapshot:
         return CreateSandboxFromSnapshotParams(
             snapshot=snapshot,
+            name=name,
             labels=merged_labels,
             **sandbox_params,
         )
 
     return CreateSandboxFromImageParams(
         image=image,
+        name=name,
         resources=resources,
         labels=merged_labels,
         **sandbox_params,
@@ -153,7 +157,11 @@ def apply_daytona_extensions(
         - os_user (str): OS user to run commands as. Overrides the service-level user field.
         - public (bool): Whether the sandbox should be publicly accessible.
         - ephemeral (bool): If True, sandbox is auto-deleted when stopped.
-        - timeout (float): Seconds to wait for sandbox creation.
+        - timeout (float): Seconds to wait for sandbox creation. NOT applied to
+            the params dict by this function — it's a kwarg on
+            ``AsyncDaytona.create()`` rather than a field on the sandbox params
+            model. Callers should use :func:`extract_daytona_timeout` to
+            retrieve it and forward to :func:`create_sandbox`.
         - env_vars (dict): Environment variables, merged with those from `environment:`.
             x-daytona values take precedence over service-level environment.
         - labels (dict): Custom labels. Merged by the caller with inspect's own labels,
@@ -180,7 +188,6 @@ def apply_daytona_extensions(
         "os_user",
         "public",
         "ephemeral",
-        "timeout",
         "labels",
         "snapshot",
         "resources",
@@ -193,6 +200,31 @@ def apply_daytona_extensions(
     # env_vars: merge with service-level environment; x-daytona takes precedence
     if ext.get("env_vars") is not None:
         params["env_vars"] = {**params.get("env_vars", {}), **ext["env_vars"]}
+
+
+def extract_daytona_timeout(extensions: dict[str, Any]) -> float | None:
+    """Return the ``x-daytona.timeout`` value (seconds), or None if unset.
+
+    Kept separate from :func:`apply_daytona_extensions` because ``timeout`` is
+    a kwarg on ``AsyncDaytona.create()``, not a field on the sandbox params
+    model — unpacking it alongside the other params would be silently
+    dropped by Pydantic.
+
+    Raises:
+        ValueError: If ``x-daytona.timeout`` is set to something that can't be
+            coerced to ``float`` (e.g. a non-numeric string). YAML will parse
+            ``timeout: "30"`` as the string ``"30"``; we coerce here so the
+            SDK receives a proper number.
+    """
+    raw = (extensions.get("x-daytona") or {}).get("timeout")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"x-daytona.timeout must be a number (seconds), got {raw!r}"
+        ) from e
 
 
 def _service_to_resources(service: ComposeService) -> Resources | None:

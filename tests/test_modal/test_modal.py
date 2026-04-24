@@ -123,6 +123,36 @@ async def test_full_lifecycle(
         assert running_sandboxes() == []
 
 
+@pytest.mark.asyncio
+async def test_sample_init_sets_sandbox_name(
+    mock_modal_app: MagicMock,
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """``sample_init`` must pass a task-and-sample-derived ``name`` to Sandbox.create."""
+    with (
+        patch.object(
+            ModalSandboxEnvironment,
+            "_lookup_app",
+            new_callable=AsyncMock,
+            return_value=mock_modal_app,
+        ),
+        patch.object(
+            ModalSandboxEnvironment,
+            "_create_sandbox",
+            new_callable=AsyncMock,
+            return_value=mock_modal_sandbox,
+        ) as mock_create,
+    ):
+        await ModalSandboxEnvironment.task_init("my_task", None)
+        await ModalSandboxEnvironment.sample_init(
+            "my_task", None, {"__sample_id__": "7"}
+        )
+
+    # _create_sandbox(command, kwargs); kwargs["name"] is what reaches Sandbox.create.
+    (_, kwargs), _ = mock_create.call_args
+    assert kwargs["name"].startswith("inspect-my_task-7-")
+
+
 @pytest.mark.parametrize("interrupted", [True, False])
 @pytest.mark.asyncio
 async def test_sample_cleanup(

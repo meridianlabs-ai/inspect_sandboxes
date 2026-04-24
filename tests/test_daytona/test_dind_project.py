@@ -253,6 +253,62 @@ async def test_create_dind_project_full_sequence(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_dind_project_passes_name_to_params(tmp_path: Path) -> None:
+    """The ``name`` kwarg must reach the Daytona sandbox params model."""
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("services:\n  web:\n    image: python:3.12\n")
+    config = ComposeConfig(services={"web": ComposeService(image="python:3.12")})
+    sandbox = make_mock_sandbox()
+
+    with (
+        patch(
+            "inspect_sandboxes.daytona._dind_project.create_sandbox",
+            new_callable=AsyncMock,
+            return_value=sandbox,
+        ) as mock_create,
+        patch(
+            "inspect_sandboxes.daytona._dind_project._ensure_dind_snapshot",
+            new_callable=AsyncMock,
+            return_value="dind-snap",
+        ),
+        patch(
+            "inspect_sandboxes.daytona._dind_project.vm_exec",
+            new_callable=AsyncMock,
+            return_value=(0, ""),
+        ),
+        patch(
+            "inspect_sandboxes.daytona._dind_project._wait_for_docker_daemon",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "inspect_sandboxes.daytona._dind_project._upload_build_contexts",
+            new_callable=AsyncMock,
+            return_value=f"/inspect/compose/{compose_file.name}",
+        ),
+        patch(
+            "inspect_sandboxes.daytona._dind_project.compose_exec",
+            new_callable=AsyncMock,
+            return_value=(0, '{"Service":"web"}\n'),
+        ),
+        patch(
+            "inspect_sandboxes.daytona._dind_project._wait_for_services",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await create_dind_project(
+            MagicMock(),
+            config,
+            str(compose_file),
+            labels={},
+            name="inspect-task-5-abcdef12",
+        )
+
+    # Inspect the params object passed to create_sandbox.
+    (_, params), _ = mock_create.call_args
+    assert params.name == "inspect-task-5-abcdef12"
+
+
+@pytest.mark.asyncio
 async def test_create_dind_project_cleans_up_on_failure(tmp_path: Path) -> None:
     """Test create_dind_project deletes sandbox when startup fails."""
     compose_file = tmp_path / "compose.yaml"

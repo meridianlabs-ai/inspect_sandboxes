@@ -364,6 +364,8 @@ async def create_dind_project(
     resources: Resources | None = None,
     sandbox_params: dict[str, Any] | None = None,
     snapshot: str | None = None,
+    create_timeout: float | None = None,
+    name: str | None = None,
 ) -> DaytonaDinDProject:
     """Create a DinD sandbox, start Docker, and bring up compose services.
 
@@ -375,6 +377,11 @@ async def create_dind_project(
         resources: Resource limits for the DinD sandbox.
         sandbox_params: Extra params from x-daytona extensions.
         snapshot: Explicit snapshot name override. If None, auto-creates one.
+        create_timeout: Seconds to wait for the DinD sandbox creation API call
+            (x-daytona.timeout). None = Daytona SDK default (60s). Does not
+            cover downstream dockerd boot, image pulls, or compose build/up.
+        name: Optional name for the DinD VM sandbox (visible in the Daytona
+            dashboard).
     """
     project_name = f"inspect-{uuid.uuid4().hex[:8]}"
 
@@ -392,6 +399,7 @@ async def create_dind_project(
     if snapshot:
         params = CreateSandboxFromSnapshotParams(
             snapshot=snapshot,
+            name=name,
             labels=labels,
             network_block_all=False,
             **extra,
@@ -399,13 +407,14 @@ async def create_dind_project(
     else:
         params = CreateSandboxFromImageParams(
             image=Image.base(DIND_IMAGE),
+            name=name,
             resources=resources,
             labels=labels,
             network_block_all=False,
             **extra,
         )
 
-    sandbox = await create_sandbox(client, params)
+    sandbox = await create_sandbox(client, params, timeout=create_timeout)
     logger.debug("Created DinD sandbox %s", sandbox.id)
 
     try:

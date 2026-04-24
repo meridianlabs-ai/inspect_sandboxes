@@ -72,9 +72,13 @@ def decode_file_content(data: bytes, file: str, text: bool) -> str | bytes:
 async def create_sandbox(
     client: AsyncDaytona,
     params: CreateSandboxFromSnapshotParams | CreateSandboxFromImageParams,
+    *,
+    timeout: float | None = None,
 ) -> AsyncSandbox:
-    """Uses exec_retry to avoid retrying on DaytonaTimeoutError"""
-    return await client.create(params)
+    """Uses exec_retry to avoid retrying on DaytonaTimeoutError."""
+    if timeout is None:
+        return await client.create(params)
+    return await client.create(params, timeout=timeout)
 
 
 @standard_retry

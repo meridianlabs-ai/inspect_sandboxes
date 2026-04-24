@@ -30,7 +30,9 @@ from rich.prompt import Confirm
 from rich.table import Table
 from typing_extensions import override
 
-from ._compose import create_single_service_params
+from inspect_sandboxes._util.naming import make_sandbox_name
+
+from ._compose import create_single_service_params, extract_daytona_timeout
 from ._dind_env import DaytonaDinDServiceEnvironment
 from ._sandbox_utils import (
     close_client,
@@ -108,10 +110,13 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
             )
 
         params: CreateSandboxFromSnapshotParams | CreateSandboxFromImageParams
+        create_timeout: float | None = None
+        sandbox_name = make_sandbox_name(task_name, metadata)
 
         if config is None:
             params = CreateSandboxFromSnapshotParams(
                 snapshot=None,
+                name=sandbox_name,
                 labels=_run_labels(),
                 auto_stop_interval=0,
             )
@@ -119,6 +124,7 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
             image = Image.from_dockerfile(config)
             params = CreateSandboxFromImageParams(
                 image=image,
+                name=sandbox_name,
                 labels=_run_labels(),
                 auto_stop_interval=0,
             )
@@ -135,7 +141,11 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
 
             if len(compose_config.services) > 1:
                 envs = await DaytonaDinDServiceEnvironment.sample_init_dind(
-                    client, compose_config, compose_file, _run_labels()
+                    client,
+                    compose_config,
+                    compose_file,
+                    _run_labels(),
+                    name=sandbox_name,
                 )
                 any_env = next(iter(envs.values())).as_type(
                     DaytonaDinDServiceEnvironment
@@ -143,8 +153,9 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
                 _running_sandboxes.get().append(any_env.project.sandbox.id)
                 return envs
             params = create_single_service_params(
-                compose_config, compose_file, _run_labels()
+                compose_config, compose_file, _run_labels(), name=sandbox_name
             )
+            create_timeout = extract_daytona_timeout(compose_config.extensions)
         else:
             raise ValueError(
                 f"Unrecognized config: {config}. "
@@ -152,7 +163,7 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
                 "ComposeConfig object, or None."
             )
 
-        sandbox = await create_sandbox(client, params)
+        sandbox = await create_sandbox(client, params, timeout=create_timeout)
         _running_sandboxes.get().append(sandbox.id)
 
         return {"default": DaytonaSingleServiceEnvironment(sandbox)}
