@@ -26,6 +26,7 @@ from inspect_sandboxes.daytona._compose import (
     aggregate_resources,
     apply_daytona_extensions,
     create_single_service_params,
+    extract_daytona_timeout,
 )
 
 STUB_LABELS = {"created_by": "test"}
@@ -64,7 +65,10 @@ def test_to_gib(mem_str: str, expected_gib: int) -> None:
         ),
         # None values should not be applied
         ({"x-daytona": {"auto_stop_interval": None}}, {}),
-        # All simple supported extensions
+        # All simple supported extensions.
+        # `timeout` is intentionally omitted from the expected params dict — it's
+        # handled via extract_daytona_timeout and forwarded to client.create(),
+        # not applied as a sandbox params field (see extract_daytona_timeout test).
         (
             {
                 "x-daytona": {
@@ -90,7 +94,6 @@ def test_to_gib(mem_str: str, expected_gib: int) -> None:
                 "os_user": "root",
                 "public": False,
                 "ephemeral": False,
-                "timeout": 60.0,
             },
         ),
     ],
@@ -103,6 +106,59 @@ def test_apply_daytona_extensions(
     params: dict[str, Any] = {}
     apply_daytona_extensions(params, extensions)
     assert params == expected_params
+
+
+@pytest.mark.parametrize(
+    ("extensions", "expected"),
+    [
+        ({}, None),
+        ({"x-daytona": {}}, None),
+        ({"x-daytona": {"timeout": 120.0}}, 120.0),
+        # `timeout` must come through even when other x-daytona keys are present
+        ({"x-daytona": {"timeout": 30, "ephemeral": True}}, 30),
+        # Numeric strings (what YAML produces from quoted values) must coerce.
+        ({"x-daytona": {"timeout": "45"}}, 45.0),
+        ({"x-daytona": {"timeout": "45.5"}}, 45.5),
+        # int values are fine (YAML unquoted ints).
+        ({"x-daytona": {"timeout": 0}}, 0.0),
+    ],
+)
+def test_extract_daytona_timeout(
+    extensions: dict[str, Any], expected: float | None
+) -> None:
+    """Test that x-daytona.timeout is extracted independently of the params dict."""
+    result = extract_daytona_timeout(extensions)
+    assert result == expected
+    if result is not None:
+        assert isinstance(result, float)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "not-a-number",
+        "",
+        "30s",  # common mistake: adding a unit suffix
+        [],
+        {},
+    ],
+)
+def test_extract_daytona_timeout_rejects_non_numeric(bad_value: Any) -> None:
+    """Values that can't coerce to float must raise ValueError with context."""
+    with pytest.raises(ValueError, match="x-daytona.timeout must be a number"):
+        extract_daytona_timeout({"x-daytona": {"timeout": bad_value}})
+
+
+def test_apply_daytona_extensions_does_not_set_timeout() -> None:
+    """Regression: apply_daytona_extensions must NOT place `timeout` in params.
+
+    Unpacking `timeout` into the Pydantic sandbox params model would silently
+    drop it (the field doesn't exist), so timeout is handled out-of-band via
+    extract_daytona_timeout and forwarded to AsyncDaytona.create().
+    """
+    params: dict[str, Any] = {}
+    apply_daytona_extensions(params, {"x-daytona": {"timeout": 45.0}})
+    assert "timeout" not in params
 
 
 @pytest.mark.parametrize(
@@ -514,3 +570,33 @@ def test_create_single_service_params_with_resources_override() -> None:
     assert result.resources is not None
     assert result.resources.cpu == 4
     assert result.resources.memory == 8
+
+
+def test_create_single_service_params_forwards_name_to_image_params() -> None:
+    """``name`` kwarg reaches CreateSandboxFromImageParams on the image path."""
+    config = ComposeConfig(services={"default": ComposeService(image="python:3.12")})
+    result = create_single_service_params(
+        config, None, STUB_LABELS, name="inspect-foo-1-abcdef12"
+    )
+    assert isinstance(result, CreateSandboxFromImageParams)
+    assert result.name == "inspect-foo-1-abcdef12"
+
+
+def test_create_single_service_params_forwards_name_to_snapshot_params() -> None:
+    """``name`` kwarg reaches CreateSandboxFromSnapshotParams on the snapshot path."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+        **{"x-daytona": {"snapshot": "my-snap"}},
+    )
+    result = create_single_service_params(
+        config, None, STUB_LABELS, name="inspect-foo-1-abcdef12"
+    )
+    assert isinstance(result, CreateSandboxFromSnapshotParams)
+    assert result.name == "inspect-foo-1-abcdef12"
+
+
+def test_create_single_service_params_name_defaults_to_none() -> None:
+    """Backward-compat: omitting ``name`` must not break existing callers."""
+    config = ComposeConfig(services={"default": ComposeService(image="python:3.12")})
+    result = create_single_service_params(config, None, STUB_LABELS)
+    assert result.name is None

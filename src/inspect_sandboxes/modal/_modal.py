@@ -36,6 +36,8 @@ from tenacity import (
 )
 from typing_extensions import override
 
+from inspect_sandboxes._util.naming import make_sandbox_name
+
 from ._compose import convert_compose_to_modal_params
 
 logger = getLogger(__name__)
@@ -127,6 +129,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
 
         sandbox_kwargs: dict[str, Any] = {
             "app": app,
+            "name": make_sandbox_name(task_name, metadata),
             "timeout": 60 * 60 * 24,
         }
         command: list[str] = []
@@ -193,7 +196,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
     ) -> None:
         """Cleanup sandboxes at task completion.
 
-        Note: terminate() is idempotent (no-op if already terminated).
+        Note: ``terminate()`` is idempotent (no-op if already terminated).
         """
         if not cleanup:
             return

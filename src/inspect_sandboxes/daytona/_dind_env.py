@@ -25,6 +25,7 @@ from typing_extensions import override
 from ._compose import (
     aggregate_resources,
     apply_daytona_extensions,
+    extract_daytona_timeout,
     find_default_service,
 )
 from ._dind_project import (
@@ -70,6 +71,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         config: ComposeConfig,
         compose_file: str | None,
         labels: dict[str, str],
+        name: str | None = None,
     ) -> dict[str, SandboxEnvironment]:
         """Create DinD sandbox and return per-service environments.
 
@@ -78,6 +80,8 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             config: Parsed compose configuration with >1 service.
             compose_file: Local path to the compose file.
             labels: Labels to apply to the sandbox.
+            name: Optional name for the DinD VM sandbox (visible in the
+                Daytona dashboard).
 
         Returns:
             Dict of environments with the default service first.
@@ -120,8 +124,12 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             # Snapshot override from x-daytona.snapshot
             snapshot = sandbox_params.pop("snapshot", None)
 
+            # x-daytona.timeout — forwarded to client.create(), not the params model
+            create_timeout = extract_daytona_timeout(config.extensions)
+
             # Resources: x-daytona.resources overrides per-service aggregation
             resources_override = sandbox_params.pop("resources", None)
+            resources: Resources | None
             if resources_override:
                 resources = Resources(
                     cpu=resources_override.get("cpu"),
@@ -139,6 +147,8 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
                 resources=resources,
                 sandbox_params=sandbox_params,
                 snapshot=snapshot,
+                create_timeout=create_timeout,
+                name=name,
             )
         finally:
             if tmp_dir is not None:
