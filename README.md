@@ -1,13 +1,17 @@
 # Inspect Sandboxes
 
-Collection of sandbox environments for [Inspect AI](https://inspect.ai-safety-institute.org.uk/).
+The `inspect-sandboxes` Python package provides cloud sandbox environments for [Inspect AI](https://inspect.aisi.org.uk/) evaluations. Each sample runs in a managed sandbox on your provider of choice while the Inspect process runs locally on your machine.
 
-## Available Providers
+This lets you run evaluations without a local Docker daemon or your own Kubernetes cluster, and scale to many concurrent samples beyond what fits on a single machine.
 
-| Provider | Registry Name | Description | Requirements |
-|----------|---------------|-------------|--------------|
-| [Daytona](https://www.daytona.io) | `daytona` | Cloud sandbox runtime | Daytona account + API key |
-| [Modal](https://modal.com) | `modal` | Serverless container platform | Modal account |
+For sandbox concepts and the `SandboxEnvironment` API, see the [Inspect AI sandboxing guide](https://inspect.aisi.org.uk/sandboxing.html).
+
+## Providers
+
+| Provider | Registry Name | Multi-service compose | Requirements |
+|----------|---------------|-----------------------|--------------|
+| [Daytona](https://www.daytona.io) | `daytona` | Yes (DinD) | Daytona account + API key |
+| [Modal](https://modal.com) | `modal` | No ([why?](https://meridianlabs-ai.github.io/inspect_sandboxes/modal.html#modal-limitations)) | Modal account |
 
 ## Installation
 
@@ -19,10 +23,32 @@ pip install inspect-sandboxes
 uv pip install inspect-sandboxes
 ```
 
-## Provider Documentation
+## Quick start (Modal)
 
-- [Daytona](src/inspect_sandboxes/daytona/README.md)
-- [Modal](src/inspect_sandboxes/modal/README.md)
+Authenticate with Modal (one-time):
+
+```bash
+python3 -m modal setup
+```
+
+Run a minimal evaluation:
+
+```python
+from inspect_ai import Task, eval
+from inspect_ai.solver import generate
+
+task = Task(
+    dataset=[{"input": "What is 2+2?", "target": "4"}],
+    solver=[generate()],
+    sandbox="modal",
+)
+
+eval(task)
+```
+
+For each sample in the dataset, a fresh Modal sandbox is provisioned, used to run the solver, and terminated when the sample completes. Since no image is specified here, Modal's default sandbox image is used (Debian Linux with Python matching your local interpreter's minor version) — place a `Dockerfile` or `compose.yaml` alongside the task (auto-detected) or pass one explicitly via `sandbox=("modal", "path/to/Dockerfile")` to provide your own.
+
+See the [Modal](https://meridianlabs-ai.github.io/inspect_sandboxes/modal.html) provider page for full configuration options.
 
 ## Development
 
