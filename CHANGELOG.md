@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.2.3...v0.3.0) (2026-04-24)
+
+
+### Features
+
+* quarto docs site, sandbox naming, and x-daytona.timeout fix ([#22](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/22)) ([bc0e84d](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/bc0e84d056ecda39b2a757be0a50217c92aab971))
+
 ## [0.2.3](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.2.2...v0.2.3) (2026-04-22)
 
 
