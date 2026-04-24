@@ -8,19 +8,20 @@
 | src/inspect\_sandboxes/\_registry.py               |        2 |        2 |        0 |        0 |      0% |       2-3 |
 | src/inspect\_sandboxes/\_util/\_\_init\_\_.py      |        0 |        0 |        0 |        0 |    100% |           |
 | src/inspect\_sandboxes/\_util/compose.py           |       30 |        0 |       12 |        1 |     98% |   22-\>21 |
+| src/inspect\_sandboxes/\_util/naming.py            |       24 |        0 |        8 |        0 |    100% |           |
 | src/inspect\_sandboxes/\_version.py                |       11 |       11 |        0 |        0 |      0% |      3-24 |
 | src/inspect\_sandboxes/daytona/\_\_init\_\_.py     |        0 |        0 |        0 |        0 |    100% |           |
-| src/inspect\_sandboxes/daytona/\_compose.py        |      100 |        6 |       62 |        8 |     91% |109-\>108, 111-112, 219, 224, 228-\>239, 229-\>228, 233, 243 |
-| src/inspect\_sandboxes/daytona/\_daytona.py        |      163 |       15 |       44 |        5 |     89% |73, 83, 106, 170, 195, 208-209, 222-\>241, 235-239, 290-294 |
-| src/inspect\_sandboxes/daytona/\_dind\_env.py      |      158 |       21 |       44 |       12 |     82% |88-\>104, 97-100, 111, 126, 144-\>148, 176, 183-184, 234, 267-\>270, 271, 283, 311-316, 351-354, 363 |
-| src/inspect\_sandboxes/daytona/\_dind\_project.py  |      224 |       95 |       68 |        6 |     52% |142-\>154, 149-150, 170-186, 204-285, 326-356, 385-\>392, 393, 439, 450, 465-466, 484-\>exit, 486-487, 498-509 |
+| src/inspect\_sandboxes/daytona/\_compose.py        |      108 |        6 |       64 |        8 |     92% |113-\>112, 115-116, 251, 256, 260-\>271, 261-\>260, 265, 275 |
+| src/inspect\_sandboxes/daytona/\_daytona.py        |      167 |       15 |       44 |        5 |     90% |75, 85, 108, 181, 206, 219-220, 233-\>252, 246-250, 301-305 |
+| src/inspect\_sandboxes/daytona/\_dind\_env.py      |      159 |       21 |       44 |       12 |     82% |92-\>108, 101-104, 115, 134, 154-\>158, 186, 193-194, 244, 277-\>280, 281, 293, 321-326, 361-364, 373 |
+| src/inspect\_sandboxes/daytona/\_dind\_project.py  |      224 |       94 |       68 |        5 |     52% |142-\>154, 149-150, 170-186, 204-285, 326-356, 392-\>399, 448, 459, 474-475, 493-\>exit, 495-496, 507-518 |
 | src/inspect\_sandboxes/daytona/\_retry.py          |       26 |        4 |        6 |        1 |     78% | 60, 71-74 |
-| src/inspect\_sandboxes/daytona/\_sandbox\_utils.py |       48 |        5 |        8 |        0 |     91% |60-61, 85, 103, 108 |
+| src/inspect\_sandboxes/daytona/\_sandbox\_utils.py |       50 |        6 |       10 |        1 |     88% |60-61, 81, 89, 107, 112 |
 | src/inspect\_sandboxes/daytona/\_single\_env.py    |      119 |       23 |       20 |        1 |     80% |148-\>151, 182-183, 190-196, 203-207, 217-219, 225-229, 235-237 |
 | src/inspect\_sandboxes/modal/\_\_init\_\_.py       |        0 |        0 |        0 |        0 |    100% |           |
 | src/inspect\_sandboxes/modal/\_compose.py          |      119 |        5 |       72 |        3 |     96% |212-213, 220-221, 263-\>268, 264-\>263, 269 |
-| src/inspect\_sandboxes/modal/\_modal.py            |      270 |       54 |       64 |        6 |     79% |98, 108, 260-265, 327-340, 371, 381-384, 397, 401-402, 424-427, 434-435, 448, 455, 460-463, 489-492, 496-498, 502-517, 521 |
-| **TOTAL**                                          | **1270** |  **241** |  **400** |   **43** | **79%** |           |
+| src/inspect\_sandboxes/modal/\_modal.py            |      271 |       54 |       64 |        6 |     79% |100, 110, 263-268, 330-343, 374, 384-387, 400, 404-405, 427-430, 437-438, 451, 458, 463-466, 492-495, 499-501, 505-520, 524 |
+| **TOTAL**                                          | **1310** |  **241** |  **412** |   **43** | **80%** |           |
 
 
 ## Setup coverage badge
