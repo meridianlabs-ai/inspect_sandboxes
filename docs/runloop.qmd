@@ -1,0 +1,186 @@
+---
+title: "Runloop"
+---
+
+Cloud sandbox for [Inspect AI](https://inspect.aisi.org.uk/) using [Runloop](https://www.runloop.ai/) devboxes.
+
+## Setup
+
+Create a Runloop account and set your API key:
+
+```bash
+export RUNLOOP_API_KEY=your_api_key
+```
+
+## Usage
+
+### Default Devbox image
+
+:::{.callout-note title="What's a blueprint?"}
+A Runloop *blueprint* is a sandbox template built from a Dockerfile, plus launch parameters (CPU, RAM, etc.). Devboxes are spawned from blueprints. See [Runloop's blueprint docs](https://docs.runloop.ai/docs/blueprints).
+:::
+
+A minimal eval that uses Runloop's default Devbox image (no blueprint specified):
+
+```python
+from inspect_ai import Task, eval
+from inspect_ai.solver import generate, system_message
+
+task = Task(
+    dataset=[{"input": "What is 2+2?", "target": "4"}],
+    solver=[
+        system_message("You are a helpful assistant."),
+        generate(),
+    ],
+    sandbox="runloop",  # Uses Runloop's default Devbox
+)
+
+eval(task)
+```
+
+::: callout-note
+The default Devbox is only used when no config is specified AND no `Dockerfile` / `compose.yaml` / `compose.yml` / `docker-compose.yaml` / `docker-compose.yml` is present in the task's source directory — if one is found there, it is auto-detected and used instead.
+:::
+
+### Dockerfile
+
+Build a blueprint from a local Dockerfile:
+
+```python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("runloop", "path/to/Dockerfile"),
+)
+```
+
+The blueprint is named `inspect-{hash}` where `{hash}` is the first 12 hex characters of a SHA-256 over the Dockerfile contents and launch parameters. Identical Dockerfiles + launch parameters reuse the same cached blueprint.
+
+### Docker Compose
+
+Configure the sandbox via a Docker Compose file. A file with a single service gets a single Runloop devbox; a file with two or more services automatically switches to Docker-in-Docker (DinD). Runloop-specific settings go under the top-level `x-runloop` key — see [Configuration](#configuration).
+
+#### Single-service
+
+```yaml
+# compose.yaml
+services:
+  default:
+    image: python:3.12
+    environment:
+      - MY_VAR=hello
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+```
+
+```python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("runloop", "path/to/compose.yaml"),
+)
+```
+
+For `image: foo:bar`, the provider builds a thin blueprint (`FROM foo:bar\n`) cached by image name + launch parameters.
+
+#### Multi-service (DinD)
+
+When a compose file defines more than one service, the provider automatically uses Docker-in-Docker: a single Runloop devbox runs a Docker daemon, and services are brought up via `docker compose` inside it. Each service is exposed as a separate `SandboxEnvironment`.
+
+```yaml
+# compose.yaml
+services:
+  default:
+    image: python:3.12
+    x-default: true
+  helper:
+    image: redis:7
+```
+
+```python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("runloop", "path/to/compose.yaml"),
+)
+
+# In a solver, access services by name:
+default_env = sandbox()          # the x-default service
+helper_env = sandbox("helper")
+```
+
+**Default service selection** (priority): `x-default: true` > service named `"default"` or `"main"` > first service in the file.
+
+**DinD blueprint**: The DinD devbox uses Ubuntu 24.04 + Docker installed via the official `get.docker.com` script. The blueprint is cached as `inspect-dind-{hash}` (keyed by the DinD Dockerfile content + launch parameters), so subsequent samples skip the install.
+
+**Docker daemon startup**: Runloop devboxes have no init system, so the daemon is started lazily with `sudo nohup dockerd > /tmp/dockerd.log 2>&1 &` and polled until ready (≤60 s).
+
+**Image caching**: Each DinD devbox gets a fresh Docker daemon with no image cache. `docker compose build` rebuilds from scratch every sample. For faster startup, pre-build your images and push them to a registry, then use `image:` instead of `build:` in your compose file.
+
+## Configuration
+
+The top-level `x-runloop` key on a compose file passes settings to the Runloop devbox.
+
+::: {tbl-colwidths="[22,12,16,50]"}
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `blueprint_id` | str | `None` | Pre-built blueprint id. Skips the build step entirely; the devbox is created from this id. |
+| `blueprint_name` | str | `None` | Pre-built blueprint name. Same as `blueprint_id` but by name. |
+| `snapshot_id` | str | `None` | Pre-created devbox snapshot id. Skips the build step. |
+| `launch_parameters` | dict | `{}` | Merged into the devbox `launch_parameters` (CPU/RAM/disk overrides). Takes precedence over compose-derived values. |
+| `environment_variables` | dict | `{}` | Extra env vars. Single-service: merged with service `environment` (x-runloop wins). DinD: set on the devbox VM. |
+| `metadata` | dict | `{}` | Custom metadata, merged with `inspect_sandboxes`' own metadata (which takes precedence). |
+| `timeout` | float (seconds) | None | Per-request HTTP timeout forwarded to Runloop's `create_and_await_running`. |
+:::
+
+Example:
+
+```yaml
+x-runloop:
+  launch_parameters:
+    custom_cpu_cores: 4
+    custom_gb_memory: 8
+  environment_variables:
+    EXTRA_VAR: "value"
+  metadata:
+    project: my-eval
+```
+
+## Finding sandboxes
+
+Every devbox created by `inspect_sandboxes` is named and tagged with metadata so you can locate it in the Runloop dashboard for debugging, audit, or manual cleanup.
+
+**Devbox names** follow `inspect-{task_id}-{sample_id}-{hex}` (e.g. `inspect-my_eval-42-a1b2c3d4`). The 8-character hex suffix guarantees uniqueness across re-runs.
+
+**Metadata** applied to every devbox:
+
+- `created_by: inspect-ai` — identifies devboxes created by this package.
+- `inspect_run_id: <hex>` — a per-task-run identifier; all devboxes for the same eval run share this value.
+- `task: <name>` — the eval task name.
+
+User metadata from `x-runloop.metadata` is merged in; the three above always take precedence.
+
+**Bulk cleanup** via the Inspect CLI — finds and shuts down every devbox tagged `created_by: inspect-ai`:
+
+```bash
+inspect sandbox cleanup runloop                 # shut down all
+inspect sandbox cleanup runloop <devbox-id>     # shut down one
+```
+
+## Notes
+
+- **Default user**: Runloop's default user is `user` (uid 4444), with passwordless `sudo`.
+- **`user` parameter**: Supported via `sudo -u` in single-service mode and `docker compose exec --user` in DinD mode. Numeric UIDs are supported.
+- **`stdin` (input)**: Supported via input redirection from a temp file. POSIX-compatible.
+- **Concurrent devboxes**: Free-tier accounts are capped at 5 concurrent devboxes; the provider's `default_concurrency` returns 5 to match. Pro-tier users can override via `INSPECT_MAX_SANDBOXES`.
+- **Blueprint caching**: Runloop builds a new blueprint per `create` call regardless of name collisions, so the provider probes `blueprints.list(name=name, status="build_complete")` first and reuses any existing cached blueprint.
+- **Blueprint cap (trial accounts)**: Trial accounts are capped at 5 *total* blueprints (separate from the concurrent-devbox cap). The per-name cache reuses blueprints, but once 5 distinct images/Dockerfiles have been built, `blueprints.create` fails with `429 Trial account limit reached`. Free up slots by deleting unused blueprints in the [Runloop dashboard](https://platform.runloop.ai/blueprints) (or via `client.blueprints.delete`).
+- **Cold blueprint build**: Building a blueprint (`get.docker.com` install or a custom Dockerfile) takes ~60–180 s the first time. The cache short-circuit makes subsequent runs sub-second.
+
+## Limitations {#runloop-limitations}
+
+- **`working_dir` / `user` compose fields**: Not yet supported in v1. Runloop devboxes have a fixed default user (`user` uid 4444), and per-command working directory is handled via `cd` prefixes rather than an SDK parameter.
+- **Architecture**: Runloop devboxes default to x86_64. arm64 is configurable via `launch_parameters.architecture` but requires arm64-compatible images.
