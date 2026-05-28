@@ -16,6 +16,7 @@ from daytona_sdk import AsyncDaytona, Resources
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
+    SandboxConnection,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
     trace_message,
@@ -197,6 +198,10 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
                 f"Error cleaning up DinD sandbox {project.sandbox.id} for task '{task_name}': {e}. "
                 "Will retry in task_cleanup.",
             )
+
+    @override
+    async def connection(self, *, user: str | None = None) -> SandboxConnection:
+        return SandboxConnection(type="daytona", command=f"daytona ssh {self.project.sandbox.id}")
 
     @override
     async def exec(

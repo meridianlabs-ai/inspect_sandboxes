@@ -12,6 +12,7 @@ from typing import Literal, overload
 from daytona_sdk import AsyncSandbox, DaytonaError, DaytonaNotFoundError
 from inspect_ai.util import (
     ExecResult,
+    SandboxConnection,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
     trace_message,
@@ -70,6 +71,11 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
                     f"Error deleting Daytona sandbox {sandbox_id} for task '{task_name}': {e}. "
                     "Will retry in task_cleanup.",
                 )
+
+    @override
+    async def connection(self, *, user: str | None = None) -> SandboxConnection:
+        return SandboxConnection(type="daytona", command=f"daytona ssh {self.sandbox.id}")
+
 
     @override
     async def exec(
