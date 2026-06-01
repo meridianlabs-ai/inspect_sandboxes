@@ -24,6 +24,10 @@ from inspect_sandboxes._util.compose import (
         ("1G", 1024),
         ("512", 512),  # no unit defaults to MiB
         ("0.5g", 512),
+        # positive sub-MiB requests round up to the 1 MiB minimum (not rejected)
+        ("256k", 1),
+        ("512k", 1),
+        ("1k", 1),
     ],
 )
 def test_parse_memory_valid(input_str: str, expected: int) -> None:

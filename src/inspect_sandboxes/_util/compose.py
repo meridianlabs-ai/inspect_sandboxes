@@ -49,10 +49,12 @@ def parse_memory(mem_limit: str) -> int:
     multipliers = {"": 1, "k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 * 1024}
     result = int(value * multipliers[unit])
 
-    if result <= 0:
+    if value <= 0:
         raise ValueError(f"Memory must be positive, got: {mem_limit}")
 
-    return result
+    # A positive but sub-MiB request (e.g. "256k") floors to 0 MiB; clamp it to a
+    # 1 MiB minimum rather than rejecting it (mirrors daytona/_compose.py:_to_gib).
+    return max(1, result)
 
 
 def resolve_dockerfile_path(build: str | ComposeBuild, compose_dir: Path) -> Path:
