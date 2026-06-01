@@ -20,10 +20,11 @@ A minimal eval that uses Modal's default sandbox image — no Dockerfile or comp
 
 ```python
 from inspect_ai import Task, eval
+from inspect_ai.dataset import Sample
 from inspect_ai.solver import generate, system_message
 
 task = Task(
-    dataset=[{"input": "What is 2+2?", "target": "4"}],
+    dataset=[Sample(input="What is 2+2?", target="4")],
     solver=[
       system_message("You are a helpful assistant."),
       generate(),

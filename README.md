@@ -35,10 +35,11 @@ Run a minimal evaluation:
 
 ```python
 from inspect_ai import Task, eval
+from inspect_ai.dataset import Sample
 from inspect_ai.solver import generate
 
 task = Task(
-    dataset=[{"input": "What is 2+2?", "target": "4"}],
+    dataset=[Sample(input="What is 2+2?", target="4")],
     solver=[generate()],
     sandbox="modal",
 )
