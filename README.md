@@ -7,7 +7,7 @@
 | src/inspect\_sandboxes/\_\_init\_\_.py             |        0 |        0 |        0 |        0 |    100% |           |
 | src/inspect\_sandboxes/\_registry.py               |        3 |        3 |        0 |        0 |      0% |       2-4 |
 | src/inspect\_sandboxes/\_util/\_\_init\_\_.py      |        0 |        0 |        0 |        0 |    100% |           |
-| src/inspect\_sandboxes/\_util/compose.py           |       39 |        2 |       20 |        3 |     92% |22-\>21, 79-\>78, 81-82 |
+| src/inspect\_sandboxes/\_util/compose.py           |       39 |        2 |       20 |        3 |     92% |22-\>21, 81-\>80, 83-84 |
 | src/inspect\_sandboxes/\_util/dind\_compose.py     |       61 |        8 |       28 |        9 |     81% |68, 71, 76-81, 83-\>85, 105, 108, 111, 113-\>103, 116 |
 | src/inspect\_sandboxes/\_util/naming.py            |       24 |        0 |        8 |        0 |    100% |           |
 | src/inspect\_sandboxes/\_version.py                |       11 |       11 |        0 |        0 |      0% |      3-24 |
