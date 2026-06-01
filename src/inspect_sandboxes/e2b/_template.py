@@ -91,7 +91,9 @@ async def build_template_for_dockerfile(
     name = template_name_for_dockerfile(
         dockerfile_path, cpu_count=cpu_count, memory_mb=memory_mb
     )
-    template = AsyncTemplate().from_dockerfile(dockerfile_path)
+    template = AsyncTemplate(
+        file_context_path=Path(dockerfile_path).parent
+    ).from_dockerfile(dockerfile_path)
     trace_message(logger, "e2b", f"Building template {name} from {dockerfile_path}")
     await AsyncTemplate.build(
         template, name=name, cpu_count=cpu_count, memory_mb=memory_mb

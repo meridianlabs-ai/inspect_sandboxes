@@ -82,6 +82,28 @@ async def test_dockerfile_build_invokes_sdk(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dockerfile_build_passes_file_context_path(tmp_path: Any) -> None:
+    """COPY/ADD paths in the Dockerfile must resolve against the Dockerfile's own directory."""
+    df = tmp_path / "Dockerfile"
+    df.write_text("FROM python:3.12\nCOPY workspace/ /app/\n")
+
+    with patch("inspect_sandboxes.e2b._template.AsyncTemplate") as mock_cls:
+        mock_cls.build = AsyncMock()
+        instance = MagicMock()
+        instance.from_dockerfile = MagicMock(return_value=MagicMock())
+        mock_cls.return_value = instance
+
+        await build_template_for_dockerfile(str(df))
+
+        # AsyncTemplate(...) must be called with file_context_path set to the
+        # Dockerfile's parent directory.
+        mock_cls.assert_called_once()
+        ctor_kwargs = mock_cls.call_args.kwargs
+        assert "file_context_path" in ctor_kwargs
+        assert str(ctor_kwargs["file_context_path"]) == str(tmp_path)
+
+
+@pytest.mark.asyncio
 async def test_image_build_short_circuits_when_cached() -> None:
     with patch("inspect_sandboxes.e2b._template.AsyncTemplate") as mock_cls:
         mock_cls.exists = AsyncMock(return_value=True)

@@ -83,6 +83,38 @@ async def test_exec_passes_cwd_and_env(mock_sandbox: MagicMock) -> None:
 
 
 @pytest.mark.asyncio
+async def test_exec_defaults_user_to_root(mock_sandbox: MagicMock) -> None:
+    """E2B's SDK defaults to user='user' (uid 1000); we override to root."""
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    await env.exec(["whoami"])
+    assert mock_sandbox.commands.run.call_args[1]["user"] == "root"
+
+    mock_sandbox.commands.run.reset_mock()
+    await env.exec(["whoami"], user="agent")
+    assert mock_sandbox.commands.run.call_args[1]["user"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_file_ops_default_user_to_root(mock_sandbox: MagicMock) -> None:
+    """files.* SDK calls must run as root by default for the same reason as exec."""
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+    file_info = MagicMock()
+    file_info.type = FileType.FILE
+    file_info.size = 5
+    mock_sandbox.files.get_info = AsyncMock(return_value=file_info)
+    mock_sandbox.files.read = AsyncMock(return_value="hello")
+
+    await env.read_file("/etc/anywhere", text=True)
+    assert mock_sandbox.files.get_info.call_args[1]["user"] == "root"
+    assert mock_sandbox.files.read.call_args[1]["user"] == "root"
+
+    mock_sandbox.files.get_info = AsyncMock(side_effect=NotFoundException("missing"))
+    await env.write_file("/etc/anywhere/new.txt", "x")
+    assert mock_sandbox.files.write.call_args[1]["user"] == "root"
+
+
+@pytest.mark.asyncio
 async def test_exec_failure_returncode(mock_sandbox: MagicMock) -> None:
     """E2B's commands.run RAISES on non-zero exit; we must surface as ExecResult."""
     mock_sandbox.commands.run = AsyncMock(
@@ -197,7 +229,9 @@ async def test_write_file_text(mock_sandbox: MagicMock) -> None:
 
     await env.write_file("/workspace/test.txt", "hello")
 
-    mock_sandbox.files.write.assert_called_once_with("/workspace/test.txt", b"hello")
+    mock_sandbox.files.write.assert_called_once_with(
+        "/workspace/test.txt", b"hello", user="root"
+    )
 
 
 @pytest.mark.asyncio
@@ -209,7 +243,7 @@ async def test_write_file_binary(mock_sandbox: MagicMock) -> None:
     await env.write_file("/workspace/data.bin", b"\x00\x01\x02")
 
     mock_sandbox.files.write.assert_called_once_with(
-        "/workspace/data.bin", b"\x00\x01\x02"
+        "/workspace/data.bin", b"\x00\x01\x02", user="root"
     )
 
 
