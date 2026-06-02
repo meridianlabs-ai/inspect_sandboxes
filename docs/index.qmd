@@ -1,1 +1,113 @@
-../README.md
+---
+title: "Inspect Sandboxes"
+---
+
+The `inspect-sandboxes` Python package provides cloud sandbox environments for [Inspect AI](https://inspect.aisi.org.uk/) evaluations. Each sample runs in a managed sandbox on your provider of choice while the Inspect process runs locally on your machine.
+
+This lets you run evaluations without a local Docker daemon or your own Kubernetes cluster, and scale to many concurrent samples beyond what fits on a single machine.
+
+For sandbox concepts and the `SandboxEnvironment` API, see the [Inspect AI sandboxing guide](https://inspect.aisi.org.uk/sandboxing.html).
+
+## Providers
+
+| Provider | Registry Name | Multi-service compose | Requirements |
+|----------|---------------|-----------------------|--------------|
+| [Daytona](daytona.qmd) | `daytona` | Yes (DinD) | Daytona account + API key |
+| [E2B](e2b.qmd) | `e2b` | Yes (DinD) | E2B account + API key |
+| [Modal](modal.qmd) | `modal` | No ([why?](modal.qmd#modal-limitations)) | Modal account |
+
+## Installation
+
+```bash
+# Using pip
+pip install inspect-sandboxes
+
+# Using uv
+uv pip install inspect-sandboxes
+```
+
+## Quick start
+
+Pick a provider, authenticate, then run a minimal evaluation. For each sample in the dataset, a fresh sandbox is provisioned, used to run the solver, and terminated when the sample completes. Since no image is specified in these examples, the provider's default sandbox image is used — place a `Dockerfile` or `compose.yaml` alongside the task (auto-detected) or pass one explicitly via the `sandbox` tuple to provide your own.
+
+::: {.panel-tabset}
+
+## Daytona
+
+Authenticate by setting your API key (one-time):
+
+```bash
+export DAYTONA_API_KEY=your_api_key
+```
+
+Run a minimal evaluation:
+
+```python
+from inspect_ai import Task, eval
+from inspect_ai.dataset import Sample
+from inspect_ai.solver import generate
+
+task = Task(
+    dataset=[Sample(input="What is 2+2?", target="4")],
+    solver=[generate()],
+    sandbox="daytona",
+)
+
+eval(task)
+```
+
+See the [Daytona](daytona.qmd) provider page for full configuration options.
+
+## E2B
+
+Authenticate by setting your API key (one-time):
+
+```bash
+export E2B_API_KEY=your_api_key
+```
+
+Run a minimal evaluation:
+
+```python
+from inspect_ai import Task, eval
+from inspect_ai.dataset import Sample
+from inspect_ai.solver import generate
+
+task = Task(
+    dataset=[Sample(input="What is 2+2?", target="4")],
+    solver=[generate()],
+    sandbox="e2b",
+)
+
+eval(task)
+```
+
+See the [E2B](e2b.qmd) provider page for full configuration options.
+
+## Modal
+
+Authenticate with Modal (one-time):
+
+```bash
+python3 -m modal setup
+```
+
+Run a minimal evaluation:
+
+```python
+from inspect_ai import Task, eval
+from inspect_ai.dataset import Sample
+from inspect_ai.solver import generate
+
+task = Task(
+    dataset=[Sample(input="What is 2+2?", target="4")],
+    solver=[generate()],
+    sandbox="modal",
+)
+
+eval(task)
+```
+
+See the [Modal](modal.qmd) provider page for full configuration options.
+
+:::

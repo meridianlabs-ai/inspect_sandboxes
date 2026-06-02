@@ -171,14 +171,6 @@ inspect sandbox cleanup e2b                 # delete all
 inspect sandbox cleanup e2b <sandbox-id>    # delete one
 ```
 
-## Notes
-
-- **`stderr`**: E2B's `commands.run()` returns stdout and stderr separately, so the `stderr` field on `ExecResult` is populated correctly (unlike Daytona, where it's always empty).
-- **`user` parameter**: Supported natively via E2B's `commands.run(..., user=...)`. No `sudo` workaround required.
-- **`stdin` (input)**: Supported via input redirection from a temp file (E2B's foreground `commands.run()` doesn't expose stdin directly).
-- **DinD startup latency**: Docker daemon boot + image pulls + compose up can take 30s+. The DinD template itself is cached after first build, so the latency only hits cold starts.
-- **No on-the-fly Dockerfile builds without a `task_init`**: E2B requires templates to exist before a sandbox can be created from them. Building happens in `task_init`, so a Dockerfile-configured task takes ~1.5 minutes the first time it's run (cold build) and a few seconds thereafter.
-
 ## Limitations {#e2b-limitations}
 
 - **Per-sample resource overrides**: CPU and memory are baked into the template at build time; changing them produces a new cached template. Each unique resource profile maps to its own template.
