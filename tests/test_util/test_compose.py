@@ -7,6 +7,7 @@ from inspect_ai.util import ComposeBuild
 from inspect_sandboxes._util.compose import (
     parse_environment,
     parse_memory,
+    parse_service_ports,
     resolve_dockerfile_path,
 )
 
@@ -106,3 +107,45 @@ def test_resolve_dockerfile_path(
     assert (
         resolve_dockerfile_path(build, compose_dir) == compose_dir / expected_relative
     )
+
+
+@pytest.mark.parametrize(
+    ("ports", "expected"),
+    [
+        # Container port only (bare string / int)
+        (["3000"], [(3000, None, "tcp")]),
+        ([3000], [(3000, None, "tcp")]),
+        # host:container, same port
+        (["8080:8080"], [(8080, 8080, "tcp")]),
+        # host:container, differing host port
+        (["8080:80"], [(80, 8080, "tcp")]),
+        # host_ip:host:container — the IP is dropped, the port pair kept
+        (["127.0.0.1:8080:80"], [(80, 8080, "tcp")]),
+        # protocol suffix
+        (["53:53/udp"], [(53, 53, "udp")]),
+        (["80/tcp"], [(80, None, "tcp")]),
+        # multiple entries
+        (["8080:80", "443:443"], [(80, 8080, "tcp"), (443, 443, "tcp")]),
+    ],
+)
+def test_parse_service_ports(
+    ports: list[str | int],
+    expected: list[tuple[int, int | None, str]],
+) -> None:
+    parsed, unparseable = parse_service_ports(ports)
+    assert unparseable == []
+    assert [(p.container_port, p.host_port, p.protocol) for p in parsed] == expected
+
+
+@pytest.mark.parametrize(
+    "ports",
+    [
+        ["8000-8005:8000-8005"],  # port range
+        ["8000-8005"],  # container-side range
+        ["notaport"],  # malformed
+    ],
+)
+def test_parse_service_ports_unparseable(ports: list[str | int]) -> None:
+    parsed, unparseable = parse_service_ports(ports)
+    assert parsed == []
+    assert unparseable == [str(p) for p in ports]

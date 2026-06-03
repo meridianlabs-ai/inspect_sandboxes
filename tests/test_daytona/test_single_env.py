@@ -408,3 +408,55 @@ async def test_sample_cleanup_continues_on_delete_failure() -> None:
     await DaytonaSingleServiceEnvironment.sample_cleanup("task", None, envs, False)
 
     assert mock_client.delete.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_connection_surfaces_preview_links_as_ports(
+    mock_sandbox: MagicMock,
+) -> None:
+    """connection() splits each preview URL into a bare host and its port."""
+    preview = MagicMock()
+    preview.url = "https://3000-sb-test-123.proxy.daytona.work"
+    mock_sandbox.get_preview_link = AsyncMock(return_value=preview)
+
+    env = DaytonaSingleServiceEnvironment(mock_sandbox, connection_ports=[3000])
+    conn = await env.connection()
+
+    assert conn.type == "daytona"
+    assert conn.ports is not None
+    assert len(conn.ports) == 1
+    assert conn.ports[0].container_port == 3000
+    mapping = conn.ports[0].mappings[0]
+    # host_ip is a bare host (no scheme); the URL implies HTTPS, so port 443.
+    assert mapping.host_ip == "3000-sb-test-123.proxy.daytona.work"
+    assert mapping.host_port == 443
+    mock_sandbox.get_preview_link.assert_awaited_once_with(3000)
+
+
+@pytest.mark.asyncio
+async def test_connection_preview_link_honors_explicit_port(
+    mock_sandbox: MagicMock,
+) -> None:
+    """An explicit port in the preview URL is preserved, not clobbered by 443."""
+    preview = MagicMock()
+    preview.url = "https://3000-sb-test-123.proxy.daytona.work:8443"
+    mock_sandbox.get_preview_link = AsyncMock(return_value=preview)
+
+    env = DaytonaSingleServiceEnvironment(mock_sandbox, connection_ports=[3000])
+    conn = await env.connection()
+
+    assert conn.ports is not None
+    mapping = conn.ports[0].mappings[0]
+    assert mapping.host_ip == "3000-sb-test-123.proxy.daytona.work"
+    assert mapping.host_port == 8443
+
+
+@pytest.mark.asyncio
+async def test_connection_without_ports_is_empty(mock_sandbox: MagicMock) -> None:
+    """No declared ports yields a connection with ports=None."""
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+    conn = await env.connection()
+
+    assert conn.type == "daytona"
+    assert conn.ports is None
+    assert conn.container == "sb-test-123"

@@ -24,6 +24,7 @@ from rich.prompt import Confirm
 from rich.table import Table
 from typing_extensions import override
 
+from inspect_sandboxes._util.compose import find_default_service
 from inspect_sandboxes._util.naming import make_sandbox_name
 
 from ._compose import (
@@ -31,6 +32,7 @@ from ._compose import (
     extract_e2b_timeout,
     extract_x_e2b,
     resolve_single_service_params,
+    service_connection_ports,
 )
 from ._dind_env import E2BDinDServiceEnvironment
 from ._dind_project import (
@@ -206,7 +208,12 @@ class E2BSandboxEnvironment(SandboxEnvironment):
             f"Created sandbox {sandbox.sandbox_id} for task '{task_name}'",
         )
 
-        return {"default": E2BSingleServiceEnvironment(sandbox)}
+        connection_ports: list[int] = []
+        if compose_config is not None:
+            _, default_service = find_default_service(compose_config)
+            connection_ports = service_connection_ports(default_service)
+
+        return {"default": E2BSingleServiceEnvironment(sandbox, connection_ports)}
 
     @classmethod
     async def _dind_sample_init(

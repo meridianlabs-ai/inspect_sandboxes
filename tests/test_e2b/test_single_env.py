@@ -382,3 +382,37 @@ async def test_sample_cleanup_continues_on_kill_failure(
     await E2BSingleServiceEnvironment.sample_cleanup(
         "task", None, {"default": env}, False
     )
+
+
+@pytest.mark.asyncio
+async def test_connection_surfaces_get_host_as_ports(
+    mock_sandbox: MagicMock,
+) -> None:
+    """connection() maps each declared port to a get_host URL."""
+    # get_host is synchronous in the E2B SDK.
+    mock_sandbox.get_host = MagicMock(return_value="3000-sb-test-123.e2b.app")
+
+    env = E2BSingleServiceEnvironment(mock_sandbox, connection_ports=[3000])
+    conn = await env.connection()
+
+    assert conn.type == "e2b"
+    assert conn.ports is not None
+    assert len(conn.ports) == 1
+    assert conn.ports[0].container_port == 3000
+    mapping = conn.ports[0].mappings[0]
+    # get_host returns a bare host (no scheme); E2B serves it over HTTPS:443.
+    assert mapping.host_ip == "3000-sb-test-123.e2b.app"
+    assert "://" not in mapping.host_ip
+    assert mapping.host_port == 443
+    mock_sandbox.get_host.assert_called_once_with(3000)
+
+
+@pytest.mark.asyncio
+async def test_connection_without_ports_is_empty(mock_sandbox: MagicMock) -> None:
+    """No declared ports yields a connection with ports=None."""
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+    conn = await env.connection()
+
+    assert conn.type == "e2b"
+    assert conn.ports is None
+    assert conn.container == "sb-test-123"

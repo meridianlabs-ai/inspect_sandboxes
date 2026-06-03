@@ -24,6 +24,11 @@ from inspect_ai.util import (
     SandboxEnvironmentLimits,
     trace_message,
 )
+from inspect_ai.util._sandbox.environment import (
+    HostMapping,
+    PortMapping,
+    SandboxConnection,
+)
 from typing_extensions import override
 
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
@@ -34,9 +39,14 @@ logger = getLogger(__name__)
 class E2BSingleServiceEnvironment(SandboxEnvironment):
     """Single-service sandbox using the E2B SDK directly."""
 
-    def __init__(self, sandbox: AsyncSandbox) -> None:
+    def __init__(
+        self, sandbox: AsyncSandbox, connection_ports: list[int] | None = None
+    ) -> None:
         super().__init__()
         self.sandbox = sandbox
+        # Container ports declared via Compose `ports`, surfaced through
+        # connection() as get_host URLs.
+        self._connection_ports = connection_ports or []
 
     @override
     @classmethod
@@ -176,6 +186,37 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
                 e.end,
                 f"Failed to decode {file}: {e.reason}",
             ) from e
+
+    @override
+    async def connection(self, *, user: str | None = None) -> SandboxConnection:
+        """Surface Compose-declared ports as E2B host URLs.
+
+        ``get_host(port)`` returns a reachable host for any container port, so
+        we resolve one per declared container port and place it in
+        ``SandboxConnection.ports``. The host is served over HTTPS, so each
+        mapping uses the host as ``host_ip`` and port 443.
+        """
+        ports: list[PortMapping] | None = None
+        if self._connection_ports:
+            mappings: list[PortMapping] = []
+            for container_port in self._connection_ports:
+                # get_host is synchronous in the E2B SDK (string formatting).
+                host = self.sandbox.get_host(container_port)
+                mappings.append(
+                    PortMapping(
+                        container_port=container_port,
+                        protocol="tcp",
+                        mappings=[HostMapping(host_ip=host, host_port=443)],
+                    )
+                )
+            ports = mappings or None
+
+        return SandboxConnection(
+            type="e2b",
+            command=f"e2b sandbox connect {self.sandbox.sandbox_id}",
+            ports=ports,
+            container=self.sandbox.sandbox_id,
+        )
 
     @staticmethod
     def _build_stdin_command(cmd: list[str], stdin_file: str, *, cleanup: bool) -> str:

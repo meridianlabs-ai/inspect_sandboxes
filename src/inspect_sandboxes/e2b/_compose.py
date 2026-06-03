@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import math
+from logging import getLogger
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService, warn_once
 
 from inspect_sandboxes._util.compose import (
     find_default_service,
     parse_environment,
     parse_memory,
+    parse_service_ports,
     resolve_dockerfile_path,
 )
+
+logger = getLogger(__name__)
 
 DEFAULT_CPU_COUNT = 2
 DEFAULT_MEMORY_MB = 1024
@@ -100,6 +104,50 @@ def resolve_single_service_params(
         timeout=timeout,
         metadata=metadata,
     )
+
+
+def service_connection_ports(service: ComposeService) -> list[int]:
+    """Return the container ports to surface through ``connection()``.
+
+    E2B mirrors Daytona's runtime model: ``get_host(port)`` returns a reachable
+    host for any container port with no creation-time declaration. So we don't
+    translate ports at creation; we record the container side of each
+    ``service.ports`` entry for ``connection()`` to turn into ``get_host`` URLs.
+
+    ``expose`` is host-private and is warned about, never surfaced. Port ranges
+    and UDP entries are warned about and skipped.
+    """
+    if service.expose:
+        warn_once(
+            logger,
+            "E2B does not surface Compose 'expose' ports. They stay "
+            "host-private (reachable only by sibling services). Use 'ports' to "
+            "get a host URL through connection().",
+        )
+
+    if not service.ports:
+        return []
+
+    parsed, unparseable = parse_service_ports(service.ports)
+    for raw in unparseable:
+        warn_once(
+            logger,
+            f"E2B host URLs can't represent the port entry '{raw}' "
+            "(port range or malformed); skipping it.",
+        )
+
+    container_ports: list[int] = []
+    for port in parsed:
+        if port.protocol != "tcp":
+            warn_once(
+                logger,
+                f"E2B host URLs are HTTP(S) only; skipping the "
+                f"{port.protocol.upper()} port '{port.raw}'.",
+            )
+            continue
+        if port.container_port not in container_ports:
+            container_ports.append(port.container_port)
+    return container_ports
 
 
 def extract_x_e2b(extensions: dict[str, Any] | None) -> dict[str, Any]:

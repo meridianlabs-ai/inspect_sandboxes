@@ -8,6 +8,7 @@ import uuid
 from logging import getLogger
 from pathlib import PurePosixPath
 from typing import Literal, overload
+from urllib.parse import urlsplit
 
 from daytona_sdk import AsyncSandbox, DaytonaError, DaytonaNotFoundError
 from inspect_ai.util import (
@@ -15,6 +16,11 @@ from inspect_ai.util import (
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
     trace_message,
+)
+from inspect_ai.util._sandbox.environment import (
+    HostMapping,
+    PortMapping,
+    SandboxConnection,
 )
 from typing_extensions import override
 
@@ -32,9 +38,14 @@ logger = getLogger(__name__)
 class DaytonaSingleServiceEnvironment(SandboxEnvironment):
     """Single-service sandbox using the Daytona SDK directly."""
 
-    def __init__(self, sandbox: AsyncSandbox) -> None:
+    def __init__(
+        self, sandbox: AsyncSandbox, connection_ports: list[int] | None = None
+    ) -> None:
         super().__init__()
         self.sandbox = sandbox
+        # Container ports declared via Compose `ports`, surfaced lazily through
+        # connection() as get_preview_link URLs.
+        self._connection_ports = connection_ports or []
 
     @override
     @classmethod
@@ -175,6 +186,58 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         contents_bytes = await self._download_file(file)
 
         return decode_file_content(contents_bytes, file, text)
+
+    @override
+    async def connection(self, *, user: str | None = None) -> SandboxConnection:
+        """Surface Compose-declared ports as Daytona preview URLs.
+
+        ``get_preview_link(port)`` opens the port if it's closed and returns a
+        public URL, so we resolve one per declared container port and place it
+        in ``SandboxConnection.ports``. The preview URL is a full
+        ``https://…`` URL, so we split it into a bare host (``host_ip``) and the
+        URL's port (``host_port``, defaulting to 443/80 by scheme) — storing the
+        scheme-prefixed URL in ``host_ip`` would corrupt any ``host:port``
+        rendering downstream.
+        """
+        ports: list[PortMapping] | None = None
+        if self._connection_ports:
+            mappings: list[PortMapping] = []
+            for container_port in self._connection_ports:
+                try:
+                    preview = await self.sandbox.get_preview_link(container_port)
+                except Exception as e:
+                    trace_message(
+                        logger,
+                        "daytona",
+                        f"Could not get preview link for port {container_port}: {e}",
+                    )
+                    continue
+                parsed = urlsplit(preview.url)
+                host_ip = parsed.hostname
+                if host_ip is None:
+                    trace_message(
+                        logger,
+                        "daytona",
+                        f"Preview URL for port {container_port} has no host: "
+                        f"{preview.url!r}; skipping it.",
+                    )
+                    continue
+                host_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                mappings.append(
+                    PortMapping(
+                        container_port=container_port,
+                        protocol="tcp",
+                        mappings=[HostMapping(host_ip=host_ip, host_port=host_port)],
+                    )
+                )
+            ports = mappings or None
+
+        return SandboxConnection(
+            type="daytona",
+            command=f"daytona sandbox ssh {self.sandbox.id}",
+            ports=ports,
+            container=self.sandbox.id,
+        )
 
     @staticmethod
     def _check_permission_error(e: DaytonaError, path: str) -> None:

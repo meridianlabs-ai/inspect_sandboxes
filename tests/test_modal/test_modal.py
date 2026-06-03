@@ -72,6 +72,85 @@ def sandbox_env(mock_modal_sandbox: MagicMock) -> ModalSandboxEnvironment:
 
 
 @pytest.mark.asyncio
+async def test_connection_surfaces_tunnels_as_ports(
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """connection() maps sandbox.tunnels() into SandboxConnection.ports."""
+    sandbox_env = ModalSandboxEnvironment(mock_modal_sandbox, has_tunnels=True)
+    tunnel = MagicMock()
+    tunnel.unencrypted_host = "1.2.3.4"
+    tunnel.tcp_socket = ("1.2.3.4", 54321)
+    sandbox_env.sandbox.tunnels = MagicMock()
+    sandbox_env.sandbox.tunnels.aio = AsyncMock(return_value={80: tunnel})
+
+    conn = await sandbox_env.connection()
+
+    assert conn.type == "modal"
+    assert conn.ports is not None
+    assert len(conn.ports) == 1
+    port = conn.ports[0]
+    assert port.container_port == 80
+    assert port.protocol == "tcp"
+    assert port.mappings[0].host_ip == "1.2.3.4"
+    assert port.mappings[0].host_port == 54321
+
+
+@pytest.mark.asyncio
+async def test_connection_encrypted_tunnel_falls_back_to_tls_socket(
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """An encrypted tunnel (no unencrypted_host) uses the public TLS socket."""
+    sandbox_env = ModalSandboxEnvironment(mock_modal_sandbox, has_tunnels=True)
+    tunnel = MagicMock()
+    tunnel.unencrypted_host = None  # encrypted_ports / h2_ports tunnels
+    tunnel.tls_socket = ("web.modal.host", 443)
+    sandbox_env.sandbox.tunnels = MagicMock()
+    sandbox_env.sandbox.tunnels.aio = AsyncMock(return_value={8080: tunnel})
+
+    conn = await sandbox_env.connection()
+
+    assert conn.ports is not None
+    assert len(conn.ports) == 1
+    port = conn.ports[0]
+    assert port.container_port == 8080
+    assert port.mappings[0].host_ip == "web.modal.host"
+    assert port.mappings[0].host_port == 443
+
+
+@pytest.mark.asyncio
+async def test_connection_with_declared_tunnels_but_none_ready_has_no_ports(
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """Declared tunnels that resolve empty yield a connection with ports=None."""
+    sandbox_env = ModalSandboxEnvironment(mock_modal_sandbox, has_tunnels=True)
+    sandbox_env.sandbox.tunnels = MagicMock()
+    sandbox_env.sandbox.tunnels.aio = AsyncMock(return_value={})
+
+    conn = await sandbox_env.connection()
+
+    assert conn.type == "modal"
+    assert conn.ports is None
+    assert conn.container == "sb-test-123"
+
+
+@pytest.mark.asyncio
+async def test_connection_without_declared_tunnels_skips_tunnels_rpc(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """No declared tunnels: connection() must not call the slow tunnels() RPC."""
+    # has_tunnels defaults to False via the fixture.
+    sandbox_env.sandbox.tunnels = MagicMock()
+    sandbox_env.sandbox.tunnels.aio = AsyncMock(return_value={})
+
+    conn = await sandbox_env.connection()
+
+    assert conn.type == "modal"
+    assert conn.ports is None
+    assert conn.container == "sb-test-123"
+    sandbox_env.sandbox.tunnels.aio.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_full_lifecycle(
     mock_modal_app: MagicMock,
     mock_modal_sandbox: MagicMock,
@@ -373,6 +452,60 @@ async def test_sample_init_compose_config_with_secret_extensions(
     assert sandbox_kwargs["timeout"] == 60 * 60 * 24
     assert sandbox_kwargs["image"] == image
     assert sandbox_kwargs["secrets"] == secret_objects
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_has_tunnels"),
+    [
+        # Compose with ports -> tunnels declared
+        (
+            ComposeConfig(
+                services={
+                    "default": ComposeService(image="python:3.12", ports=["8080:80"])
+                }
+            ),
+            True,
+        ),
+        # Compose without ports -> no tunnels declared
+        (
+            ComposeConfig(services={"default": ComposeService(image="python:3.12")}),
+            False,
+        ),
+        # No config (default image) -> no tunnels declared
+        (None, False),
+    ],
+    ids=["compose_with_ports", "compose_without_ports", "no_config"],
+)
+@pytest.mark.asyncio
+async def test_sample_init_tracks_declared_tunnels(
+    config: Any,
+    expected_has_tunnels: bool,
+    mock_modal_app: MagicMock,
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """sample_init records whether any tunnels were declared at creation."""
+    sandbox_cleanup_startup()
+
+    with (
+        patch.object(
+            ModalSandboxEnvironment,
+            "_lookup_app",
+            new_callable=AsyncMock,
+            return_value=mock_modal_app,
+        ),
+        patch.object(
+            ModalSandboxEnvironment,
+            "_create_sandbox",
+            new_callable=AsyncMock,
+            return_value=mock_modal_sandbox,
+        ),
+        patch("modal.Image.from_registry") as mock_from_registry,
+    ):
+        mock_from_registry.return_value = MagicMock(spec=modal.Image)
+        result = await ModalSandboxEnvironment.sample_init("test_task", config, {})
+
+    env = result["default"].as_type(ModalSandboxEnvironment)
+    assert env._has_tunnels is expected_has_tunnels
 
 
 @pytest.mark.parametrize(

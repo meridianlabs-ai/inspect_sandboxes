@@ -12,9 +12,18 @@ from inspect_ai.util import (
 )
 from inspect_sandboxes.modal._compose import (
     _apply_modal_extensions,
+    _apply_service_ports,
     _service_to_gpu,
     convert_compose_to_modal_params,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_warn_once() -> None:
+    """warn_once dedupes globally by message; clear it between tests."""
+    from inspect_ai._util import logger as inspect_logger
+
+    inspect_logger._warned.clear()
 
 
 @pytest.mark.parametrize(
@@ -547,6 +556,90 @@ def test_convert_compose_with_secret_extensions() -> None:
         call("shared-secret"),
     ]
     assert result.kwargs["secrets"] == secret_objects
+
+
+def test_service_ports_translated_to_unencrypted_ports() -> None:
+    """service.ports container side defaults into unencrypted_ports."""
+    params: dict[str, Any] = {}
+    _apply_service_ports(params, ComposeService(image="x", ports=["8080:80", "443"]))
+    assert params["unencrypted_ports"] == [80, 443]
+
+
+def test_service_ports_differing_host_port_warns_and_translates_container(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A differing host port can't be honored; warn but still expose container."""
+    params: dict[str, Any] = {}
+    with caplog.at_level("WARNING"):
+        _apply_service_ports(params, ComposeService(image="x", ports=["9090:80"]))
+    assert params["unencrypted_ports"] == [80]
+    assert any("host port" in r.message for r in caplog.records)
+
+
+def test_service_ports_udp_and_range_skipped_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """UDP and port ranges can't be tunnels; skip and warn, keep the rest."""
+    params: dict[str, Any] = {}
+    with caplog.at_level("WARNING"):
+        _apply_service_ports(
+            params,
+            ComposeService(image="x", ports=["53:53/udp", "8000-8005:8000-8005", "80"]),
+        )
+    assert params["unencrypted_ports"] == [80]
+    messages = " ".join(r.message for r in caplog.records)
+    assert "UDP" in messages
+    assert "range" in messages
+
+
+def test_service_ports_malformed_value_warns_neutrally(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A malformed (non-range) entry warns without mislabelling it a range."""
+    params: dict[str, Any] = {}
+    with caplog.at_level("WARNING"):
+        _apply_service_ports(params, ComposeService(image="x", ports=["notaport"]))
+    assert "unencrypted_ports" not in params
+    messages = " ".join(r.message for r in caplog.records)
+    assert "notaport" in messages
+    assert "port range or malformed" in messages
+
+
+def test_expose_warns_and_is_not_translated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Expose is host-private: warn, never translate."""
+    params: dict[str, Any] = {}
+    with caplog.at_level("WARNING"):
+        _apply_service_ports(params, ComposeService(image="x", expose=["5432"]))
+    assert "unencrypted_ports" not in params
+    assert any("expose" in r.message for r in caplog.records)
+
+
+def test_x_modal_ports_override_translated_service_ports() -> None:
+    """Any x-modal.*_ports replaces the ports translated from service.ports."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12", ports=["8080:80"])},
+        **{"x-modal": {"encrypted_ports": [443]}},
+    )
+    with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+        mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
+        result = convert_compose_to_modal_params(config, None)
+    # service.ports would have produced unencrypted_ports=[80]; the explicit
+    # encrypted_ports extension overrides it entirely.
+    assert "unencrypted_ports" not in result.kwargs
+    assert result.kwargs["encrypted_ports"] == [443]
+
+
+def test_service_ports_without_extension_survive() -> None:
+    """With no x-modal port override, translated service.ports are applied."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12", ports=["80:80"])},
+    )
+    with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+        mock_image.from_registry.side_effect = lambda x: f"registry:{x}"
+        result = convert_compose_to_modal_params(config, None)
+    assert result.kwargs["unencrypted_ports"] == [80]
 
 
 @pytest.mark.parametrize(

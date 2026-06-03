@@ -1,4 +1,5 @@
 import math
+from logging import getLogger
 from pathlib import Path
 from typing import Any
 
@@ -8,14 +9,17 @@ from daytona_sdk import (
     Image,
     Resources,
 )
-from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService, warn_once
 
 from inspect_sandboxes._util.compose import (
     find_default_service,
     parse_environment,
     parse_memory,
+    parse_service_ports,
     resolve_dockerfile_path,
 )
+
+logger = getLogger(__name__)
 
 
 def create_single_service_params(
@@ -97,6 +101,51 @@ def create_single_service_params(
         labels=merged_labels,
         **sandbox_params,
     )
+
+
+def service_connection_ports(service: ComposeService) -> list[int]:
+    """Return the container ports to surface through ``connection()``.
+
+    Daytona has no creation-time port declaration: ``get_preview_link(port)``
+    opens a closed port on demand and returns a URL. So we don't translate
+    ports at creation; we record the container side of each ``service.ports``
+    entry and let ``connection()`` turn them into preview URLs.
+
+    ``expose`` is host-private and is warned about, never surfaced. Port ranges
+    and UDP entries are warned about and skipped (a preview URL is a single
+    HTTP(S) endpoint).
+    """
+    if service.expose:
+        warn_once(
+            logger,
+            "Daytona does not surface Compose 'expose' ports. They stay "
+            "host-private (reachable only by sibling services). Use 'ports' to "
+            "get a preview URL through connection().",
+        )
+
+    if not service.ports:
+        return []
+
+    parsed, unparseable = parse_service_ports(service.ports)
+    for raw in unparseable:
+        warn_once(
+            logger,
+            f"Daytona preview URLs can't represent the port entry '{raw}' "
+            "(port range or malformed); skipping it.",
+        )
+
+    container_ports: list[int] = []
+    for port in parsed:
+        if port.protocol != "tcp":
+            warn_once(
+                logger,
+                f"Daytona preview URLs are HTTP(S) only; skipping the "
+                f"{port.protocol.upper()} port '{port.raw}'.",
+            )
+            continue
+        if port.container_port not in container_ports:
+            container_ports.append(port.container_port)
+    return container_ports
 
 
 def aggregate_resources(config: ComposeConfig) -> Resources | None:

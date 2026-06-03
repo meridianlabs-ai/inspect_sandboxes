@@ -30,9 +30,14 @@ from rich.prompt import Confirm
 from rich.table import Table
 from typing_extensions import override
 
+from inspect_sandboxes._util.compose import find_default_service
 from inspect_sandboxes._util.naming import make_sandbox_name
 
-from ._compose import create_single_service_params, extract_daytona_timeout
+from ._compose import (
+    create_single_service_params,
+    extract_daytona_timeout,
+    service_connection_ports,
+)
 from ._dind_env import DaytonaDinDServiceEnvironment
 from ._sandbox_utils import (
     close_client,
@@ -156,6 +161,13 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
                 compose_config, compose_file, _run_labels(), name=sandbox_name
             )
             create_timeout = extract_daytona_timeout(compose_config.extensions)
+            _, default_service = find_default_service(compose_config)
+            connection_ports = service_connection_ports(default_service)
+            sandbox = await create_sandbox(client, params, timeout=create_timeout)
+            _running_sandboxes.get().append(sandbox.id)
+            return {
+                "default": DaytonaSingleServiceEnvironment(sandbox, connection_ports)
+            }
         else:
             raise ValueError(
                 f"Unrecognized config: {config}. "

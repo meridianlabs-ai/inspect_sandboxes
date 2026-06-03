@@ -1,16 +1,24 @@
 import shlex
 from dataclasses import dataclass, field
+from logging import getLogger
 from pathlib import Path
 from typing import Any
 
 import modal
-from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService, warn_once
 
 from inspect_sandboxes._util.compose import (
     parse_environment,
     parse_memory,
+    parse_service_ports,
     resolve_dockerfile_path,
 )
+
+logger = getLogger(__name__)
+
+# x-modal keys that declare tunnels. If any is set, it overrides the ports
+# translated from service.ports (these extensions are explicit overrides).
+_MODAL_PORT_KEYS = ("encrypted_ports", "h2_ports", "unencrypted_ports")
 
 
 @dataclass
@@ -86,9 +94,70 @@ def convert_compose_to_modal_params(
     if service.network_mode is not None:
         params["block_network"] = service.network_mode == "none"
 
+    # Translate service.ports into unencrypted_ports (raw TCP tunnels).
+    # Set as a default; an explicit x-modal.*_ports overrides it below.
+    _apply_service_ports(params, service)
+
     _apply_modal_extensions(params, config.extensions)
 
     return ModalSandboxParams(command=command, kwargs=params)
+
+
+def _apply_service_ports(params: dict[str, Any], service: ComposeService) -> None:
+    """Default Compose ``ports`` / ``expose`` into Modal tunnel params.
+
+    Modal tunnels are declared at creation as a flat list of container ports.
+    We take the container side of each ``service.ports`` entry and put it into
+    ``unencrypted_ports`` (raw TCP, the only protocol-agnostic choice for a port
+    that might be Postgres, ssh, or anything else, not just HTTP).
+
+    Caveats, each surfaced via ``warn_once`` once per process:
+      - A ``host:container`` mapping with a differing host port can't be
+        honored; Modal assigns the tunnel URL and there is no host binding.
+      - UDP entries and port ranges aren't representable as tunnels; skip them.
+      - ``expose`` is host-private and is never translated.
+    """
+    if service.expose:
+        warn_once(
+            logger,
+            "Modal does not translate Compose 'expose' ports. They stay "
+            "host-private (reachable only by sibling services), and Modal has "
+            "no equivalent. Use 'ports' or x-modal.*_ports to publish a port.",
+        )
+
+    if not service.ports:
+        return
+
+    parsed, unparseable = parse_service_ports(service.ports)
+
+    container_ports: list[int] = []
+    for port in parsed:
+        if port.protocol != "tcp":
+            warn_once(
+                logger,
+                f"Modal tunnels can't represent the {port.protocol.upper()} "
+                f"port '{port.raw}'; skipping it.",
+            )
+            continue
+        if port.host_port is not None and port.host_port != port.container_port:
+            warn_once(
+                logger,
+                f"Modal can't honor the host port in '{port.raw}'; it assigns "
+                f"the tunnel URL and has no host binding. Exposing container "
+                f"port {port.container_port} as an unencrypted tunnel instead.",
+            )
+        if port.container_port not in container_ports:
+            container_ports.append(port.container_port)
+
+    for raw in unparseable:
+        warn_once(
+            logger,
+            f"Modal tunnels can't represent the port entry '{raw}' "
+            "(port range or malformed); skipping it.",
+        )
+
+    if container_ports:
+        params["unencrypted_ports"] = container_ports
 
 
 def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) -> None:
@@ -121,6 +190,12 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
         extensions: Extensions dict from compose config.
     """
     modal_extensions = extensions.get("x-modal", {})
+
+    # An explicit x-modal port declaration overrides the ports translated from
+    # service.ports. Any of the three port keys takes over the whole tunnel set,
+    # so drop the translated default before applying the extension keys below.
+    if any(modal_extensions.get(key) is not None for key in _MODAL_PORT_KEYS):
+        params.pop("unencrypted_ports", None)
 
     extension_keys = [
         "block_network",

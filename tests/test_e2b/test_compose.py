@@ -14,7 +14,16 @@ from inspect_sandboxes.e2b._compose import (
     _service_to_resources,
     extract_e2b_timeout,
     resolve_single_service_params,
+    service_connection_ports,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_warn_once() -> None:
+    """warn_once dedupes globally by message; clear it between tests."""
+    from inspect_ai._util import logger as inspect_logger
+
+    inspect_logger._warned.clear()
 
 
 @pytest.mark.parametrize(
@@ -262,3 +271,46 @@ def test_x_e2b_resources_take_precedence() -> None:
     result = resolve_single_service_params(config, None)
     assert result.cpu_count == 8
     assert result.memory_mb == 4096
+
+
+def test_service_connection_ports_returns_container_ports() -> None:
+    """Ports container side is recorded for connection(); host side dropped."""
+    service = ComposeService(image="x", ports=["8080:80", "443"])
+    assert service_connection_ports(service) == [80, 443]
+
+
+def test_service_connection_ports_skips_range_and_udp(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = ComposeService(
+        image="x", ports=["53:53/udp", "8000-8005:8000-8005", "80"]
+    )
+    with caplog.at_level("WARNING"):
+        ports = service_connection_ports(service)
+    assert ports == [80]
+    messages = " ".join(r.message for r in caplog.records)
+    assert "range" in messages
+    assert "UDP" in messages
+
+
+def test_service_connection_ports_malformed_value_warns_neutrally(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A malformed (non-range) entry warns without mislabelling it a range."""
+    service = ComposeService(image="x", ports=["notaport"])
+    with caplog.at_level("WARNING"):
+        ports = service_connection_ports(service)
+    assert ports == []
+    messages = " ".join(r.message for r in caplog.records)
+    assert "notaport" in messages
+    assert "port range or malformed" in messages
+
+
+def test_service_connection_ports_expose_warns_not_surfaced(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = ComposeService(image="x", expose=["5432"])
+    with caplog.at_level("WARNING"):
+        ports = service_connection_ports(service)
+    assert ports == []
+    assert any("expose" in r.message for r in caplog.records)

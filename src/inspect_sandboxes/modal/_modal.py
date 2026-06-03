@@ -25,6 +25,11 @@ from inspect_ai.util import (
     trace_message,
     warn_once,
 )
+from inspect_ai.util._sandbox.environment import (
+    HostMapping,
+    PortMapping,
+    SandboxConnection,
+)
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
@@ -38,7 +43,7 @@ from typing_extensions import override
 
 from inspect_sandboxes._util.naming import make_sandbox_name
 
-from ._compose import convert_compose_to_modal_params
+from ._compose import _MODAL_PORT_KEYS, convert_compose_to_modal_params
 
 logger = getLogger(__name__)
 
@@ -91,9 +96,14 @@ _exec_retry = retry(
 
 @sandboxenv(name="modal")
 class ModalSandboxEnvironment(SandboxEnvironment):
-    def __init__(self, sandbox: modal.Sandbox) -> None:
+    def __init__(self, sandbox: modal.Sandbox, has_tunnels: bool = False) -> None:
         super().__init__()
         self.sandbox = sandbox
+        # Whether any tunnels were declared at creation (from service.ports or
+        # x-modal.*_ports). When none were, connection() must NOT call
+        # tunnels(): with no declared tunnels that RPC blocks for ~50s before
+        # raising, on every call.
+        self._has_tunnels = has_tunnels
 
     @classmethod
     def config_files(cls) -> list[str]:
@@ -160,7 +170,8 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         await sandbox.set_tags.aio(INSPECT_SANDBOX_TAG)
         running_sandboxes().append(sandbox.object_id)
 
-        return {"default": cls(sandbox)}
+        has_tunnels = any(sandbox_kwargs.get(key) for key in _MODAL_PORT_KEYS)
+        return {"default": cls(sandbox, has_tunnels=has_tunnels)}
 
     @override
     @classmethod
@@ -444,6 +455,56 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 ) from e
 
         return contents_bytes
+
+    @override
+    async def connection(self, *, user: str | None = None) -> SandboxConnection:
+        """Surface the sandbox's declared tunnels as port mappings.
+
+        Modal declares tunnels at creation (from ``service.ports`` or
+        ``x-modal.*_ports``) and exposes them at runtime via
+        ``sandbox.tunnels()``, keyed by container port. We map each tunnel to a
+        ``PortMapping`` so the declared ports reach the eval through inspect's
+        standard ``SandboxConnection.ports`` field.
+
+        When no tunnels were declared we skip ``tunnels()`` entirely: with none
+        declared that RPC blocks for ~50s before raising, so calling it would
+        slow every connection() on a Dockerfile/portless sandbox.
+        """
+        ports: list[PortMapping] | None = None
+        tunnels: dict[int, Any] = {}
+        if self._has_tunnels:
+            try:
+                tunnels = await self.sandbox.tunnels.aio()
+            except Exception as e:
+                # tunnels() can still raise if they aren't ready yet; a
+                # connection without ports is useful, so don't fail here.
+                trace_message(logger, "modal", f"Could not retrieve Modal tunnels: {e}")
+                tunnels = {}
+
+        if tunnels:
+            ports = []
+            for container_port, tunnel in tunnels.items():
+                # Prefer the raw TCP socket (from unencrypted_ports). Encrypted
+                # tunnels (encrypted_ports / h2_ports) have no TCP socket, so
+                # fall back to the public TLS host:port.
+                if tunnel.unencrypted_host:
+                    host, host_port = tunnel.tcp_socket
+                else:
+                    host, host_port = tunnel.tls_socket
+                ports.append(
+                    PortMapping(
+                        container_port=container_port,
+                        protocol="tcp",
+                        mappings=[HostMapping(host_ip=host, host_port=host_port)],
+                    )
+                )
+
+        return SandboxConnection(
+            type="modal",
+            command=f"modal shell {self.sandbox.object_id}",
+            ports=ports,
+            container=self.sandbox.object_id,
+        )
 
     @staticmethod
     @_standard_retry
