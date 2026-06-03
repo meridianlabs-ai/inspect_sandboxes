@@ -56,9 +56,26 @@ def make_mock_client(sandbox: MagicMock) -> MagicMock:
 
     paginated = MagicMock()
     paginated.items = []
-    client.list = AsyncMock(return_value=paginated)
+    client.list = _mock_list(paginated.items)
 
     return client
+
+
+def _mock_list(items: list[Any]) -> MagicMock:
+    """Mock ``AsyncDaytona.list``, an async generator that yields sandboxes.
+
+    Returns a ``MagicMock`` (so call assertions still work) whose side effect
+    yields ``items`` from a fresh async generator on each call.
+    """
+
+    def _call(*args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]:
+        async def _gen() -> AsyncGenerator[Any, None]:
+            for item in items:
+                yield item
+
+        return _gen()
+
+    return MagicMock(side_effect=_call)
 
 
 @pytest.fixture
@@ -355,7 +372,7 @@ async def test_task_cleanup_handles_sandbox_failures(
     mock_client.close = AsyncMock()
     paginated = MagicMock()
     paginated.items = []
-    mock_client.list = AsyncMock(return_value=paginated)
+    mock_client.list = _mock_list(paginated.items)
 
     with patch(
         "inspect_sandboxes.daytona._daytona.AsyncDaytona", return_value=mock_client
@@ -378,7 +395,7 @@ async def test_task_cleanup_deletes_orphaned_sandboxes() -> None:
 
     mock_client = MagicMock()
     mock_client.get = AsyncMock(side_effect=Exception("not tracked"))
-    mock_client.list = AsyncMock(return_value=paginated)
+    mock_client.list = _mock_list(paginated.items)
     mock_client.delete = AsyncMock()
     mock_client.close = AsyncMock()
 
@@ -388,7 +405,10 @@ async def test_task_cleanup_deletes_orphaned_sandboxes() -> None:
         await DaytonaSandboxEnvironment.task_init("test_task", None)
         await DaytonaSandboxEnvironment.task_cleanup("test_task", None, cleanup=True)
 
-    mock_client.list.assert_called_once_with(labels={"inspect_run_id": _run_id.get()})
+    mock_client.list.assert_called_once()
+    assert mock_client.list.call_args.args[0].labels == {
+        "inspect_run_id": _run_id.get()
+    }
     mock_client.delete.assert_called_once_with(orphan)
 
 
@@ -401,7 +421,7 @@ async def test_task_cleanup_skips_already_deleted_in_orphan_pass(
 
     mock_client = MagicMock()
     mock_client.get = AsyncMock(return_value=mock_sandbox)
-    mock_client.list = AsyncMock(return_value=paginated)
+    mock_client.list = _mock_list(paginated.items)
     mock_client.delete = AsyncMock()
     mock_client.close = AsyncMock()
 
@@ -474,7 +494,7 @@ async def test_cli_cleanup_bulk_no_sandboxes(
     mock_client = MagicMock()
     paginated = MagicMock()
     paginated.items = []
-    mock_client.list = AsyncMock(return_value=paginated)
+    mock_client.list = _mock_list(paginated.items)
     mock_client.close = AsyncMock()
 
     with patch(
@@ -497,7 +517,7 @@ async def test_cli_cleanup_bulk_with_sandboxes(
     mock_client = MagicMock()
     paginated = MagicMock()
     paginated.items = [sb1, sb2]
-    mock_client.list = AsyncMock(return_value=paginated)
+    mock_client.list = _mock_list(paginated.items)
     mock_client.delete = AsyncMock()
     mock_client.close = AsyncMock()
 
@@ -506,7 +526,8 @@ async def test_cli_cleanup_bulk_with_sandboxes(
     ):
         await DaytonaSandboxEnvironment.cli_cleanup(None)
 
-    mock_client.list.assert_called_once_with(labels=INSPECT_SANDBOX_LABEL)
+    mock_client.list.assert_called_once()
+    assert mock_client.list.call_args.args[0].labels == INSPECT_SANDBOX_LABEL
     assert mock_client.delete.call_count == 2
     captured = capsys.readouterr()
     assert "Successfully deleted: 2" in captured.out
@@ -527,7 +548,7 @@ async def test_cli_cleanup_bulk_partial_failure(
     mock_client = MagicMock()
     paginated = MagicMock()
     paginated.items = [sb1, sb2]
-    mock_client.list = AsyncMock(return_value=paginated)
+    mock_client.list = _mock_list(paginated.items)
     mock_client.delete = AsyncMock(side_effect=failing_delete)
     mock_client.close = AsyncMock()
 

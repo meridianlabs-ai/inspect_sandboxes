@@ -11,7 +11,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT License" }
 dependencies = [
-    "daytona-sdk>=0.166.0",
+    "daytona-sdk>=0.180.0",
     "e2b>=2.20",
     "inspect-ai>=0.3.211",
     "modal>=1.3.3",

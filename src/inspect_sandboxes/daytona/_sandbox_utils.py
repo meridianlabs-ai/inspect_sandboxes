@@ -12,6 +12,7 @@ from daytona_sdk import (
     CreateSandboxFromImageParams,
     CreateSandboxFromSnapshotParams,
     DaytonaNotFoundError,
+    ListSandboxesQuery,
 )
 from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 
@@ -93,8 +94,8 @@ async def delete_sandbox(client: AsyncDaytona, sandbox: AsyncSandbox) -> None:
 async def list_sandboxes(
     client: AsyncDaytona, labels: dict[str, str]
 ) -> list[AsyncSandbox]:
-    paginated = await client.list(labels=labels)
-    return paginated.items
+    query = ListSandboxesQuery(labels=labels)
+    return [sandbox async for sandbox in client.list(query)]
 
 
 @standard_retry
