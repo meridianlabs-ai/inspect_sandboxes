@@ -17,7 +17,7 @@
 | src/inspect\_sandboxes/daytona/\_dind\_env.py      |      160 |       21 |       44 |       12 |     82% |93-\>109, 102-105, 116, 135, 155-\>159, 187, 194-195, 245, 278-\>281, 282, 294, 322-327, 362-365, 374 |
 | src/inspect\_sandboxes/daytona/\_dind\_project.py  |      172 |       56 |       40 |        5 |     64% |145-\>157, 152-153, 173-189, 203-226, 247-277, 313-\>320, 369, 382, 397-398, 416-\>exit, 418-419, 430-441 |
 | src/inspect\_sandboxes/daytona/\_retry.py          |       26 |        4 |        6 |        1 |     78% | 60, 71-74 |
-| src/inspect\_sandboxes/daytona/\_sandbox\_utils.py |       50 |        6 |       10 |        1 |     88% |60-61, 81, 89, 107, 112 |
+| src/inspect\_sandboxes/daytona/\_sandbox\_utils.py |       50 |        6 |       10 |        1 |     88% |61-62, 82, 90, 108, 113 |
 | src/inspect\_sandboxes/daytona/\_single\_env.py    |      119 |       23 |       20 |        1 |     80% |148-\>151, 182-183, 190-196, 203-207, 217-219, 225-229, 235-237 |
 | src/inspect\_sandboxes/e2b/\_\_init\_\_.py         |        0 |        0 |        0 |        0 |    100% |           |
 | src/inspect\_sandboxes/e2b/\_compose.py            |       87 |        1 |       42 |        4 |     96% |125, 178-\>180, 180-\>186, 183-\>186 |
