@@ -497,3 +497,55 @@ async def test_self_check_dind(
     ]
     results = await self_check(e2b_dind_env)
     _check_self_check_results(results, known_failures)
+
+
+@pytest_asyncio.fixture
+async def e2b_ports_env() -> AsyncGenerator[SandboxEnvironment, None]:
+    """Create a real single-service E2B sandbox that declares a port."""
+    config = ComposeConfig(
+        services={
+            "default": ComposeService(
+                image="python:3.12-slim",
+                command="sleep infinity",
+                ports=["8080:8080"],
+            )
+        }
+    )
+    await E2BSandboxEnvironment.task_init("test_connection_ports", None)
+    envs = await E2BSandboxEnvironment.sample_init("test_connection_ports", config, {})
+    yield envs["default"]
+    try:
+        await E2BSandboxEnvironment.sample_cleanup(
+            "test_connection_ports", config, envs, False
+        )
+        await E2BSandboxEnvironment.task_cleanup(
+            "test_connection_ports", None, cleanup=True
+        )
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_connection_surfaces_declared_port(
+    e2b_ports_env: SandboxEnvironment,
+) -> None:
+    """A real single-service E2B sandbox surfaces a Compose-declared port.
+
+    Exercises the live ``get_host()`` path that the unit tests mock: the port
+    declared in the Compose config must come back through
+    ``SandboxConnection.ports`` as an E2B host URL.
+    """
+    conn = await e2b_ports_env.connection()
+
+    assert conn.type == "e2b"
+    assert conn.ports is not None, "expected the declared port to be surfaced"
+    port = next((p for p in conn.ports if p.container_port == 8080), None)
+    assert port is not None, (
+        f"container port 8080 missing from {[p.container_port for p in conn.ports]}"
+    )
+    assert port.protocol == "tcp"
+    assert port.mappings, "expected at least one host mapping"
+    host = port.mappings[0]
+    assert isinstance(host.host_ip, str) and host.host_ip, "expected a real host"
+    assert host.host_port == 443

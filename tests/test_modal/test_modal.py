@@ -997,3 +997,59 @@ async def test_self_check(modal_sandbox_environment: ModalSandboxEnvironment) ->
 
     results = await self_check(modal_sandbox_environment)
     check_results_of_self_check(results, known_failures)
+
+
+@pytest_asyncio.fixture
+async def modal_ports_environment() -> AsyncGenerator[SandboxEnvironment, None]:
+    """Create a real Modal sandbox that publishes a Compose-declared port."""
+    sandbox_cleanup_startup()
+
+    config = ComposeConfig(
+        services={
+            "default": ComposeService(
+                image="python:3.12-slim",
+                command="sleep infinity",
+                ports=["8080:8080"],
+            )
+        }
+    )
+    envs = await ModalSandboxEnvironment.sample_init(
+        "test_connection_ports", config, {}
+    )
+    yield envs["default"]
+
+    try:
+        await ModalSandboxEnvironment.sample_cleanup(
+            "test_connection_ports", config, envs, False
+        )
+        await ModalSandboxEnvironment.task_cleanup(
+            "test_connection_ports", None, cleanup=True
+        )
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_connection_surfaces_declared_port(
+    modal_ports_environment: ModalSandboxEnvironment,
+) -> None:
+    """A real Modal sandbox surfaces a Compose-declared port via connection().
+
+    Exercises the live ``tunnels()`` path that the unit tests mock: the port
+    declared in the Compose config must come back through
+    ``SandboxConnection.ports`` with a reachable host and port.
+    """
+    conn = await modal_ports_environment.connection()
+
+    assert conn.type == "modal"
+    assert conn.ports is not None, "expected the declared port to be surfaced"
+    port = next((p for p in conn.ports if p.container_port == 8080), None)
+    assert port is not None, (
+        f"container port 8080 missing from {[p.container_port for p in conn.ports]}"
+    )
+    assert port.protocol == "tcp"
+    assert port.mappings, "expected at least one host mapping"
+    host = port.mappings[0]
+    assert isinstance(host.host_ip, str) and host.host_ip, "expected a real host"
+    assert host.host_port > 0

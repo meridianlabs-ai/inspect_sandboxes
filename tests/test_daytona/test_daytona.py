@@ -641,3 +641,57 @@ async def test_self_check_dind(
     ]
     results = await self_check(daytona_dind_env)
     _check_self_check_results(results, known_failures)
+
+
+@pytest_asyncio.fixture
+async def daytona_ports_env() -> AsyncGenerator[SandboxEnvironment, None]:
+    """Create a real single-service Daytona sandbox that declares a port."""
+    config = ComposeConfig(
+        services={
+            "default": ComposeService(
+                image="python:3.12-slim",
+                command="sleep infinity",
+                ports=["8080:8080"],
+            )
+        }
+    )
+    await DaytonaSandboxEnvironment.task_init("test_connection_ports", None)
+    envs = await DaytonaSandboxEnvironment.sample_init(
+        "test_connection_ports", config, {}
+    )
+    yield envs["default"]
+    try:
+        await DaytonaSandboxEnvironment.sample_cleanup(
+            "test_connection_ports", config, envs, False
+        )
+        await DaytonaSandboxEnvironment.task_cleanup(
+            "test_connection_ports", None, cleanup=True
+        )
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_connection_surfaces_declared_port(
+    daytona_ports_env: SandboxEnvironment,
+) -> None:
+    """A real single-service Daytona sandbox surfaces a Compose-declared port.
+
+    Exercises the live ``get_preview_link()`` path that the unit tests mock: the
+    port declared in the Compose config must come back through
+    ``SandboxConnection.ports`` as a Daytona preview URL.
+    """
+    conn = await daytona_ports_env.connection()
+
+    assert conn.type == "daytona"
+    assert conn.ports is not None, "expected the declared port to be surfaced"
+    port = next((p for p in conn.ports if p.container_port == 8080), None)
+    assert port is not None, (
+        f"container port 8080 missing from {[p.container_port for p in conn.ports]}"
+    )
+    assert port.protocol == "tcp"
+    assert port.mappings, "expected at least one host mapping"
+    host = port.mappings[0]
+    assert isinstance(host.host_ip, str) and host.host_ip, "expected a real host"
+    assert host.host_port > 0
