@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.3.0...v0.4.0) (2026-06-09)
+
+
+### Features
+
+* add E2B sandbox implementation ([#25](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/25)) ([747754a](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/747754ab581aff04b78b2804370508628851add1))
+* **compose:** translate ports and surface them through connection() ([#33](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/33)) ([ac40ab2](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/ac40ab236fabb52ca390e7c63c990604918816f7))
+
+
+### Bug Fixes
+
+* **compose:** clamp positive sub-MiB memory limits to 1 MiB instead of erroring ([#29](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/29)) ([37c2bdb](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/37c2bdbaf6598605ae1ffc5929ab1b78e3814d48))
+* **daytona:** support async-generator list() API (daytona-sdk &gt;=0.180) ([#34](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/34)) ([6037d4d](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/6037d4d0325ea72f74b4138c5adf308e9de45264))
+* **docs:** use Sample objects in hello-world examples ([#27](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/27)) ([12e2feb](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/12e2feb16b08efaf661123a0317ab1a0ebb5fcee))
+* **e2b:** root-user default, Dockerfile COPY resolution, SDK min version ([#31](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/31)) ([f57bb81](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/f57bb818c63b62a6e3e0b9dd2e0c39f2c29e7fc9))
+
+
+### Documentation
+
+* dedicated homepage with provider tabset + extension update ([#32](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/32)) ([ee7ad96](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/ee7ad963e5898116c3d3abdcaee59c1e34f0437d))
+
 ## [0.3.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.2.3...v0.3.0) (2026-04-24)
 
 
