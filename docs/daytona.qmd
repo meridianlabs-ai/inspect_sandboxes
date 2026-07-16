@@ -141,7 +141,7 @@ The top-level `x-daytona` key on a compose file passes settings to the Daytona s
 | `ephemeral` | bool | `False` | If `True`, the sandbox is auto-deleted when stopped. |
 | `timeout` | float (seconds) | `60` | Seconds to wait for the sandbox creation API call to complete. For DinD, this covers only the VM provisioning — dockerd boot, image pulls, and `docker compose build`/`up` have their own internal timeouts and are not affected. |
 | `snapshot` | str | `None` | Pre-created Daytona snapshot name. Skips image build for single-service; used as the DinD VM snapshot for multi-service. |
-| `resources` | dict | per-service aggregation | Sandbox-level resource overrides (`cpu`, `memory`, `gpu`). For DinD, overrides the per-service sum. |
+| `resources` | dict | per-service aggregation | Sandbox-level resource overrides (`cpu`, `memory`, `gpu`, `disk` in GiB). `disk` can only be set here. For DinD, overrides the per-service sum. |
 | `env_vars` | dict | `{}` | Extra env vars. Single-service: merged with service `environment` (x-daytona wins). DinD: set on the VM, not on compose services. |
 | `labels` | dict | `{}` | Custom labels, merged with `inspect_sandboxes`' own labels (which take precedence). |
 :::
@@ -155,6 +155,7 @@ x-daytona:
     cpu: 4
     memory: 8
     gpu: 1
+    disk: 20
   env_vars:
     EXTRA_VAR: "value"
 ```

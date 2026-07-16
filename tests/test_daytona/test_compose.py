@@ -570,7 +570,7 @@ def test_create_single_service_params_with_resources_override() -> None:
     """Test that x-daytona.resources overrides service-level resources."""
     config = ComposeConfig(
         services={"default": ComposeService(image="python:3.12")},
-        **{"x-daytona": {"resources": {"cpu": 4, "memory": 8}}},
+        **{"x-daytona": {"resources": {"cpu": 4, "memory": 8, "disk": 20}}},
     )
 
     result = create_single_service_params(config, None, STUB_LABELS)
@@ -579,6 +579,7 @@ def test_create_single_service_params_with_resources_override() -> None:
     assert result.resources is not None
     assert result.resources.cpu == 4
     assert result.resources.memory == 8
+    assert result.resources.disk == 20
 
 
 def test_create_single_service_params_forwards_name_to_image_params() -> None:

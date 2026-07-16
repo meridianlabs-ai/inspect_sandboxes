@@ -82,6 +82,7 @@ def create_single_service_params(
             cpu=resources_override.get("cpu"),
             memory=resources_override.get("memory"),
             gpu=resources_override.get("gpu"),
+            disk=resources_override.get("disk"),
         )
 
     # x-daytona.snapshot: use pre-built snapshot instead of building from image
@@ -200,8 +201,9 @@ def apply_daytona_extensions(
             which take precedence.
         - snapshot (str): Pre-created Daytona snapshot name. For single-service,
             skips image building. For DinD, uses as the DinD VM snapshot.
-        - resources (dict): Sandbox-level resource overrides (cpu, memory, gpu).
-            For DinD, overrides the per-service aggregation.
+        - resources (dict): Sandbox-level resource overrides (cpu, memory, gpu,
+            disk). ``disk`` (GiB) can only be set here. For DinD, overrides
+            the per-service aggregation.
         - volumes: Not yet supported.
 
     Args:

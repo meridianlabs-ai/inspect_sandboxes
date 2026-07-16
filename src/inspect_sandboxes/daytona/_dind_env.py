@@ -136,6 +136,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
                     cpu=resources_override.get("cpu"),
                     memory=resources_override.get("memory"),
                     gpu=resources_override.get("gpu"),
+                    disk=resources_override.get("disk"),
                 )
             else:
                 resources = aggregate_resources(config)
