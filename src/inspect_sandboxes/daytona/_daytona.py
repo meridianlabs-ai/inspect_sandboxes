@@ -44,6 +44,8 @@ from ._sandbox_utils import (
     create_sandbox,
     delete_sandbox,
     list_sandboxes,
+    reap_zombie_sandboxes,
+    zombie_registry,
 )
 from ._single_env import DaytonaSingleServiceEnvironment
 
@@ -248,6 +250,8 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
                 for sb in orphans:
                     if sb.id in deleted_ids:
                         continue
+                    if sb.name in zombie_registry():
+                        continue  # reaped below with retry-until-deleted
                     try:
                         await delete_sandbox(client, sb)
                         trace_message(
@@ -266,6 +270,14 @@ class DaytonaSandboxEnvironment(SandboxEnvironment):
                 f"Failed to cleanup {len(failed_ids)} sandbox(es). "
                 f"Failed IDs: {', '.join(failed_ids)}"
             )
+
+        # Third pass: zombies from failed create attempts. These are often
+        # still transitioning (undeletable) when the passes above run, so
+        # reap them with retry-until-deleted semantics.
+        zombies = zombie_registry()
+        if zombies:
+            await reap_zombie_sandboxes(client, zombies)
+            zombies.clear()
 
         _running_sandboxes.get().clear()
 

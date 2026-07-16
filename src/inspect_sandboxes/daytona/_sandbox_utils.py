@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import shlex
 import string
+import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from logging import getLogger
 
 from daytona_sdk import (
@@ -77,6 +80,76 @@ def decode_file_content(data: bytes, file: str, text: bool) -> str | bytes:
 
 CREATE_SANDBOX_ATTEMPTS = 3
 
+# Sandbox names left behind by failed create attempts. A failed create leaves
+# a zombie that is undeletable while it transitions (CREATING -> ERROR takes
+# 15-20 min server-side), so failed names are registered here and reaped by
+# task_cleanup via reap_zombie_sandboxes(), which retries until deletion
+# actually succeeds.
+_zombie_names: ContextVar[list[str] | None] = ContextVar(
+    "daytona_zombie_names", default=None
+)
+
+
+def zombie_registry() -> list[str]:
+    """The zombie-name registry for the current context (created on demand)."""
+    registry = _zombie_names.get()
+    if registry is None:
+        registry = []
+        _zombie_names.set(registry)
+    return registry
+
+
+async def reap_zombie_sandboxes(
+    client: AsyncDaytona,
+    names: list[str],
+    *,
+    ceiling_sec: float = 1500,
+    poll_sec: float = 60,
+) -> list[str]:
+    """Delete zombie sandboxes, retrying each until deletion actually succeeds.
+
+    A zombie is undeletable ("state change in progress") until the server-side
+    watchdog moves it to ERROR, which can take 15-20 min from creation — hence
+    the retry-until-success loop rather than a single attempt. Returns the
+    names that still could not be deleted within ceiling_sec (also logged).
+    """
+    deadline = time.monotonic() + ceiling_sec
+    remaining = list(dict.fromkeys(names))  # de-dupe, keep order
+    while remaining and time.monotonic() < deadline:
+        still_remaining: list[str] = []
+        for name in remaining:
+            try:
+                sandbox = await client.get(name)
+            except DaytonaNotFoundError:
+                logger.info("Zombie sandbox %s already gone", name)
+                continue
+            except DaytonaError as e:
+                logger.debug("Zombie lookup failed for %s (will retry): %s", name, e)
+                still_remaining.append(name)
+                continue
+            try:
+                await client.delete(sandbox)
+                logger.info("Reaped zombie sandbox %s", name)
+            except DaytonaError as e:
+                logger.debug(
+                    "Zombie %s not deletable yet (state=%s, will retry): %s",
+                    name,
+                    sandbox.state,
+                    e,
+                )
+                still_remaining.append(name)
+        remaining = still_remaining
+        if remaining:
+            await asyncio.sleep(poll_sec)
+    if remaining:
+        logger.warning(
+            "Gave up reaping %d zombie sandbox(es) after %.0fs: %s",
+            len(remaining),
+            ceiling_sec,
+            ", ".join(remaining),
+        )
+    return remaining
+
 
 async def create_sandbox(
     client: AsyncDaytona,
@@ -103,6 +176,8 @@ async def create_sandbox(
             return await client.create(params, timeout=timeout)
         except DaytonaError as e:
             last_error = e
+            if params.name:
+                zombie_registry().append(params.name)
             logger.warning(
                 "Sandbox create attempt %d/%d (name=%s) failed: %s: %s",
                 attempt + 1,
