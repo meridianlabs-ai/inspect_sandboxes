@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import errno
 import shlex
+import string
+import uuid
 from collections.abc import Awaitable, Callable
+from logging import getLogger
 
 from daytona_sdk import (
     AsyncDaytona,
     AsyncSandbox,
     CreateSandboxFromImageParams,
     CreateSandboxFromSnapshotParams,
+    DaytonaError,
     DaytonaNotFoundError,
     ListSandboxesQuery,
 )
 from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 
-from ._retry import exec_retry, standard_retry
+from ._retry import standard_retry
+
+logger = getLogger(__name__)
 
 
 def build_stdin_command(cmd: list[str], stdin_file: str, cleanup: bool = True) -> str:
@@ -69,17 +75,81 @@ def decode_file_content(data: bytes, file: str, text: bool) -> str | bytes:
     return data
 
 
-@exec_retry
+CREATE_SANDBOX_ATTEMPTS = 3
+
+
 async def create_sandbox(
     client: AsyncDaytona,
     params: CreateSandboxFromSnapshotParams | CreateSandboxFromImageParams,
     *,
     timeout: float | None = None,
 ) -> AsyncSandbox:
-    """Uses exec_retry to avoid retrying on DaytonaTimeoutError."""
-    if timeout is None:
-        return await client.create(params)
-    return await client.create(params, timeout=timeout)
+    """Create a sandbox, recovering from failed create attempts.
+
+    A failed create can leave a zombie sandbox that still holds the requested
+    name (observed stuck in CREATING for 15-20 min until a server-side watchdog
+    errors it), so retrying with unchanged params always fails with a name
+    conflict. Each retry therefore respins the identity: best-effort deletes
+    the zombie, then regenerates the name suffix.
+    """
+    last_error: DaytonaError | None = None
+    for attempt in range(CREATE_SANDBOX_ATTEMPTS):
+        if attempt > 0:
+            await _cleanup_failed_create(client, params)
+            _respin_create_params(params)
+        try:
+            if timeout is None:
+                return await client.create(params)
+            return await client.create(params, timeout=timeout)
+        except DaytonaError as e:
+            last_error = e
+            logger.warning(
+                "Sandbox create attempt %d/%d (name=%s) failed: %s: %s",
+                attempt + 1,
+                CREATE_SANDBOX_ATTEMPTS,
+                params.name,
+                type(e).__name__,
+                str(e)[:300],
+            )
+    assert last_error is not None
+    raise last_error
+
+
+async def _cleanup_failed_create(
+    client: AsyncDaytona,
+    params: CreateSandboxFromSnapshotParams | CreateSandboxFromImageParams,
+) -> None:
+    """Best-effort delete of the zombie left behind by a failed create.
+
+    Deletion is expected to fail while the zombie is still in CREATING
+    ("state change in progress"); that's fine — the retry uses a fresh name
+    and the zombie self-destructs once the server-side watchdog errors it.
+    """
+    if not params.name:
+        return
+    try:
+        sandbox = await client.get(params.name)
+        await client.delete(sandbox)
+        logger.info("Deleted zombie sandbox from failed create: %s", params.name)
+    except Exception as e:
+        logger.debug(
+            "Could not delete zombie sandbox %s (continuing with a fresh name): %s",
+            params.name,
+            e,
+        )
+
+
+def _respin_create_params(
+    params: CreateSandboxFromSnapshotParams | CreateSandboxFromImageParams,
+) -> None:
+    """Regenerate the name suffix in place."""
+    if params.name:
+        base, sep, suffix = params.name.rpartition("-")
+        if sep and len(suffix) == 8 and all(c in string.hexdigits for c in suffix):
+            # Swap the existing unique suffix so the name length stays put.
+            params.name = f"{base}-{uuid.uuid4().hex[:8]}"
+        else:
+            params.name = f"{params.name}-{uuid.uuid4().hex[:8]}"
 
 
 @standard_retry
