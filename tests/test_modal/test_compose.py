@@ -669,3 +669,77 @@ def test_convert_compose_command(
         result = convert_compose_to_modal_params(config, None)
 
     assert result.command == expected_command
+
+
+### x-inspect-network (NetworkAccess) handling
+
+
+def test_apply_network_access_domains_and_cidr() -> None:
+    from inspect_ai.util import NetworkAccess
+    from inspect_sandboxes.modal._compose import _apply_network_access
+
+    params: dict[str, Any] = {}
+    _apply_network_access(
+        params,
+        NetworkAccess(
+            allow_domains=["example.com", "*.wikipedia.org"],
+            allow_cidr=["1.1.1.1/32"],
+        ),
+    )
+
+    assert params["outbound_domain_allowlist"] == ["example.com", "*.wikipedia.org"]
+    assert params["outbound_cidr_allowlist"] == ["1.1.1.1/32"]
+    assert "block_network" not in params
+
+
+def test_apply_network_access_allow_all_opens_network() -> None:
+    from inspect_ai.util import NetworkAccess
+    from inspect_sandboxes.modal._compose import _apply_network_access
+
+    params: dict[str, Any] = {"block_network": True}
+    _apply_network_access(params, NetworkAccess(allow_domains=["*"]))
+
+    assert params["block_network"] is False
+    assert "outbound_domain_allowlist" not in params
+
+
+def test_apply_network_access_domain_ports_fails_loud() -> None:
+    from inspect_ai.util import DomainPort, NetworkAccess
+    from inspect_sandboxes.modal._compose import (
+        ModalNetworkAccessError,
+        _apply_network_access,
+    )
+
+    policy = NetworkAccess(
+        allow_domains=["example.com"],
+        allow_domains_ports=[DomainPort(domain="example.com", port=8080)],
+    )
+    with pytest.raises(ModalNetworkAccessError, match="allow_domains_ports"):
+        _apply_network_access({}, policy)
+
+
+def test_apply_network_access_unsupported_entity_fails_loud() -> None:
+    from inspect_ai.util import NetworkAccess
+    from inspect_sandboxes.modal._compose import (
+        ModalNetworkAccessError,
+        _apply_network_access,
+    )
+
+    with pytest.raises(ModalNetworkAccessError, match="entities"):
+        _apply_network_access({}, NetworkAccess(allow_entities=["cluster"]))
+
+
+def test_convert_wires_x_inspect_network(tmp_path: Path) -> None:
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        "services:\n"
+        "  default:\n"
+        "    image: my-image\n"
+        "x-inspect-network:\n"
+        "  allow_domains:\n"
+        "    - example.com\n"
+    )
+    config = parse_compose_yaml(str(compose))
+    result = convert_compose_to_modal_params(config, str(compose))
+
+    assert result.kwargs["outbound_domain_allowlist"] == ["example.com"]

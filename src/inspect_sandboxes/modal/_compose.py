@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import modal
-from inspect_ai.util import ComposeConfig, ComposeService, warn_once
+from inspect_ai.util import ComposeConfig, ComposeService, NetworkAccess, warn_once
+from inspect_ai.util._sandbox.network import network_access_from_extensions
 
 from inspect_sandboxes._util.compose import (
     parse_environment,
@@ -32,6 +33,49 @@ class ModalSandboxParams:
 
     command: list[str] = field(default_factory=list)
     kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+_ALLOW_ALL_ENTITIES = frozenset({"all", "world"})
+
+
+class ModalNetworkAccessError(ValueError):
+    """A NetworkAccess policy requested a control the Modal provider cannot enforce."""
+
+
+def _network_access_is_allow_all(policy: NetworkAccess) -> bool:
+    if "*" in policy.allow_domains:
+        return True
+    return bool(_ALLOW_ALL_ENTITIES.intersection(policy.allow_entities))
+
+
+def _apply_network_access(params: dict[str, Any], policy: NetworkAccess) -> None:
+    """Compile a NetworkAccess policy into Modal Sandbox.create params in place.
+
+    Modal enforces a 443/SNI outbound domain allowlist (``outbound_domain_allowlist``,
+    SDK >= 1.5.0) and a raw CIDR allowlist (``outbound_cidr_allowlist``, SDK >= 1.4.3).
+    It has no port-80 / HTTP-Host identity, no per-domain extra ports, and no DNS
+    restriction, so controls Modal cannot enforce raise here rather than silently
+    under-enforcing (which would let a hijacked agent slip past the allowlist).
+    """
+    if policy.allow_domains_ports:
+        raise ModalNetworkAccessError(
+            "Modal cannot enforce 'allow_domains_ports' (per-domain extra ports): "
+            "its outbound_domain_allowlist is 443/SNI-only."
+        )
+    unsupported = sorted(set(policy.allow_entities) - _ALLOW_ALL_ENTITIES)
+    if unsupported:
+        raise ModalNetworkAccessError(
+            f"Modal cannot enforce entities {unsupported!r}: "
+            "only 'all'/'world' (allow-all) map onto a non-k8s provider."
+        )
+    if _network_access_is_allow_all(policy):
+        params.pop("outbound_domain_allowlist", None)
+        params.pop("outbound_cidr_allowlist", None)
+        params["block_network"] = False
+        return
+    params.pop("block_network", None)
+    params["outbound_domain_allowlist"] = [d for d in policy.allow_domains if d != "*"]
+    params["outbound_cidr_allowlist"] = list(policy.allow_cidr)
 
 
 def convert_compose_to_modal_params(
@@ -99,6 +143,10 @@ def convert_compose_to_modal_params(
     _apply_service_ports(params, service)
 
     _apply_modal_extensions(params, config.extensions)
+
+    network_access = network_access_from_extensions(config.extensions)
+    if network_access is not None:
+        _apply_network_access(params, network_access)
 
     return ModalSandboxParams(command=command, kwargs=params)
 
