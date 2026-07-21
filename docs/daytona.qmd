@@ -175,7 +175,7 @@ Every sandbox created by `inspect_sandboxes` is named and labeled so you can loc
 
 User labels from `x-daytona.labels` are merged in; the two above always take precedence.
 
-**DinD snapshot names** are deterministic, derived from aggregated per-service resources and the DinD image: `inspect-dind-<cpu>cpu-<mem>gb-<gpu>gpu-<image-hash>` (e.g. `inspect-dind-2cpu-4gb-0gpu-bb4ebfa28b94`). The trailing 12-char hex is a hash of `DIND_IMAGE`, so bumping the image invalidates the cache and a fresh snapshot is built. Samples with matching resource profiles and image reuse the same snapshot.
+**DinD snapshot names** are deterministic, derived from aggregated per-service resources and the DinD image: `inspect-dind-<cpu>cpu-<mem>gb-<gpu>gpu-<disk>disk-<image-hash>` (e.g. `inspect-dind-2cpu-4gb-0gpu-20disk-bb4ebfa28b94`). The trailing 12-char hex is a hash of `DIND_IMAGE`, so bumping the image invalidates the cache and a fresh snapshot is built. Samples with matching resource profiles and image reuse the same snapshot.
 
 **Bulk cleanup** via the Inspect CLI — finds and deletes every sandbox tagged `created_by: inspect-ai`:
 

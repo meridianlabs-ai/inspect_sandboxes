@@ -170,15 +170,19 @@ def test_dind_snapshot_name() -> None:
     # DIND_IMAGE="docker:28.3.3-dind" this is "bb4ebfa28b94".
     assert (
         _dind_snapshot_name(Resources(cpu=3, memory=7))
-        == "inspect-dind-3cpu-7gb-0gpu-bb4ebfa28b94"
+        == "inspect-dind-3cpu-7gb-0gpu-defaultdisk-bb4ebfa28b94"
     )
     assert (
         _dind_snapshot_name(Resources(cpu=2, memory=4, gpu=1))
-        == "inspect-dind-2cpu-4gb-1gpu-bb4ebfa28b94"
+        == "inspect-dind-2cpu-4gb-1gpu-defaultdisk-bb4ebfa28b94"
+    )
+    assert (
+        _dind_snapshot_name(Resources(cpu=2, memory=4, disk=20))
+        == "inspect-dind-2cpu-4gb-0gpu-20disk-bb4ebfa28b94"
     )
     assert (
         _dind_snapshot_name(None)
-        == "inspect-dind-defaultcpu-defaultgb-0gpu-bb4ebfa28b94"
+        == "inspect-dind-defaultcpu-defaultgb-0gpu-defaultdisk-bb4ebfa28b94"
     )
 
 

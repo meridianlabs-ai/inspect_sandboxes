@@ -232,8 +232,9 @@ def _dind_snapshot_name(resources: Resources | None) -> str:
     cpu = resources.cpu if resources and resources.cpu else "default"
     mem = resources.memory if resources and resources.memory else "default"
     gpu = resources.gpu if resources and resources.gpu else 0
+    disk = resources.disk if resources and resources.disk else "default"
     image_hash = hashlib.sha256(DIND_IMAGE.encode()).hexdigest()[:12]
-    return f"inspect-dind-{cpu}cpu-{mem}gb-{gpu}gpu-{image_hash}"
+    return f"inspect-dind-{cpu}cpu-{mem}gb-{gpu}gpu-{disk}disk-{image_hash}"
 
 
 async def _ensure_dind_snapshot(
