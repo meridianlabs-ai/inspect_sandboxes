@@ -23,9 +23,16 @@ from daytona_sdk import (
 )
 from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 
+from inspect_sandboxes._util.naming import _HEX_LEN
+
 from ._retry import standard_retry
 
 logger = getLogger(__name__)
+
+# Indirection so tests can substitute a fake clock by patching this alias,
+# instead of patching time.monotonic process-wide (which the asyncio event
+# loop also calls, making a finite side_effect list flaky).
+_monotonic = time.monotonic
 
 
 def build_stdin_command(cmd: list[str], stdin_file: str, cleanup: bool = True) -> str:
@@ -80,14 +87,20 @@ def decode_file_content(data: bytes, file: str, text: bool) -> str | bytes:
 
 CREATE_SANDBOX_ATTEMPTS = 3
 
-# Sandbox names left behind by failed create attempts. A failed create leaves
-# a zombie that is undeletable while it transitions (CREATING -> ERROR takes
-# 15-20 min server-side), so failed names are registered here and reaped by
-# task_cleanup via reap_zombie_sandboxes(), which retries until deletion
-# actually succeeds.
+# Sandbox names left behind by failed create attempts, reaped by task_cleanup.
+# Primed once in the parent context (reset_zombie_registry(), from task_init)
+# before sample tasks fork — inspect copies the context per sample, so a .set()
+# from inside a sample task would be invisible to task_cleanup. Same pattern as
+# _running_sandboxes. (Kept here, not co-located in _daytona.py, to avoid a
+# circular import.)
 _zombie_names: ContextVar[list[str] | None] = ContextVar(
     "daytona_zombie_names", default=None
 )
+
+
+def reset_zombie_registry() -> None:
+    """Prime a fresh zombie registry in the current (parent) context."""
+    _zombie_names.set([])
 
 
 def zombie_registry() -> list[str]:
@@ -103,19 +116,27 @@ async def reap_zombie_sandboxes(
     client: AsyncDaytona,
     names: list[str],
     *,
-    ceiling_sec: float = 1500,
-    poll_sec: float = 60,
+    ceiling_sec: float = 120,
+    poll_sec: float = 30,
 ) -> list[str]:
-    """Delete zombie sandboxes, retrying each until deletion actually succeeds.
+    """Best-effort delete of zombie sandboxes, retrying each a few times.
 
-    A zombie is undeletable ("state change in progress") until the server-side
-    watchdog moves it to ERROR, which can take 15-20 min from creation — hence
-    the retry-until-success loop rather than a single attempt. Returns the
-    names that still could not be deleted within ceiling_sec (also logged).
+    A zombie is undeletable ("state change in progress") until the server
+    moves it to ERROR, which can take much longer than task_cleanup should
+    block for — so this is a short best-effort pass, not a wait-until-gone
+    loop. Returns the names still undeleted within ceiling_sec (also logged
+    by name so they can be cleaned up out of band).
     """
-    deadline = time.monotonic() + ceiling_sec
+    logger.warning(
+        "Reaping %d zombie sandbox(es) from failed creates "
+        "(best-effort, up to %.0fs): %s",
+        len(set(names)),
+        ceiling_sec,
+        ", ".join(dict.fromkeys(names)),
+    )
+    deadline = _monotonic() + ceiling_sec
     remaining = list(dict.fromkeys(names))  # de-dupe, keep order
-    while remaining and time.monotonic() < deadline:
+    while remaining and _monotonic() < deadline:
         still_remaining: list[str] = []
         for name in remaining:
             try:
@@ -130,6 +151,10 @@ async def reap_zombie_sandboxes(
             try:
                 await client.delete(sandbox)
                 logger.info("Reaped zombie sandbox %s", name)
+            except DaytonaNotFoundError:
+                # Vanished between get and delete (e.g. server removed it) —
+                # treat as reaped, don't waste a poll cycle retrying.
+                logger.info("Zombie sandbox %s already gone", name)
             except DaytonaError as e:
                 logger.debug(
                     "Zombie %s not deletable yet (state=%s, will retry): %s",
@@ -159,15 +184,18 @@ async def create_sandbox(
 ) -> AsyncSandbox:
     """Create a sandbox, recovering from failed create attempts.
 
-    A failed create can leave a zombie sandbox that still holds the requested
-    name (observed stuck in CREATING for 15-20 min until a server-side watchdog
-    errors it), so retrying with unchanged params always fails with a name
-    conflict. Each retry therefore respins the identity: best-effort deletes
-    the zombie, then regenerates the name suffix.
+    A failed create can leave a zombie holding the requested name, so a retry
+    with unchanged params hits a name conflict; each retry respins the name
+    suffix (and best-effort deletes the zombie) with backoff.
+
+    Retries include DaytonaTimeoutError, so a persistently timing-out create
+    can take up to CREATE_SANDBOX_ATTEMPTS x ``x-daytona.timeout`` to fail.
     """
     last_error: DaytonaError | None = None
     for attempt in range(CREATE_SANDBOX_ATTEMPTS):
         if attempt > 0:
+            # exponential backoff between attempts (1s, 2s, capped at 10s)
+            await asyncio.sleep(min(2 ** (attempt - 1), 10))
             await _cleanup_failed_create(client, params)
             _respin_create_params(params)
         try:
@@ -220,11 +248,15 @@ def _respin_create_params(
     """Regenerate the name suffix in place."""
     if params.name:
         base, sep, suffix = params.name.rpartition("-")
-        if sep and len(suffix) == 8 and all(c in string.hexdigits for c in suffix):
+        if (
+            sep
+            and len(suffix) == _HEX_LEN
+            and all(c in string.hexdigits for c in suffix)
+        ):
             # Swap the existing unique suffix so the name length stays put.
-            params.name = f"{base}-{uuid.uuid4().hex[:8]}"
+            params.name = f"{base}-{uuid.uuid4().hex[:_HEX_LEN]}"
         else:
-            params.name = f"{params.name}-{uuid.uuid4().hex[:8]}"
+            params.name = f"{params.name}-{uuid.uuid4().hex[:_HEX_LEN]}"
 
 
 @standard_retry

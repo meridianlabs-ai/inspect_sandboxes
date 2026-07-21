@@ -4,6 +4,10 @@ The Daytona SDK has no built-in retry, so we handle it here.
 All DaytonaError subclasses (including DaytonaRateLimitError)
 are retried with exponential backoff, except DaytonaTimeoutError which
 is handled separately by run_with_timeout_retry.
+
+Note: create_sandbox does not use these decorators — it has its own retry
+loop that respins the name on each attempt and intentionally retries
+DaytonaTimeoutError (a timed-out create is the canonical name-holding zombie).
 """
 
 from __future__ import annotations
