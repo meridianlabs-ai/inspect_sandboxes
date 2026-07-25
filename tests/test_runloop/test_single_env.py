@@ -6,13 +6,15 @@ import base64
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from inspect_ai.util import OutputLimitExceededError
+from inspect_sandboxes.runloop._retry import poll_execution
 from inspect_sandboxes.runloop._single_env import (
     LARGE_FILE_THRESHOLD,
     RunloopSingleServiceEnvironment,
 )
-from runloop_api_client import APIConnectionError, APITimeoutError
+from runloop_api_client import APIConnectionError, APITimeoutError, NotFoundError
 
 
 def _make_execution(
@@ -24,6 +26,22 @@ def _make_execution(
     execution.exit_status = exit_status
     execution.status = "completed"
     return execution
+
+
+def _execution(status: str) -> MagicMock:
+    execution = MagicMock()
+    execution.status = status
+    return execution
+
+
+def _poll_client(retrieve: AsyncMock) -> MagicMock:
+    """A mock client exposing devboxes.executions.retrieve/kill for poll_execution."""
+    client = MagicMock()
+    client.devboxes = MagicMock()
+    client.devboxes.executions = MagicMock()
+    client.devboxes.executions.retrieve = retrieve
+    client.devboxes.executions.kill = AsyncMock()
+    return client
 
 
 def _make_client() -> MagicMock:
@@ -44,16 +62,10 @@ def client() -> MagicMock:
     return _make_client()
 
 
-@pytest.fixture
-def env(client: MagicMock) -> RunloopSingleServiceEnvironment:
-    return RunloopSingleServiceEnvironment(client, "dbx-test-123")
-
-
 @pytest.mark.asyncio
-async def test_exec_basic(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_basic(client: MagicMock) -> None:
     """Test exec returns ExecResult for a successful command."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
         return_value=_make_execution(stdout="hi\n", exit_status=0)
     )
@@ -70,10 +82,9 @@ async def test_exec_basic(
 
 
 @pytest.mark.asyncio
-async def test_exec_joins_args_with_shlex(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_joins_args_with_shlex(client: MagicMock) -> None:
     """Args with spaces are shell-quoted so they're not split into multiple tokens."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     await env.exec(["echo", "hello world"])
 
     await_args = client.devboxes.execute_and_await_completion.await_args
@@ -83,9 +94,8 @@ async def test_exec_joins_args_with_shlex(
 
 
 @pytest.mark.asyncio
-async def test_exec_with_cwd(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_with_cwd(client: MagicMock) -> None:
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     await env.exec(["pwd"], cwd="/work")
 
     await_args = client.devboxes.execute_and_await_completion.await_args
@@ -95,9 +105,8 @@ async def test_exec_with_cwd(
 
 
 @pytest.mark.asyncio
-async def test_exec_with_env(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_with_env(client: MagicMock) -> None:
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     await env.exec(["sh", "-c", "echo $FOO"], env={"FOO": "bar"})
 
     await_args = client.devboxes.execute_and_await_completion.await_args
@@ -107,9 +116,8 @@ async def test_exec_with_env(
 
 
 @pytest.mark.asyncio
-async def test_exec_with_user_wraps_in_sudo(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_with_user_wraps_in_sudo(client: MagicMock) -> None:
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     await env.exec(["whoami"], user="root")
 
     await_args = client.devboxes.execute_and_await_completion.await_args
@@ -119,9 +127,8 @@ async def test_exec_with_user_wraps_in_sudo(
 
 
 @pytest.mark.asyncio
-async def test_exec_with_numeric_user_uses_uid_form(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_with_numeric_user_uses_uid_form(client: MagicMock) -> None:
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     await env.exec(["whoami"], user="4444")
 
     await_args = client.devboxes.execute_and_await_completion.await_args
@@ -131,10 +138,9 @@ async def test_exec_with_numeric_user_uses_uid_form(
 
 
 @pytest.mark.asyncio
-async def test_exec_failure_returncode(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_failure_returncode(client: MagicMock) -> None:
     """Non-zero exit_status from the SDK should surface as ExecResult.returncode."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
         return_value=_make_execution(stdout="", stderr="boom", exit_status=1)
     )
@@ -146,10 +152,9 @@ async def test_exec_failure_returncode(
 
 
 @pytest.mark.asyncio
-async def test_exec_with_stdin_string(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_with_stdin_string(client: MagicMock) -> None:
     """Test exec redirects string stdin through a temp file."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
         return_value=_make_execution(stdout="ok", exit_status=0)
     )
@@ -169,10 +174,9 @@ async def test_exec_with_stdin_string(
 
 
 @pytest.mark.asyncio
-async def test_exec_with_stdin_bytes(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_with_stdin_bytes(client: MagicMock) -> None:
     """Test exec redirects bytes stdin through a temp file."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     await env.exec(["wc", "-c"], input=b"\x00\x01\x02")
 
     write_cmd = client.devboxes.execute_and_await_completion.await_args_list[0].kwargs[
@@ -183,10 +187,9 @@ async def test_exec_with_stdin_bytes(
 
 
 @pytest.mark.asyncio
-async def test_exec_without_stdin_no_upload(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_without_stdin_no_upload(client: MagicMock) -> None:
     """Test exec without stdin does not upload any file."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     await env.exec(["echo", "hi"])
 
     calls = client.devboxes.execute_and_await_completion.await_args_list
@@ -196,10 +199,9 @@ async def test_exec_without_stdin_no_upload(
 
 
 @pytest.mark.asyncio
-async def test_exec_with_stdin_and_user_skips_inline_cleanup(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_with_stdin_and_user_skips_inline_cleanup(client: MagicMock) -> None:
     """Test that stdin + user defers temp-file cleanup to the finally block."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     await env.exec(["cat"], input="hello", user="testuser")
 
     calls = client.devboxes.execute_and_await_completion.await_args_list
@@ -215,10 +217,9 @@ async def test_exec_with_stdin_and_user_skips_inline_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_exec_retries_transient_error(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_retries_transient_error(client: MagicMock) -> None:
     """Test that exec retries on transient APIError."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     call_count = 0
     success = _make_execution(stdout="ok", exit_status=0)
 
@@ -237,10 +238,9 @@ async def test_exec_retries_transient_error(
 
 
 @pytest.mark.asyncio
-async def test_exec_timeout_retry_uses_capped_timeouts(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_exec_timeout_retry_uses_capped_timeouts(client: MagicMock) -> None:
     """First retry caps at 60s, second at 30s, then raises TimeoutError."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_async = AsyncMock(
         side_effect=APITimeoutError(request=MagicMock())
     )
@@ -253,10 +253,9 @@ async def test_exec_timeout_retry_uses_capped_timeouts(
 
 
 @pytest.mark.asyncio
-async def test_write_file_text(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_write_file_text(client: MagicMock) -> None:
     """Test write_file with text content."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     # First exec is the _is_directory check (returns non-zero → not a dir).
     client.devboxes.execute_and_await_completion = AsyncMock(
         side_effect=[
@@ -274,10 +273,9 @@ async def test_write_file_text(
 
 
 @pytest.mark.asyncio
-async def test_write_file_binary(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_write_file_binary(client: MagicMock) -> None:
     """Test write_file with binary content."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
         side_effect=[
             _make_execution(exit_status=1),  # not a directory
@@ -295,10 +293,9 @@ async def test_write_file_binary(
 
 
 @pytest.mark.asyncio
-async def test_write_file_raises_for_directory(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_write_file_raises_for_directory(client: MagicMock) -> None:
     """Test write_file raises IsADirectoryError when path is a directory."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
         return_value=_make_execution(exit_status=0)  # is_directory: yes
     )
@@ -308,10 +305,9 @@ async def test_write_file_raises_for_directory(
 
 
 @pytest.mark.asyncio
-async def test_read_file_text(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_read_file_text(client: MagicMock) -> None:
     """Test read_file in text mode."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     encoded = base64.b64encode(b"file contents").decode("ascii")
     client.devboxes.execute_and_await_completion = AsyncMock(
         side_effect=[
@@ -327,10 +323,9 @@ async def test_read_file_text(
 
 
 @pytest.mark.asyncio
-async def test_read_file_binary(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_read_file_binary(client: MagicMock) -> None:
     """Test read_file in binary mode."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     payload = b"\xff\xfe\x00"
     encoded = base64.b64encode(payload).decode("ascii")
     client.devboxes.execute_and_await_completion = AsyncMock(
@@ -346,10 +341,9 @@ async def test_read_file_binary(
 
 
 @pytest.mark.asyncio
-async def test_read_file_not_found(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_read_file_not_found(client: MagicMock) -> None:
     """Test read_file raises FileNotFoundError when file doesn't exist."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
         side_effect=[
             _make_execution(exit_status=1),  # is_directory: no
@@ -363,10 +357,9 @@ async def test_read_file_not_found(
 
 
 @pytest.mark.asyncio
-async def test_read_file_is_directory(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_read_file_is_directory(client: MagicMock) -> None:
     """Test read_file raises IsADirectoryError for directories."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
         return_value=_make_execution(exit_status=0)  # is_directory: yes
     )
@@ -376,10 +369,9 @@ async def test_read_file_is_directory(
 
 
 @pytest.mark.asyncio
-async def test_read_file_size_limit(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_read_file_size_limit(client: MagicMock) -> None:
     """Test read_file raises OutputLimitExceededError for oversized files."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     huge = 200 * 1024 * 1024  # 200 MiB, above 100 MiB read cap
     client.devboxes.execute_and_await_completion = AsyncMock(
         side_effect=[
@@ -393,10 +385,9 @@ async def test_read_file_size_limit(
 
 
 @pytest.mark.asyncio
-async def test_write_file_large_uses_object_api(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_write_file_large_uses_object_api(client: MagicMock) -> None:
     """Files at/above LARGE_FILE_THRESHOLD route through the Objects API."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     obj = MagicMock(id="obj-123", upload_url="https://upload.example/put")
     download = MagicMock(download_url="https://download.example/get")
     client.objects = MagicMock()
@@ -433,10 +424,9 @@ async def test_write_file_large_uses_object_api(
 
 
 @pytest.mark.asyncio
-async def test_read_file_large_uses_object_api(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_read_file_large_uses_object_api(client: MagicMock) -> None:
     """Files at/above LARGE_FILE_THRESHOLD route through the Objects API."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     obj = MagicMock(id="obj-456", upload_url="https://upload.example/put")
     download = MagicMock(download_url="https://download.example/get")
     client.objects = MagicMock()
@@ -477,10 +467,49 @@ async def test_read_file_large_uses_object_api(
 
 
 @pytest.mark.asyncio
-async def test_sample_cleanup_shuts_down_devbox(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_write_file_quotes_parent_dir_with_spaces(client: MagicMock) -> None:
+    """The mkdir prefix quotes the parent as one token, so spaces don't mangle it."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
+    client.devboxes.execute_and_await_completion = AsyncMock(
+        side_effect=[
+            _make_execution(exit_status=1),  # not a directory
+            _make_execution(exit_status=0),  # write succeeds
+        ]
+    )
+
+    await env.write_file("/tmp/foo bar/baz.txt", "hi")
+
+    cmd = client.devboxes.execute_and_await_completion.await_args_list[-1].kwargs[
+        "command"
+    ]
+    # Parent is quoted as one token, e.g. mkdir -p '/tmp/foo bar'.
+    assert "mkdir -p '/tmp/foo bar' &&" in cmd
+
+
+@pytest.mark.asyncio
+async def test_exec_timeout_path_polls_without_resubmitting(client: MagicMock) -> None:
+    """A transient error mid-poll is tolerated: the command is submitted once."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
+    started = MagicMock(execution_id="exec-1")
+    client.devboxes.execute_async = AsyncMock(return_value=started)
+    client.devboxes.executions.retrieve = AsyncMock(
+        side_effect=[
+            APIConnectionError(request=MagicMock()),  # transient blip mid-poll
+            _make_execution(stdout="ok", exit_status=0),  # then completes
+        ]
+    )
+
+    result = await env.exec(["echo", "hi"], timeout=120)
+
+    assert result.success
+    assert client.devboxes.execute_async.await_count == 1
+    assert client.devboxes.executions.retrieve.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sample_cleanup_shuts_down_devbox(client: MagicMock) -> None:
     """Test sample_cleanup shuts down all devboxes in environments dict."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.shutdown = AsyncMock()
     await RunloopSingleServiceEnvironment.sample_cleanup(
         "task", None, {"default": env}, False
@@ -489,10 +518,9 @@ async def test_sample_cleanup_shuts_down_devbox(
 
 
 @pytest.mark.asyncio
-async def test_sample_cleanup_skips_when_interrupted(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_sample_cleanup_skips_when_interrupted(client: MagicMock) -> None:
     """Test sample_cleanup does nothing when interrupted."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.shutdown = AsyncMock()
     await RunloopSingleServiceEnvironment.sample_cleanup(
         "task", None, {"default": env}, True
@@ -508,12 +536,59 @@ async def test_sample_cleanup_skips_when_no_environments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sample_cleanup_continues_on_shutdown_failure(
-    client: MagicMock, env: RunloopSingleServiceEnvironment
-) -> None:
+async def test_sample_cleanup_continues_on_shutdown_failure(client: MagicMock) -> None:
     """Test sample_cleanup logs error and continues when a shutdown fails."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.shutdown = AsyncMock(side_effect=RuntimeError("flaky"))
     # Should not raise — error is traced and deferred.
     await RunloopSingleServiceEnvironment.sample_cleanup(
         "task", None, {"default": env}, False
     )
+
+
+@pytest.mark.asyncio
+async def test_poll_execution_returns_when_done() -> None:
+    client = _poll_client(AsyncMock(return_value=_execution("completed")))
+    result = await poll_execution(
+        client, "dbx-1", "exec-1", timeout=None, last_n="9999"
+    )
+    assert result.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_poll_execution_times_out_and_kills() -> None:
+    """On deadline overrun it raises TimeoutError and kills the execution."""
+    client = _poll_client(AsyncMock(return_value=_execution("running")))
+    with pytest.raises(TimeoutError):
+        await poll_execution(client, "dbx-1", "exec-1", timeout=0, last_n="9999")
+    client.devboxes.executions.kill.assert_awaited_once_with(
+        "exec-1", devbox_id="dbx-1", kill_process_group=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_execution_tolerates_transient_error_in_place() -> None:
+    """A transient retrieve error is retried in place, never re-submitting."""
+    retrieve = AsyncMock(
+        side_effect=[
+            APIConnectionError(request=MagicMock()),
+            _execution("completed"),
+        ]
+    )
+    client = _poll_client(retrieve)
+    result = await poll_execution(
+        client, "dbx-1", "exec-1", timeout=None, last_n="9999"
+    )
+    assert result.status == "completed"
+    assert retrieve.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_execution_reraises_non_retryable_error() -> None:
+    response = httpx.Response(404, request=httpx.Request("GET", "https://example"))
+    retrieve = AsyncMock(
+        side_effect=NotFoundError("gone", response=response, body=None)
+    )
+    client = _poll_client(retrieve)
+    with pytest.raises(NotFoundError):
+        await poll_execution(client, "dbx-1", "exec-1", timeout=None, last_n="9999")

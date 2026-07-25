@@ -34,6 +34,7 @@ def _make_async_iter(items: list[Any]) -> Any:
 
 def make_mock_client(devbox: MagicMock) -> MagicMock:
     client = MagicMock()
+    client.close = AsyncMock()
     client.devboxes = MagicMock()
     client.devboxes.create_and_await_running = AsyncMock(return_value=devbox)
     client.devboxes.shutdown = AsyncMock()
@@ -105,6 +106,7 @@ async def test_full_lifecycle(
         assert create_kwargs["metadata"]["created_by"] == "inspect-ai"
         assert "inspect_run_id" in create_kwargs["metadata"]
         assert create_kwargs["metadata"]["task"] == "test_task"
+        assert create_kwargs["name"].startswith("inspect-test_task-")
 
         await RunloopSandboxEnvironment.sample_cleanup("test_task", None, envs, False)
         mock_client.devboxes.shutdown.assert_any_await("dbx-test-123")
@@ -117,6 +119,8 @@ async def test_full_lifecycle(
         # Both passes: pass-1 has nothing tracked, pass-2 list returns no items.
         mock_client.devboxes.shutdown.assert_not_awaited()
         assert _running_sandboxes.get() == []
+        # Client is closed during task_cleanup.
+        mock_client.close.assert_awaited()
 
 
 @pytest.mark.asyncio

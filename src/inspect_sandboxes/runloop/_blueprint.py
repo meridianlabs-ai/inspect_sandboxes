@@ -16,10 +16,12 @@ the name and inputs are unchanged. To avoid accumulating duplicates we:
 2. Issue ``blueprints.create`` with ``max_retries=0`` so SDK auto-retries
    on transient errors can't spawn duplicate blueprints.
 
-For Dockerfiles that ``COPY``/``ADD`` local files, we tar the
-Dockerfile's parent directory, upload it as a Runloop Object, and pass
-the object id as ``build_context`` so the build can resolve the local
-references.
+We always tar the Dockerfile's parent directory, upload it as a Runloop
+Object, and pass the object id as ``build_context`` — mirroring
+``docker build``, which ships the whole context so any ``COPY``/``ADD``
+in the Dockerfile can resolve its local references. The tarball is
+streamed through a temp file rather than buffered whole in memory, and
+context files are hashed in chunks for the same reason.
 
 The cache key is global (no project prefix) so identical inputs share builds
 across users and runs.
@@ -28,12 +30,14 @@ across users and runs.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
+import os
 import tarfile
-from collections.abc import Iterator
+import tempfile
+from collections.abc import AsyncIterator, Iterator
 from logging import getLogger
 from pathlib import Path
+from typing import IO
 from uuid import uuid4
 
 import httpx
@@ -49,6 +53,10 @@ logger = getLogger(__name__)
 BLUEPRINT_NAME_PREFIX = "inspect-"
 BLUEPRINT_BUILD_TIMEOUT = 1800
 _HASH_LEN = 12
+
+# Read/stream context files in 1 MiB blocks so a large file is never held in
+# memory whole — for hashing or for building the upload tarball.
+_CONTEXT_CHUNK_SIZE = 1024 * 1024
 
 # Runloop SDK's default polling is 120 attempts × 1.0s ≈ 2 min, which isn't
 # enough for queue+build of a non-trivial Dockerfile (pip install, etc.).
@@ -91,33 +99,45 @@ def _hash_build_context(context_dir: Path) -> str:
     """Hash every file in the build context.
 
     Any local change invalidates the cached blueprint name (mirrors
-    Docker's COPY/ADD invalidation).
+    Docker's COPY/ADD invalidation). Files are read in chunks so a large
+    context file is never held in memory whole.
     """
     h = hashlib.sha256()
     for path in _iter_context_files(context_dir):
         rel = path.relative_to(context_dir).as_posix()
         h.update(rel.encode("utf-8"))
         h.update(b"\0")
-        h.update(path.read_bytes())
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(_CONTEXT_CHUNK_SIZE)
+                if not chunk:
+                    break
+                h.update(chunk)
         h.update(b"\0")
     return h.hexdigest()
 
 
-def _build_context_tarball(context_dir: Path) -> bytes:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+def _write_context_tarball(context_dir: Path, fileobj: IO[bytes]) -> None:
+    """Stream a gzipped tar of the build context into ``fileobj``.
+
+    ``tarfile`` writes incrementally, so the whole archive is never buffered
+    in memory (unlike building it in a ``BytesIO``).
+    """
+    with tarfile.open(fileobj=fileobj, mode="w:gz") as tar:
         for path in _iter_context_files(context_dir):
             arcname = path.relative_to(context_dir).as_posix()
             tar.add(str(path), arcname=arcname)
-    return buf.getvalue()
 
 
 async def _upload_build_context(client: AsyncRunloop, context_dir: Path) -> str:
     """Tar the build context and upload it as a Runloop Object.
 
+    The tarball is streamed through a temp file on disk and PUT to the presigned
+    URL in chunks (with an explicit Content-Length, since S3 rejects chunked
+    transfer encoding), so multi-hundred-MiB contexts don't load into memory.
+
     Returns the Object id, suitable for ``build_context.object_id``.
     """
-    tar_bytes = _build_context_tarball(context_dir)
     obj = await client.objects.create(
         content_type="tgz",
         name=f"inspect-context-{uuid4().hex[:12]}",
@@ -126,9 +146,27 @@ async def _upload_build_context(client: AsyncRunloop, context_dir: Path) -> str:
         raise RuntimeError(
             "Runloop did not return an upload URL for the build-context Object."
         )
-    async with httpx.AsyncClient(timeout=FILE_REQUEST_TIMEOUT) as http:
-        response = await http.put(obj.upload_url, content=tar_bytes)
-        response.raise_for_status()
+    with tempfile.NamedTemporaryFile(suffix=".tgz") as tmp:
+        _write_context_tarball(context_dir, tmp)
+        tmp.flush()
+        size = os.fstat(tmp.fileno()).st_size
+
+        # httpx.AsyncClient needs an async iterable for a streamed request body.
+        async def _chunks() -> AsyncIterator[bytes]:
+            tmp.seek(0)
+            while True:
+                block = tmp.read(_CONTEXT_CHUNK_SIZE)
+                if not block:
+                    break
+                yield block
+
+        async with httpx.AsyncClient(timeout=FILE_REQUEST_TIMEOUT) as http:
+            response = await http.put(
+                obj.upload_url,
+                content=_chunks(),
+                headers={"Content-Length": str(size)},
+            )
+            response.raise_for_status()
     await client.objects.complete(obj.id)
     return obj.id
 

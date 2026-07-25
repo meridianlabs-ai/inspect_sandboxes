@@ -15,12 +15,15 @@ which mirrors the ``SandboxEnvironment.exec`` contract of "first retry
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 from runloop_api_client import (
     APIError,
     APITimeoutError,
+    AsyncRunloop,
     AuthenticationError,
     BadRequestError,
     ConflictError,
@@ -28,6 +31,7 @@ from runloop_api_client import (
     PermissionDeniedError,
     UnprocessableEntityError,
 )
+from runloop_api_client.types import DevboxAsyncExecutionDetailView
 from tenacity import (
     retry,
     retry_if_exception,
@@ -78,6 +82,82 @@ exec_retry = retry(
 )
 
 
+# Polling backoff for async executions: start fast, back off to a modest cap so
+# long-running commands don't hammer the API. Transient retrieve errors are
+# tolerated in place (bounded) so we keep polling the *same* execution instead
+# of re-submitting the command.
+_POLL_INTERVAL_INITIAL = 0.5
+_POLL_INTERVAL_MAX = 5.0
+_POLL_MAX_TRANSIENT_ERRORS = 5
+
+
+async def _sleep_bounded(interval: float, deadline: float | None) -> None:
+    """Sleep ``interval`` but never past ``deadline`` (so timeouts fire tight)."""
+    if deadline is not None:
+        interval = min(interval, max(0.0, deadline - time.monotonic()))
+    await asyncio.sleep(interval)
+
+
+async def _kill_execution(
+    client: AsyncRunloop, devbox_id: str, execution_id: str
+) -> None:
+    """Best-effort kill of a running execution and its process group."""
+    try:
+        await client.devboxes.executions.kill(
+            execution_id, devbox_id=devbox_id, kill_process_group=True
+        )
+    except Exception:
+        pass
+
+
+async def poll_execution(
+    client: AsyncRunloop,
+    devbox_id: str,
+    execution_id: str,
+    timeout: int | None,
+    *,
+    last_n: str,
+) -> DevboxAsyncExecutionDetailView:
+    """Poll a devbox execution until it completes, then return it.
+
+    Polls ``devboxes.executions.retrieve`` for ``execution_id``, backing off
+    from 0.5 s to 5 s between polls. A transient (retryable) API error is
+    swallowed and retried in place — we keep polling the same execution rather
+    than re-running the command — up to ``_POLL_MAX_TRANSIENT_ERRORS``
+    consecutive failures, after which it propagates. Non-retryable errors
+    propagate immediately.
+
+    Raises ``TimeoutError`` if ``timeout`` seconds elapse first, after a
+    best-effort kill of the execution.
+    """
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    interval = _POLL_INTERVAL_INITIAL
+    transient = 0
+    while True:
+        try:
+            execution = await client.devboxes.executions.retrieve(
+                execution_id, devbox_id=devbox_id, last_n=last_n
+            )
+            transient = 0
+        except Exception as exc:  # noqa: BLE001 — reraised unless retryable
+            if not _is_retryable(exc):
+                raise
+            transient += 1
+            if transient > _POLL_MAX_TRANSIENT_ERRORS:
+                raise
+            await _sleep_bounded(interval, deadline)
+            interval = min(interval * 2, _POLL_INTERVAL_MAX)
+            continue
+
+        if execution.status == "completed":
+            return execution
+        if deadline is not None and time.monotonic() >= deadline:
+            await _kill_execution(client, devbox_id, execution_id)
+            raise TimeoutError(f"Command timed out after {timeout} seconds")
+        await _sleep_bounded(interval, deadline)
+        interval = min(interval * 2, _POLL_INTERVAL_MAX)
+
+
 async def run_with_timeout_retry(
     run_fn: Callable[[int | None], Awaitable[T]],
     timeout: int | None,
@@ -94,13 +174,17 @@ async def run_with_timeout_retry(
     else:
         attempt_timeouts = [timeout]
 
-    # Runloop's SDK raises APITimeoutError directly on HTTP-layer timeouts;
-    # no httpx unwrapping needed (unlike E2B).
-    last_timeout_exc: APITimeoutError | None = None
+    # Two flavors of timeout can surface from run_fn:
+    #   - APITimeoutError: the SDK's HTTP-layer timeout (raised directly; no
+    #     httpx unwrapping needed, unlike E2B).
+    #   - TimeoutError: our own deadline in poll_execution, when we poll an
+    #     async execution ourselves to enforce a short user timeout exactly.
+    # Both must engage the decreasing-cap retry, so we catch both.
+    last_timeout_exc: BaseException | None = None
     for t in attempt_timeouts:
         try:
             return await run_fn(t)
-        except APITimeoutError as e:
+        except (APITimeoutError, TimeoutError) as e:
             last_timeout_exc = e
 
     assert last_timeout_exc is not None

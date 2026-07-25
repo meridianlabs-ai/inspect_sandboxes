@@ -21,6 +21,7 @@ from inspect_sandboxes.runloop._dind_project import (
     vm_exec,
 )
 from inspect_sandboxes.runloop._single_env import LARGE_FILE_THRESHOLD
+from runloop_api_client import APIConnectionError
 
 
 def _make_execution(
@@ -92,6 +93,27 @@ async def test_vm_exec_returns_exit_code_and_output() -> None:
     assert exit_code == 0
     assert stdout == "hello"
     assert stderr == "warn"
+
+
+@pytest.mark.asyncio
+async def test_vm_exec_polls_without_resubmitting() -> None:
+    """A transient error mid-poll is tolerated: the command is submitted once."""
+    client = make_mock_client()
+    client.devboxes.execute_async = AsyncMock(
+        return_value=MagicMock(execution_id="exec-1")
+    )
+    client.devboxes.executions.retrieve = AsyncMock(
+        side_effect=[
+            APIConnectionError(request=MagicMock()),  # transient blip mid-poll
+            _make_execution(stdout="ok", exit_status=0),  # then completes
+        ]
+    )
+
+    exit_code, _, _ = await vm_exec(client, "dbx-1", "echo hi", timeout=60)
+
+    assert exit_code == 0
+    assert client.devboxes.execute_async.await_count == 1
+    assert client.devboxes.executions.retrieve.await_count == 2
 
 
 @pytest.mark.asyncio

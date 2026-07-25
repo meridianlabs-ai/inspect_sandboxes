@@ -54,7 +54,7 @@ task = Task(
 )
 ```
 
-The blueprint is named `inspect-{hash}` where `{hash}` is the first 12 hex characters of a SHA-256 over the Dockerfile contents and launch parameters. Identical Dockerfiles + launch parameters reuse the same cached blueprint.
+The blueprint is named `inspect-{hash}` where `{hash}` is the first 12 hex characters of a SHA-256 over the Dockerfile contents, the entire build context (every file in the Dockerfile's directory, so a changed `COPY`/`ADD` source invalidates the cache), and launch parameters. Identical Dockerfile + build context + launch parameters reuse the same cached blueprint.
 
 ### Docker Compose
 
@@ -114,7 +114,7 @@ helper_env = sandbox("helper")
 
 **Default service selection** (priority): `x-default: true` > service named `"default"` or `"main"` > first service in the file.
 
-**DinD blueprint**: The DinD devbox uses Ubuntu 24.04 + Docker installed via the official `get.docker.com` script. The blueprint is cached as `inspect-dind-{hash}` (keyed by the DinD Dockerfile content + launch parameters), so subsequent samples skip the install.
+**DinD blueprint**: The DinD devbox uses Ubuntu 24.04 with a pinned `docker-ce` installed from Docker's official apt repository. The blueprint is cached as `inspect-dind-{hash}` (keyed by the DinD Dockerfile content + launch parameters), so subsequent samples skip the install.
 
 **Docker daemon startup**: Runloop devboxes have no init system, so the daemon is started lazily with `sudo nohup dockerd > /tmp/dockerd.log 2>&1 &` and polled until ready (≤60 s).
 
@@ -133,7 +133,7 @@ The top-level `x-runloop` key on a compose file passes settings to the Runloop d
 | `launch_parameters` | dict | `{}` | Merged into the devbox `launch_parameters` (CPU/RAM/disk overrides). Takes precedence over compose-derived values. |
 | `environment_variables` | dict | `{}` | Extra env vars. Single-service: merged with service `environment` (x-runloop wins). DinD: set on the devbox VM. |
 | `metadata` | dict | `{}` | Custom metadata, merged with `inspect_sandboxes`' own metadata (which takes precedence). |
-| `timeout` | float (seconds) | None | Per-request HTTP timeout forwarded to Runloop's `create_and_await_running`. |
+| `timeout` | float (seconds) | None | Per-request HTTP timeout forwarded to Runloop's `create_and_await_running` (the create call, not the devbox lifetime — see below). |
 :::
 
 Example:
@@ -147,6 +147,14 @@ x-runloop:
     EXTRA_VAR: "value"
   metadata:
     project: my-eval
+```
+
+**Devbox lifetime**: Set `keep_alive_time_seconds` under `launch_parameters` — Runloop shuts the devbox down after that many seconds (default 1 hour, max 48 hours):
+
+```yaml
+x-runloop:
+  launch_parameters:
+    keep_alive_time_seconds: 7200  # 2 hours
 ```
 
 ## Finding sandboxes
@@ -178,9 +186,11 @@ inspect sandbox cleanup runloop <devbox-id>     # shut down one
 - **Concurrent devboxes**: Free-tier accounts are capped at 5 concurrent devboxes; the provider's `default_concurrency` returns 5 to match. Pro-tier users can override via `INSPECT_MAX_SANDBOXES`.
 - **Blueprint caching**: Runloop builds a new blueprint per `create` call regardless of name collisions, so the provider probes `blueprints.list(name=name, status="build_complete")` first and reuses any existing cached blueprint.
 - **Blueprint cap (trial accounts)**: Trial accounts are capped at 5 *total* blueprints (separate from the concurrent-devbox cap). The per-name cache reuses blueprints, but once 5 distinct images/Dockerfiles have been built, `blueprints.create` fails with `429 Trial account limit reached`. Free up slots by deleting unused blueprints in the [Runloop dashboard](https://platform.runloop.ai/blueprints) (or via `client.blueprints.delete`).
-- **Cold blueprint build**: Building a blueprint (`get.docker.com` install or a custom Dockerfile) takes ~60–180 s the first time. The cache short-circuit makes subsequent runs sub-second.
+- **Cold blueprint build**: Building a blueprint (the DinD `docker-ce` apt install or a custom Dockerfile) takes ~60–180 s the first time. The cache short-circuit makes subsequent runs sub-second.
 
 ## Limitations {#runloop-limitations}
 
 - **`working_dir` / `user` compose fields**: Not yet supported in v1. Runloop devboxes have a fixed default user (`user` uid 4444), and per-command working directory is handled via `cd` prefixes rather than an SDK parameter.
+- **Compose `ports`**: Silently dropped. Port mappings in a compose file are ignored, and `connection()` (the host/port for reaching a service from outside the sandbox) is not yet implemented.
+- **Large files**: Files at or above 4 MiB are transferred through the Runloop Objects API (presigned S3 PUT/GET) instead of base64-over-shell, because the exec endpoint caps request and response size. This adds a few extra round trips for large reads/writes.
 - **Architecture**: Runloop devboxes default to x86_64. arm64 is configurable via `launch_parameters.architecture` but requires arm64-compatible images.

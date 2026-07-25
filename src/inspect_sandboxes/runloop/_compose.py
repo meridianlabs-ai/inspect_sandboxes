@@ -116,10 +116,12 @@ def extract_x_runloop(extensions: dict[str, Any] | None) -> dict[str, Any]:
 
     - ``blueprint_id`` / ``blueprint_name`` / ``snapshot_id`` (str): Pre-built
       blueprint or snapshot references; skip the build step.
-    - ``timeout`` (number, seconds): Devbox lifetime.
+    - ``timeout`` (number, seconds): Per-request HTTP timeout forwarded to
+      ``create_and_await_running``.
     - ``launch_parameters`` (dict): Merged into the resolved ``LaunchParameters``.
       Takes precedence over ``deploy.resources`` and service-level
-      ``cpus`` / ``mem_limit``.
+      ``cpus`` / ``mem_limit``. Set ``keep_alive_time_seconds`` here to control
+      the devbox lifetime (Runloop's own default is 1 hour).
     - ``environment_variables`` (dict): Extra env vars; merged with
       ``service.environment`` (these win).
     - ``metadata`` (dict): Custom metadata; merged with the run's tracking

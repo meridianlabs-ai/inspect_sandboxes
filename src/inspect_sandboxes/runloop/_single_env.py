@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import errno
 import shlex
-import time
 import uuid
 from logging import getLogger
 from typing import Any, Literal, overload
@@ -24,7 +22,12 @@ from runloop_api_client import APITimeoutError, AsyncRunloop, NotFoundError
 from typing_extensions import override
 from uuid_utils import uuid7
 
-from ._retry import exec_retry, run_with_timeout_retry, standard_retry
+from ._retry import (
+    exec_retry,
+    poll_execution,
+    run_with_timeout_retry,
+    standard_retry,
+)
 
 logger = getLogger(__name__)
 
@@ -36,67 +39,6 @@ EXEC_LAST_N = "9999"
 # Objects API (presigned PUT/GET via S3). Base64-over-shell is one round trip
 # for small payloads but exceeds Runloop's request-body cap on multi-MiB files.
 LARGE_FILE_THRESHOLD = 4 * 1024 * 1024
-
-
-def _devbox_download_command(url: str, file: str) -> str:
-    """Shell command that downloads ``url`` into ``file`` on the devbox.
-
-    Tries ``curl``, then ``wget``, then ``python3`` — covers Runloop's default
-    image plus most user-supplied eval images (scientific stacks, CTF images,
-    Alpine, etc.) where curl isn't guaranteed.
-
-    The url and file are passed as positional arguments (``$1`` and ``$2``)
-    rather than interpolated into the script body, so a malicious url can't
-    escape the shell context.
-    """
-    python_fallback = (
-        "import sys, shutil, urllib.request\n"
-        "with urllib.request.urlopen(sys.argv[1]) as r, "
-        "open(sys.argv[2], 'wb') as f:\n"
-        "    shutil.copyfileobj(r, f)\n"
-    )
-    script = f"""\
-if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o "$2" "$1"
-elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$2" "$1"
-elif command -v python3 >/dev/null 2>&1; then
-    python3 -c {shlex.quote(python_fallback)} "$1" "$2"
-else
-    echo "no HTTP client (curl/wget/python3) on devbox" >&2
-    exit 1
-fi
-"""
-    return f"sh -c {shlex.quote(script)} _ {shlex.quote(url)} {shlex.quote(file)}"
-
-
-def _devbox_upload_command(file: str, url: str) -> str:
-    """Shell command that PUTs ``file`` to ``url`` from the devbox.
-
-    Tries ``curl`` then ``python3``. wget is omitted because it can't do PUT
-    in any portable way.
-
-    The url and file are passed as positional arguments (``$1`` and ``$2``)
-    rather than interpolated into the script body, so a malicious url can't
-    escape the shell context.
-    """
-    python_fallback = (
-        "import sys, urllib.request\n"
-        "data = open(sys.argv[2], 'rb').read()\n"
-        "req = urllib.request.Request(sys.argv[1], method='PUT', data=data)\n"
-        "urllib.request.urlopen(req).read()\n"
-    )
-    script = f"""\
-if command -v curl >/dev/null 2>&1; then
-    curl -fsS -X PUT --upload-file "$2" "$1"
-elif command -v python3 >/dev/null 2>&1; then
-    python3 -c {shlex.quote(python_fallback)} "$1" "$2"
-else
-    echo "no HTTP client (curl/python3) on devbox" >&2
-    exit 1
-fi
-"""
-    return f"sh -c {shlex.quote(script)} _ {shlex.quote(url)} {shlex.quote(file)}"
 
 
 class RunloopSingleServiceEnvironment(SandboxEnvironment):
@@ -180,30 +122,46 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
             command = f"sudo -u {user_arg} bash -c {shlex.quote(command)}"
 
         @exec_retry
+        async def _execute_and_await(command_id: str) -> Any:
+            # Combined submit+await for the no-timeout path. Retried on
+            # transient errors; the stable command_id (generated once, outside
+            # the retry) lets us kill the in-flight command if an httpx-level
+            # timeout fires.
+            return await self.client.devboxes.execute_and_await_completion(
+                self.devbox_id,
+                command=command,
+                command_id=command_id,
+                last_n=EXEC_LAST_N,
+            )
+
+        @exec_retry
+        async def _submit_async() -> str:
+            # Only the submission is retried. Polling happens separately (via
+            # poll_execution) so a transient mid-poll error never re-runs the
+            # command.
+            started = await self.client.devboxes.execute_async(
+                self.devbox_id, command=command
+            )
+            return started.execution_id
+
         async def _run(t: int | None) -> ExecResult[str]:
             execution_id: str | None = None
             try:
                 if t is None:
-                    # Caller-supplied UUIDv7 command_id lets us kill the in-flight
-                    # command if our httpx-level timeout fires before it finishes.
                     execution_id = str(uuid7())
-                    response: Any = (
-                        await self.client.devboxes.execute_and_await_completion(
-                            self.devbox_id,
-                            command=command,
-                            command_id=execution_id,
-                            last_n=EXEC_LAST_N,
-                        )
-                    )
+                    response: Any = await _execute_and_await(execution_id)
                 else:
                     # The SDK's long-poll await has a server-side minimum wait
-                    # that doesn't respect short user timeouts. Kick off async
-                    # and poll retrieve ourselves to enforce *t* exactly.
-                    started = await self.client.devboxes.execute_async(
-                        self.devbox_id, command=command
+                    # that doesn't respect short user timeouts. Submit async and
+                    # poll ourselves to enforce *t* exactly.
+                    execution_id = await _submit_async()
+                    response = await poll_execution(
+                        self.client,
+                        self.devbox_id,
+                        execution_id,
+                        t,
+                        last_n=EXEC_LAST_N,
                     )
-                    execution_id = started.execution_id
-                    response = await self._await_execution(execution_id, t)
             except APITimeoutError:
                 if execution_id is not None:
                     await self._kill_execution(execution_id)
@@ -287,24 +245,6 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
                     f"Failed to decode {file}: {e.reason}",
                 ) from e
         return data
-
-    async def _await_execution(self, execution_id: str, timeout: int | None) -> Any:
-        """Poll the execution status ourselves, raising TimeoutError on overrun.
-
-        We don't use the SDK's ``await_completed`` because its long-poll has a
-        server-side minimum wait that can hide short user timeouts.
-        """
-        deadline = time.monotonic() + timeout if timeout is not None else None
-        while True:
-            execution = await self.client.devboxes.executions.retrieve(
-                execution_id, devbox_id=self.devbox_id, last_n=EXEC_LAST_N
-            )
-            if execution.status == "completed":
-                return execution
-            if deadline is not None and time.monotonic() >= deadline:
-                await self._kill_execution(execution_id)
-                raise TimeoutError(f"Command timed out after {timeout} seconds")
-            await asyncio.sleep(0.5)
 
     async def _kill_execution(self, execution_id: str) -> None:
         """Best-effort kill of a running execution (and its process group)."""
@@ -450,11 +390,10 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
         # Runloop's write_file_contents SDK method only accepts UTF-8 strings;
         # round-trip via base64-in-shell to handle arbitrary bytes.
         encoded = base64.b64encode(data).decode("ascii")
-        # Ensure parent directory exists before writing.
-        parent = shlex.quote(file).rsplit("/", 1)[0] if "/" in file else ""
-        mkdir_prefix = (
-            f"mkdir -p {parent} && " if parent and parent not in ("", "'") else ""
-        )
+        # Ensure the parent dir exists. Quote the parent as a whole so a parent
+        # containing spaces isn't split into multiple tokens.
+        parent = file.rsplit("/", 1)[0] if "/" in file else ""
+        mkdir_prefix = f"mkdir -p {shlex.quote(parent)} && " if parent else ""
         result = await self.client.devboxes.execute_and_await_completion(
             self.devbox_id,
             command=f"{mkdir_prefix}echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(file)}",
@@ -490,10 +429,9 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
                 put.raise_for_status()
             await self.client.objects.complete(obj.id)
             download = await self.client.objects.download(obj.id)
-            parent = shlex.quote(file).rsplit("/", 1)[0] if "/" in file else ""
-            mkdir_prefix = (
-                f"mkdir -p {parent} && " if parent and parent not in ("", "'") else ""
-            )
+            # Quote the parent as a whole (see _write_file_bytes_via_shell).
+            parent = file.rsplit("/", 1)[0] if "/" in file else ""
+            mkdir_prefix = f"mkdir -p {shlex.quote(parent)} && " if parent else ""
             cmd = (
                 f"{mkdir_prefix}{_devbox_download_command(download.download_url, file)}"
             )
@@ -512,3 +450,64 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
                 await self.client.objects.delete(obj.id)
             except Exception:
                 pass
+
+
+def _devbox_download_command(url: str, file: str) -> str:
+    """Shell command that downloads ``url`` into ``file`` on the devbox.
+
+    Tries ``curl``, then ``wget``, then ``python3`` — covers Runloop's default
+    image plus most user-supplied eval images (scientific stacks, CTF images,
+    Alpine, etc.) where curl isn't guaranteed.
+
+    The url and file are passed as positional arguments (``$1`` and ``$2``)
+    rather than interpolated into the script body, so a malicious url can't
+    escape the shell context.
+    """
+    python_fallback = (
+        "import sys, shutil, urllib.request\n"
+        "with urllib.request.urlopen(sys.argv[1]) as r, "
+        "open(sys.argv[2], 'wb') as f:\n"
+        "    shutil.copyfileobj(r, f)\n"
+    )
+    script = f"""\
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "$2" "$1"
+elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+elif command -v python3 >/dev/null 2>&1; then
+    python3 -c {shlex.quote(python_fallback)} "$1" "$2"
+else
+    echo "no HTTP client (curl/wget/python3) on devbox" >&2
+    exit 1
+fi
+"""
+    return f"sh -c {shlex.quote(script)} _ {shlex.quote(url)} {shlex.quote(file)}"
+
+
+def _devbox_upload_command(file: str, url: str) -> str:
+    """Shell command that PUTs ``file`` to ``url`` from the devbox.
+
+    Tries ``curl`` then ``python3``. wget is omitted because it can't do PUT
+    in any portable way.
+
+    The url and file are passed as positional arguments (``$1`` and ``$2``)
+    rather than interpolated into the script body, so a malicious url can't
+    escape the shell context.
+    """
+    python_fallback = (
+        "import sys, urllib.request\n"
+        "data = open(sys.argv[2], 'rb').read()\n"
+        "req = urllib.request.Request(sys.argv[1], method='PUT', data=data)\n"
+        "urllib.request.urlopen(req).read()\n"
+    )
+    script = f"""\
+if command -v curl >/dev/null 2>&1; then
+    curl -fsS -X PUT --upload-file "$2" "$1"
+elif command -v python3 >/dev/null 2>&1; then
+    python3 -c {shlex.quote(python_fallback)} "$1" "$2"
+else
+    echo "no HTTP client (curl/python3) on devbox" >&2
+    exit 1
+fi
+"""
+    return f"sh -c {shlex.quote(script)} _ {shlex.quote(url)} {shlex.quote(file)}"

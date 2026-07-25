@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from inspect_sandboxes.runloop._blueprint import (
     BLUEPRINT_NAME_PREFIX,
@@ -190,6 +191,44 @@ async def test_dockerfile_build_uploads_context(tmp_path: Any) -> None:
     # Context Object is deleted after the build so we don't blow Runloop's
     # free-tier Object cap.
     client.objects.delete.assert_awaited_once_with("obj_test_123")
+
+
+@pytest.mark.asyncio
+async def test_dockerfile_build_streams_context_over_real_async_client(
+    tmp_path: Any,
+) -> None:
+    """Streams the build-context upload through a real AsyncClient."""
+    df = tmp_path / "Dockerfile"
+    df.write_text("FROM python:3.12\nCOPY data.txt .\n")
+    (tmp_path / "data.txt").write_text("hello world\n")
+    client = _make_client(list_items=[])
+
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = await request.aread()
+        captured["len"] = len(body)
+        captured["content_length"] = request.headers.get("content-length")
+        captured["transfer_encoding"] = request.headers.get("transfer-encoding")
+        return httpx.Response(200)
+
+    # Reference the real class, not the patched name, or the factory recurses.
+    real_async_client = httpx.AsyncClient
+
+    def make_async_client(*_args: Any, **_kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(transport=httpx.MockTransport(handler))
+
+    with patch(
+        "inspect_sandboxes.runloop._blueprint.httpx.AsyncClient",
+        side_effect=make_async_client,
+    ):
+        await build_blueprint_for_dockerfile(client, str(df))
+
+    assert captured["len"] > 0
+    # S3 presigned PUTs need a fixed Content-Length, not chunked.
+    assert captured["content_length"] is not None
+    assert captured["transfer_encoding"] is None
+    client.objects.complete.assert_awaited_once_with("obj_test_123")
 
 
 def test_dockerfile_name_changes_when_context_file_changes(tmp_path: Any) -> None:

@@ -66,6 +66,7 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
         config: ComposeConfig,
         compose_file: str | None,
         *,
+        name: str | None = None,
         metadata: dict[str, str],
     ) -> dict[str, SandboxEnvironment]:
         """Create DinD devbox and return per-service environments.
@@ -74,6 +75,7 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
             client: Runloop SDK client.
             config: Parsed compose configuration with >1 service.
             compose_file: Local path to the compose file.
+            name: Human-readable devbox name to assign.
             metadata: Metadata to apply to the devbox.
 
         Returns:
@@ -121,6 +123,7 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
                 client,
                 config,
                 compose_file,
+                name=name,
                 metadata=run_metadata,
                 launch_parameters=launch_parameters,
                 environment_variables=environment_variables,

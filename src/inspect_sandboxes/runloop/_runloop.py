@@ -114,6 +114,29 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
         client = AsyncRunloop()
         _runloop_client.set(client)
 
+        # Warm the blueprint cache once, before samples fan out. Otherwise every
+        # sample's sample_init races to build the same blueprint concurrently,
+        # each issuing its own blueprints.create — spawning duplicate blueprints
+        # that can blow the account's blueprint cap. sample_init re-resolves from
+        # each sample's own config (which may differ from the task's) and hits
+        # this cache. DinD blueprints stay lazy (built in sample_init_dind),
+        # mirroring E2B.
+        if config is None:
+            return
+        if is_dockerfile(config):
+            await build_blueprint_for_dockerfile(client, str(config))
+            return
+        if is_compose_yaml(config) or isinstance(config, ComposeConfig):
+            if isinstance(config, ComposeConfig):
+                compose_config, compose_path = config, None
+            else:
+                compose_config = parse_compose_yaml(config, multiple_services=True)
+                compose_path = config
+            if len(compose_config.services) > 1:
+                return
+            params = resolve_single_service_params(compose_config, compose_path)
+            await cls._build_blueprint(client, params)
+
     @override
     @classmethod
     async def sample_init(
@@ -129,15 +152,17 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
             )
 
         sandbox_name = make_sandbox_name(task_name, metadata)
-        run_metadata = {**_run_metadata(task_name), "name": sandbox_name}
+        run_metadata = _run_metadata(task_name)
 
         if config is None:
             devbox = await client.devboxes.create_and_await_running(
-                metadata=run_metadata
+                name=sandbox_name,
+                metadata=run_metadata,
             )
         elif is_dockerfile(config):
             blueprint_name = await build_blueprint_for_dockerfile(client, str(config))
             devbox = await client.devboxes.create_and_await_running(
+                name=sandbox_name,
                 blueprint_name=blueprint_name,
                 metadata=run_metadata,
             )
@@ -155,6 +180,7 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
                     client,
                     compose_config,
                     compose_path,
+                    name=sandbox_name,
                     metadata=run_metadata,
                 )
                 any_env = next(iter(envs.values())).as_type(
@@ -168,7 +194,10 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
             extra_metadata = dict(params.metadata)
             run_metadata = {**extra_metadata, **run_metadata}
 
-            create_kwargs: dict[str, object] = {"metadata": run_metadata}
+            create_kwargs: dict[str, object] = {
+                "name": sandbox_name,
+                "metadata": run_metadata,
+            }
             if blueprint_name is not None:
                 create_kwargs["blueprint_name"] = blueprint_name
             if params.blueprint_id is not None:
@@ -342,64 +371,69 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
             )
 
         _running_sandboxes.get().clear()
+        await client.close()
         _runloop_client.set(None)
 
     @override
     @classmethod
     async def cli_cleanup(cls, id: str | None) -> None:
         client = AsyncRunloop()
-
-        if id is not None:
-            try:
-                await client.devboxes.shutdown(id)
-                print(f"Successfully shut down devbox {id}")
-            except Exception as e:
-                print(f"[red]Error shutting down devbox {id}: {e}[/red]")
-                sys.exit(1)
-            return
-
-        # Bulk cleanup.
-        devboxes = await list_devboxes(client, INSPECT_SANDBOX_METADATA)
-
-        if not devboxes:
-            print("No Runloop devboxes found to clean up.")
-            return
-
-        table = Table(
-            box=box.SQUARE,
-            show_lines=False,
-            title_style="bold",
-            title_justify="left",
-        )
-        table.add_column("Devbox ID")
-        for devbox in devboxes:
-            table.add_row(devbox.id)
-        print(table)
-
-        is_interactive = sys.stdin.isatty()
-        is_ci = "CI" in os.environ
-        is_pytest = "PYTEST_CURRENT_TEST" in os.environ
-
-        if is_interactive and not is_ci and not is_pytest:
-            if not Confirm.ask(
-                f"Are you sure you want to shut down ALL {len(devboxes)} devbox(es) above?"
-            ):
-                print("Cancelled.")
+        try:
+            if id is not None:
+                try:
+                    await client.devboxes.shutdown(id)
+                    print(f"Successfully shut down devbox {id}")
+                except Exception as e:
+                    print(f"[red]Error shutting down devbox {id}: {e}[/red]")
+                    sys.exit(1)
                 return
 
-        success_count = 0
-        failure_count = 0
-        for devbox in devboxes:
-            try:
-                await client.devboxes.shutdown(devbox.id)
-                success_count += 1
-            except Exception as e:
-                print(f"[yellow]Error shutting down devbox {devbox.id}: {e}[/yellow]")
-                failure_count += 1
+            # Bulk cleanup.
+            devboxes = await list_devboxes(client, INSPECT_SANDBOX_METADATA)
 
-        print(f"\n[green]Successfully shut down: {success_count}[/green]")
-        if failure_count > 0:
-            print(f"[red]Failed to shut down: {failure_count}[/red]")
-            sys.exit(1)
-        else:
-            print("Complete.")
+            if not devboxes:
+                print("No Runloop devboxes found to clean up.")
+                return
+
+            table = Table(
+                box=box.SQUARE,
+                show_lines=False,
+                title_style="bold",
+                title_justify="left",
+            )
+            table.add_column("Devbox ID")
+            for devbox in devboxes:
+                table.add_row(devbox.id)
+            print(table)
+
+            is_interactive = sys.stdin.isatty()
+            is_ci = "CI" in os.environ
+            is_pytest = "PYTEST_CURRENT_TEST" in os.environ
+
+            if is_interactive and not is_ci and not is_pytest:
+                if not Confirm.ask(
+                    f"Are you sure you want to shut down ALL {len(devboxes)} devbox(es) above?"
+                ):
+                    print("Cancelled.")
+                    return
+
+            success_count = 0
+            failure_count = 0
+            for devbox in devboxes:
+                try:
+                    await client.devboxes.shutdown(devbox.id)
+                    success_count += 1
+                except Exception as e:
+                    print(
+                        f"[yellow]Error shutting down devbox {devbox.id}: {e}[/yellow]"
+                    )
+                    failure_count += 1
+
+            print(f"\n[green]Successfully shut down: {success_count}[/green]")
+            if failure_count > 0:
+                print(f"[red]Failed to shut down: {failure_count}[/red]")
+                sys.exit(1)
+            else:
+                print("Complete.")
+        finally:
+            await client.close()

@@ -23,7 +23,6 @@ import base64
 import json
 import os
 import shlex
-import time as _time
 import uuid
 from dataclasses import dataclass, field
 from logging import getLogger
@@ -31,7 +30,7 @@ from pathlib import Path
 
 import httpx
 from inspect_ai.util import ComposeConfig
-from runloop_api_client import APITimeoutError, AsyncRunloop
+from runloop_api_client import AsyncRunloop
 from runloop_api_client.types.shared_params import LaunchParameters
 
 from inspect_sandboxes._util.dind_compose import (
@@ -47,7 +46,7 @@ from ._blueprint import (
     _hash_inputs,
     _launch_params_for_hash,
 )
-from ._retry import exec_retry, standard_retry
+from ._retry import exec_retry, poll_execution, standard_retry
 from ._single_env import (
     EXEC_LAST_N,
     FILE_REQUEST_TIMEOUT,
@@ -107,6 +106,16 @@ class RunloopDinDProject:
 
 
 @exec_retry
+async def _submit_vm_exec(client: AsyncRunloop, devbox_id: str, wrapped: str) -> str:
+    """Submit a command to the devbox, returning its execution id.
+
+    Only the submission is retried; ``vm_exec`` polls separately so a transient
+    mid-poll error never re-runs (and thus double-executes) the command.
+    """
+    started = await client.devboxes.execute_async(devbox_id, command=wrapped)
+    return started.execution_id
+
+
 async def vm_exec(
     client: AsyncRunloop,
     devbox_id: str,
@@ -119,35 +128,13 @@ async def vm_exec(
     Returns ``(exit_code, stdout, stderr)``.
     """
     wrapped = f"sh -c {shlex.quote(command)}"
-    # Avoid the SDK's long-poll await; do explicit polling so short user
-    # timeouts actually fire.
-    started = await client.devboxes.execute_async(devbox_id, command=wrapped)
-    execution_id = started.execution_id
-
-    async def _kill() -> None:
-        try:
-            await client.devboxes.executions.kill(
-                execution_id, devbox_id=devbox_id, kill_process_group=True
-            )
-        except Exception:
-            pass
-
-    deadline = _time.monotonic() + timeout if timeout is not None else None
-    try:
-        while True:
-            execution = await client.devboxes.executions.retrieve(
-                execution_id, devbox_id=devbox_id, last_n=EXEC_LAST_N
-            )
-            if execution.status == "completed":
-                response = execution
-                break
-            if deadline is not None and _time.monotonic() >= deadline:
-                await _kill()
-                raise TimeoutError(f"Command timed out after {timeout} seconds")
-            await asyncio.sleep(0.5)
-    except APITimeoutError:
-        await _kill()
-        raise
+    # Submit once (retried on transient errors), then poll ourselves — the
+    # SDK's long-poll await has a server-side minimum wait that doesn't respect
+    # short user timeouts.
+    execution_id = await _submit_vm_exec(client, devbox_id, wrapped)
+    response = await poll_execution(
+        client, devbox_id, execution_id, timeout, last_n=EXEC_LAST_N
+    )
     return (
         response.exit_status if response.exit_status is not None else 0,
         response.stdout or "",
@@ -482,6 +469,7 @@ async def create_dind_project(
     config: ComposeConfig,
     compose_file: str,
     *,
+    name: str | None = None,
     metadata: dict[str, str],
     launch_parameters: LaunchParameters | None = None,
     environment_variables: dict[str, str] | None = None,
@@ -493,6 +481,7 @@ async def create_dind_project(
         client: Runloop client.
         config: Parsed compose configuration.
         compose_file: Local path to the compose file.
+        name: Human-readable devbox name to assign.
         metadata: Metadata to apply to the devbox.
         launch_parameters: Runloop ``LaunchParameters`` (CPU/RAM/disk overrides)
             applied to the devbox.
@@ -513,6 +502,8 @@ async def create_dind_project(
         "blueprint_name": blueprint_name,
         "metadata": metadata,
     }
+    if name is not None:
+        create_kwargs["name"] = name
     if launch_parameters is not None:
         create_kwargs["launch_parameters"] = launch_parameters
     if environment_variables:
