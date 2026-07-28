@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any
 
 import pytest
+from inspect_sandboxes._util import naming
 from inspect_sandboxes._util.naming import make_sandbox_name
 
 _HEX_SUFFIX = re.compile(r"-[0-9a-f]{8}$")
+
+
+@pytest.fixture
+def fixed_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        naming.uuid,
+        "uuid4",
+        lambda: uuid.UUID("0123456789abcdef0123456789abcdef"),
+    )
 
 
 def test_both_task_and_sample_id_present() -> None:
@@ -89,6 +100,64 @@ def test_slug_clamped_to_40_chars() -> None:
     core = name[len("inspect-") :]
     task_segment = core.rsplit("-", 1)[0]
     assert len(task_segment) == 40
+
+
+def test_name_respects_modal_limit_when_both_slugs_saturate(
+    fixed_uuid: None,
+) -> None:
+    # Given
+    task_name = "a" * 40
+    metadata = {"__sample_id__": "b" * 40}
+
+    # When
+    name = make_sandbox_name(task_name, metadata)
+
+    # Then
+    assert len(name) <= 64
+
+
+def test_name_keeps_hex_suffix_when_both_slugs_saturate(
+    fixed_uuid: None,
+) -> None:
+    # Given
+    task_name = "a" * 40
+    metadata = {"__sample_id__": "b" * 40}
+
+    # When
+    name = make_sandbox_name(task_name, metadata)
+
+    # Then
+    assert name.endswith("-01234567")
+
+
+def test_name_preserves_long_input_distinctions_with_fixed_uuid(
+    fixed_uuid: None,
+) -> None:
+    # Given
+    shared_prefix = "x" * 24
+    metadata = {"__sample_id__": "y" * 40}
+
+    # When
+    left_name = make_sandbox_name(shared_prefix + "-left-" + "a" * 20, metadata)
+    right_name = make_sandbox_name(
+        shared_prefix + "-right-" + "a" * 19,
+        metadata,
+    )
+
+    # Then
+    assert left_name != right_name
+
+
+def test_short_name_remains_unchanged_with_fixed_uuid(fixed_uuid: None) -> None:
+    # Given
+    task_name = "my_eval"
+    metadata = {"__sample_id__": 42}
+
+    # When
+    name = make_sandbox_name(task_name, metadata)
+
+    # Then
+    assert name == "inspect-my_eval-42-01234567"
 
 
 def test_uniqueness_across_calls() -> None:
