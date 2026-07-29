@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call, patch
 
+import modal
 import pytest
 from inspect_ai.util import (
     ComposeConfig,
@@ -669,3 +670,64 @@ def test_convert_compose_command(
         result = convert_compose_to_modal_params(config, None)
 
     assert result.command == expected_command
+
+
+class TestImageRegistrySecret:
+    """A private registry needs credentials at image-PULL time.
+
+    Without them Modal reports `RemoteError('Image build for im-... failed')`, which reads
+    as a build problem rather than an auth problem, so the cause is easy to misdiagnose.
+    `x-modal.secrets` does NOT cover this: it injects env vars into the running sandbox
+    and has no effect on the pull.
+    """
+
+    @staticmethod
+    def _config(tmp_path: Path, x_modal: str) -> ComposeConfig:
+        compose = tmp_path / "compose.yaml"
+        _ = compose.write_text(
+            "services:\n  default:\n    image: ghcr.io/private/app:tag\n" + x_modal,
+            encoding="utf-8",
+        )
+        return parse_compose_yaml(str(compose), multiple_services=False)
+
+    def test_registry_secret_is_passed_to_from_registry(self, tmp_path: Path) -> None:
+        """The named Modal secret authenticates `Image.from_registry`."""
+        config = self._config(
+            tmp_path, "x-modal:\n  image_registry_secret: ghcr-secret\n"
+        )
+
+        with patch.object(modal.Image, "from_registry") as from_registry:
+            with patch.object(modal.Secret, "from_name") as from_name:
+                from_name.return_value = "SENTINEL_SECRET"
+                convert_compose_to_modal_params(config, None)
+
+        from_name.assert_called_once_with("ghcr-secret")
+        assert from_registry.call_args.kwargs.get("secret") == "SENTINEL_SECRET"
+
+    def test_no_secret_declared_keeps_the_anonymous_pull(self, tmp_path: Path) -> None:
+        """Without the key, the pull stays anonymous (no `secret` kwarg)."""
+        config = self._config(tmp_path, "")
+
+        with patch.object(modal.Image, "from_registry") as from_registry:
+            convert_compose_to_modal_params(config, None)
+
+        assert "secret" not in from_registry.call_args.kwargs
+
+    def test_sandbox_secrets_do_not_authenticate_the_pull(self, tmp_path: Path) -> None:
+        """`secrets` must not be mistaken for registry credentials."""
+        config = self._config(tmp_path, "x-modal:\n  secrets: some-env-secret\n")
+
+        with patch.object(modal.Image, "from_registry") as from_registry:
+            with patch.object(modal.Secret, "from_name"):
+                convert_compose_to_modal_params(config, None)
+
+        assert "secret" not in from_registry.call_args.kwargs
+
+    def test_non_string_secret_name_fails_loudly(self, tmp_path: Path) -> None:
+        """A non-string secret name raises rather than being ignored."""
+        config = self._config(
+            tmp_path, "x-modal:\n  image_registry_secret: [ghcr-secret]\n"
+        )
+
+        with pytest.raises(TypeError):
+            convert_compose_to_modal_params(config, None)

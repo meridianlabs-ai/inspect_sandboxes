@@ -62,7 +62,26 @@ def convert_compose_to_modal_params(
             str(dockerfile_path), context_dir=str(context_dir)
         )
     elif service.image:
-        params["image"] = modal.Image.from_registry(service.image)
+        # A private registry needs credentials at PULL time. Without them Modal fails
+        # with an opaque `RemoteError('Image build for im-... failed')`, which reads like
+        # a build problem rather than an auth problem. `x-modal.image_registry_secret`
+        # names a Modal secret holding the registry credentials; it is distinct from
+        # `x-modal.secrets`, which injects env vars into the running sandbox and has no
+        # effect on the image pull.
+        registry_secret = config.extensions.get("x-modal", {}).get(
+            "image_registry_secret"
+        )
+        if registry_secret is not None:
+            if not isinstance(registry_secret, str):
+                raise TypeError(
+                    "x-modal.image_registry_secret must be a Modal secret name (str), "
+                    f"got {type(registry_secret).__name__}"
+                )
+            params["image"] = modal.Image.from_registry(
+                service.image, secret=modal.Secret.from_name(registry_secret)
+            )
+        else:
+            params["image"] = modal.Image.from_registry(service.image)
 
     if service.command:
         command = (
@@ -179,6 +198,8 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
         - custom_domain (str): Custom domain for web services
         - verbose (bool): Enable verbose logging
         - secrets (str | list[str]): Modal secret name(s) to attach
+        - image_registry_secret (str): Modal secret name holding registry credentials,
+          used for the image PULL (see convert_compose_to_modal_params). Not applied here.
 
     Unsupported Modal parameters:
         - network_file_systems: Requires modal.NetworkFileSystem objects
