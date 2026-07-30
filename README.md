@@ -9,7 +9,7 @@
 | src/inspect\_sandboxes/\_util/\_\_init\_\_.py      |        0 |        0 |        0 |        0 |    100% |           |
 | src/inspect\_sandboxes/\_util/compose.py           |       72 |        2 |       30 |        3 |     95% |23-\>22, 82-\>81, 84-85 |
 | src/inspect\_sandboxes/\_util/dind\_compose.py     |       61 |        8 |       28 |        9 |     81% |68, 71, 76-81, 83-\>85, 105, 108, 111, 113-\>103, 116 |
-| src/inspect\_sandboxes/\_util/naming.py            |       24 |        0 |        8 |        0 |    100% |           |
+| src/inspect\_sandboxes/\_util/naming.py            |       42 |        1 |       14 |        1 |     96% |        25 |
 | src/inspect\_sandboxes/\_version.py                |       11 |       11 |        0 |        0 |      0% |      3-24 |
 | src/inspect\_sandboxes/daytona/\_\_init\_\_.py     |        0 |        0 |        0 |        0 |    100% |           |
 | src/inspect\_sandboxes/daytona/\_compose.py        |      117 |        4 |       68 |        7 |     94% |147-\>139, 285, 290, 294-\>305, 295-\>294, 299, 309 |
@@ -30,7 +30,7 @@
 | src/inspect\_sandboxes/modal/\_\_init\_\_.py       |        0 |        0 |        0 |        0 |    100% |           |
 | src/inspect\_sandboxes/modal/\_compose.py          |      144 |        5 |       90 |        4 |     96% |149-\>134, 287-288, 295-296, 338-\>343, 339-\>338, 344 |
 | src/inspect\_sandboxes/modal/\_modal.py            |      292 |       57 |       72 |        6 |     80% |110, 120, 274-279, 341-354, 385, 395-398, 411, 415-416, 438-441, 448-449, 478-482, 512, 519, 524-527, 553-556, 560-562, 566-581, 585 |
-| **TOTAL**                                          | **2418** |  **350** |  **752** |  **107** | **84%** |           |
+| **TOTAL**                                          | **2436** |  **351** |  **758** |  **108** | **84%** |           |
 
 
 ## Setup coverage badge
