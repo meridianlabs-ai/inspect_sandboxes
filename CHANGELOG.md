@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.4.0...v0.4.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* cap Modal sandbox names at 64 characters ([#54](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/54)) ([d646c2e](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/d646c2e0fd5bd68a62491c68849255358c503d06))
+* don't re-kill already-cleaned-up E2B sandboxes in task_cleanup() ([#39](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/39)) ([#47](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/47)) ([be92daf](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/be92dafbc0500ea3c72089248f94753905521de3))
+* forward disk size to Daytona sandbox creation ([#50](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/50)) ([34d28ac](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/34d28aca396e64b47bb201a66808a61ac9ab9530))
+* recover from failed Daytona sandbox creates ([#51](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/51)) ([4cdb6e2](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/4cdb6e2353f1f5d91ccb16a514c118cb440d3472))
+
 ## [0.4.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.3.0...v0.4.0) (2026-06-09)
 
 
