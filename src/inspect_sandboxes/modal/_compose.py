@@ -54,6 +54,18 @@ def convert_compose_to_modal_params(
     compose_dir = Path(compose_path).parent if compose_path else Path.cwd()
 
     if service.build:
+        if (
+            config.extensions.get("x-modal", {}).get("image_registry_secret")
+            is not None
+        ):
+            # Fail loudly rather than silently ignoring the key: it authenticates
+            # registry PULLS for image:-based services only. A private base image in a
+            # Dockerfile would otherwise fail later with Modal's opaque build error.
+            raise ValueError(
+                "x-modal.image_registry_secret is not supported with build:; it "
+                "authenticates the registry pull for image:-based services. For a "
+                "private base image in a Dockerfile, pull it via image: instead."
+            )
         dockerfile_path = resolve_dockerfile_path(service.build, compose_dir)
         if not dockerfile_path.exists():
             raise FileNotFoundError(f"Dockerfile not found: {dockerfile_path}")

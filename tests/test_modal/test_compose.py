@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call, patch
 
-import modal
 import pytest
 from inspect_ai.util import (
     ComposeConfig,
@@ -696,8 +695,12 @@ class TestImageRegistrySecret:
             tmp_path, "x-modal:\n  image_registry_secret: ghcr-secret\n"
         )
 
-        with patch.object(modal.Image, "from_registry") as from_registry:
-            with patch.object(modal.Secret, "from_name") as from_name:
+        with patch(
+            "inspect_sandboxes.modal._compose.modal.Image.from_registry"
+        ) as from_registry:
+            with patch(
+                "inspect_sandboxes.modal._compose.modal.Secret.from_name"
+            ) as from_name:
                 from_name.return_value = "SENTINEL_SECRET"
                 convert_compose_to_modal_params(config, None)
 
@@ -708,7 +711,9 @@ class TestImageRegistrySecret:
         """Without the key, the pull stays anonymous (no `secret` kwarg)."""
         config = self._config(tmp_path, "")
 
-        with patch.object(modal.Image, "from_registry") as from_registry:
+        with patch(
+            "inspect_sandboxes.modal._compose.modal.Image.from_registry"
+        ) as from_registry:
             convert_compose_to_modal_params(config, None)
 
         assert "secret" not in from_registry.call_args.kwargs
@@ -717,11 +722,27 @@ class TestImageRegistrySecret:
         """`secrets` must not be mistaken for registry credentials."""
         config = self._config(tmp_path, "x-modal:\n  secrets: some-env-secret\n")
 
-        with patch.object(modal.Image, "from_registry") as from_registry:
-            with patch.object(modal.Secret, "from_name"):
+        with patch(
+            "inspect_sandboxes.modal._compose.modal.Image.from_registry"
+        ) as from_registry:
+            with patch("inspect_sandboxes.modal._compose.modal.Secret.from_name"):
                 convert_compose_to_modal_params(config, None)
 
         assert "secret" not in from_registry.call_args.kwargs
+
+    def test_registry_secret_with_build_fails_loudly(self, tmp_path: Path) -> None:
+        """`build:` cannot use the pull secret; raise rather than silently ignore it."""
+        compose = tmp_path / "compose.yaml"
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12\n", encoding="utf-8")
+        _ = compose.write_text(
+            "services:\n  default:\n    build: .\n"
+            "x-modal:\n  image_registry_secret: ghcr-secret\n",
+            encoding="utf-8",
+        )
+        config = parse_compose_yaml(str(compose), multiple_services=False)
+
+        with pytest.raises(ValueError, match="not supported with build:"):
+            convert_compose_to_modal_params(config, None)
 
     def test_non_string_secret_name_fails_loudly(self, tmp_path: Path) -> None:
         """A non-string secret name raises rather than being ignored."""
