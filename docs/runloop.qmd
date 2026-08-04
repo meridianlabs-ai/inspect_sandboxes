@@ -193,4 +193,5 @@ inspect sandbox cleanup runloop <devbox-id>     # shut down one
 - **`working_dir` / `user` compose fields**: Not yet supported in v1. Runloop devboxes have a fixed default user (`user` uid 4444), and per-command working directory is handled via `cd` prefixes rather than an SDK parameter.
 - **Compose `ports`**: Silently dropped. Port mappings in a compose file are ignored, and `connection()` (the host/port for reaching a service from outside the sandbox) is not yet implemented.
 - **Large files**: Files at or above 4 MiB are transferred through the Runloop Objects API (presigned S3 PUT/GET) instead of base64-over-shell, because the exec endpoint caps request and response size. This adds a few extra round trips for large reads/writes.
+- **Command output**: `exec` stdout/stderr is capped at the last 9,999 lines by the Runloop API. Output from line-heavy commands is silently truncated to the tail.
 - **Architecture**: Runloop devboxes default to x86_64. arm64 is configurable via `launch_parameters.architecture` but requires arm64-compatible images.

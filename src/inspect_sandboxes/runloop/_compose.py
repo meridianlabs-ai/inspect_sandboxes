@@ -199,9 +199,22 @@ def _service_to_launch_parameters(
     if memory_gb is not None:
         params["custom_gb_memory"] = memory_gb
 
+    return normalize_launch_parameters(params)
+
+
+def normalize_launch_parameters(
+    launch_parameters: dict[str, Any] | None,
+) -> LaunchParameters | None:
+    """Normalize raw launch parameters for the Runloop API.
+
+    Runloop's API rejects ``custom_cpu_cores`` / ``custom_gb_memory`` /
+    ``custom_disk_size`` unless ``resource_size_request`` is ``"CUSTOM_SIZE"``,
+    so we default it whenever any custom sizing field is present. Returns None
+    for empty or absent parameters.
+    """
+    params = dict(launch_parameters or {})
     if not params:
         return None
-    # Runloop's API rejects custom_* values without resource_size_request="CUSTOM_SIZE".
     if any(
         k in params
         for k in ("custom_cpu_cores", "custom_gb_memory", "custom_disk_size")

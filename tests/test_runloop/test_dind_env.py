@@ -318,3 +318,40 @@ async def test_sample_init_dind_serializes_compose_config() -> None:
 
     assert list(envs.keys())[0] == "web"
     assert "helper" in envs
+
+
+@pytest.mark.asyncio
+async def test_sample_init_dind_defaults_custom_size() -> None:
+    """Test the DinD path defaults resource_size_request to CUSTOM_SIZE — Runloop rejects custom_* without it."""
+    client = make_mock_client()
+    config = ComposeConfig(
+        services={
+            "web": ComposeService(image="python:3.12", **{"x-default": True}),  # type: ignore[arg-type]
+            "helper": ComposeService(image="alpine:3.20"),
+        },
+        **{"x-runloop": {"launch_parameters": {"custom_cpu_cores": 4}}},  # type: ignore[arg-type]
+    )
+
+    mock_project = MagicMock()
+    mock_project.devbox_id = "dbx-dind-123"
+    mock_project.services = ["web", "helper"]
+
+    with (
+        patch(
+            "inspect_sandboxes.runloop._dind_env.create_dind_project",
+            new_callable=AsyncMock,
+            return_value=mock_project,
+        ) as mock_create,
+        patch(
+            "inspect_sandboxes.runloop._dind_env.discover_working_dir",
+            new_callable=AsyncMock,
+            return_value="/",
+        ),
+    ):
+        await RunloopDinDServiceEnvironment.sample_init_dind(
+            client, config, None, metadata={"created_by": "test"}
+        )
+
+    launch_parameters = mock_create.call_args.kwargs["launch_parameters"]
+    assert launch_parameters["custom_cpu_cores"] == 4
+    assert launch_parameters["resource_size_request"] == "CUSTOM_SIZE"

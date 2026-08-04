@@ -28,6 +28,7 @@ from ._compose import (
     extract_runloop_timeout,
     extract_x_runloop,
     find_default_service,
+    normalize_launch_parameters,
 )
 from ._dind_project import (
     RunloopDinDProject,
@@ -101,7 +102,9 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
 
         try:
             ext = extract_x_runloop(config.extensions)
-            launch_parameters = ext.get("launch_parameters")
+            launch_parameters = normalize_launch_parameters(
+                ext.get("launch_parameters")
+            )
             env_vars_raw = ext.get("environment_variables")
             environment_variables = (
                 {str(k): str(v) for k, v in env_vars_raw.items()}
