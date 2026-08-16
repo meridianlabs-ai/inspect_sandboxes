@@ -71,6 +71,13 @@ def sandbox_env(mock_modal_sandbox: MagicMock) -> ModalSandboxEnvironment:
     return ModalSandboxEnvironment(mock_modal_sandbox)
 
 
+def test_modal_volume_supports_read_only_mount_options() -> None:
+    """The minimum Modal SDK exposes the required read-only mount API."""
+    volume = modal.Volume.from_name("agent-cli-claude-2-1-205")
+
+    assert volume.with_mount_options(read_only=True) is not None
+
+
 @pytest.mark.asyncio
 async def test_connection_surfaces_tunnels_as_ports(
     mock_modal_sandbox: MagicMock,
@@ -230,6 +237,58 @@ async def test_sample_init_sets_sandbox_name(
     # _create_sandbox(command, kwargs); kwargs["name"] is what reaches Sandbox.create.
     (_, kwargs), _ = mock_create.call_args
     assert kwargs["name"].startswith("inspect-my_task-7-")
+
+
+@pytest.mark.asyncio
+async def test_sample_init_mounts_compose_volumes_read_only(
+    mock_modal_app: MagicMock,
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """sample_init attaches each named Compose Volume without creating it."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+        **{
+            "x-modal": {
+                "volumes": [
+                    {
+                        "name": "agent-cli-claude-2-1-205",
+                        "mount_path": "/opt/agent-cli/claude",
+                        "read_only": True,
+                    }
+                ]
+            }
+        },
+    )
+    volume = MagicMock()
+    mounted_volume = MagicMock()
+    volume.with_mount_options.return_value = mounted_volume
+
+    with (
+        patch.object(
+            ModalSandboxEnvironment,
+            "_lookup_app",
+            new_callable=AsyncMock,
+            return_value=mock_modal_app,
+        ),
+        patch.object(
+            ModalSandboxEnvironment,
+            "_create_sandbox",
+            new_callable=AsyncMock,
+            return_value=mock_modal_sandbox,
+        ) as mock_create,
+        patch("inspect_sandboxes.modal._compose.modal.Image.from_registry"),
+        patch(
+            "inspect_sandboxes.modal._modal.modal.Volume.from_name",
+            return_value=volume,
+        ) as mock_volume_from_name,
+    ):
+        await ModalSandboxEnvironment.task_init("test_task", None)
+        await ModalSandboxEnvironment.sample_init("test_task", config, {})
+
+    mock_volume_from_name.assert_called_once_with("agent-cli-claude-2-1-205")
+    volume.with_mount_options.assert_called_once_with(read_only=True)
+    (_, sandbox_kwargs), _ = mock_create.call_args
+    assert sandbox_kwargs["volumes"] == {"/opt/agent-cli/claude": mounted_volume}
 
 
 @pytest.mark.parametrize("interrupted", [True, False])

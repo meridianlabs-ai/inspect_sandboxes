@@ -143,6 +143,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             "timeout": 60 * 60 * 24,
         }
         command: list[str] = []
+        modal_params = None
 
         if config is None:
             trace_message(
@@ -165,6 +166,14 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 "Expected a compose file (*.yaml/*.yml), Dockerfile, "
                 "ComposeConfig object, or None."
             )
+
+        if modal_params is not None and modal_params.volumes:
+            sandbox_kwargs["volumes"] = {
+                spec.mount_path: modal.Volume.from_name(spec.name).with_mount_options(
+                    read_only=spec.read_only
+                )
+                for spec in modal_params.volumes
+            }
 
         sandbox = await cls._create_sandbox(command, sandbox_kwargs)
         await sandbox.set_tags.aio(INSPECT_SANDBOX_TAG)

@@ -2,7 +2,7 @@ import shlex
 from dataclasses import dataclass, field
 from logging import getLogger
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import modal
 from inspect_ai.util import ComposeConfig, ComposeService, warn_once
@@ -21,6 +21,14 @@ logger = getLogger(__name__)
 _MODAL_PORT_KEYS = ("encrypted_ports", "h2_ports", "unencrypted_ports")
 
 
+class ModalVolumeSpec(NamedTuple):
+    """A named Modal Volume and its read-only sandbox mount."""
+
+    name: str
+    mount_path: str
+    read_only: bool
+
+
 @dataclass
 class ModalSandboxParams:
     """Parameters for modal.Sandbox.create().
@@ -28,10 +36,12 @@ class ModalSandboxParams:
     Attributes:
         command: Positional command args passed before **kwargs to Sandbox.create().
         kwargs: Keyword arguments passed to Sandbox.create().
+        volumes: Named Modal Volumes to attach when creating the sandbox.
     """
 
     command: list[str] = field(default_factory=list)
     kwargs: dict[str, Any] = field(default_factory=dict)
+    volumes: list[ModalVolumeSpec] = field(default_factory=list)
 
 
 def convert_compose_to_modal_params(
@@ -129,9 +139,9 @@ def convert_compose_to_modal_params(
     # Set as a default; an explicit x-modal.*_ports overrides it below.
     _apply_service_ports(params, service)
 
-    _apply_modal_extensions(params, config.extensions)
+    volumes = _apply_modal_extensions(params, config.extensions)
 
-    return ModalSandboxParams(command=command, kwargs=params)
+    return ModalSandboxParams(command=command, kwargs=params, volumes=volumes)
 
 
 def _apply_service_ports(params: dict[str, Any], service: ComposeService) -> None:
@@ -191,7 +201,9 @@ def _apply_service_ports(params: dict[str, Any], service: ComposeService) -> Non
         params["unencrypted_ports"] = container_ports
 
 
-def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) -> None:
+def _apply_modal_extensions(
+    params: dict[str, Any], extensions: dict[str, Any]
+) -> list[ModalVolumeSpec]:
     """Apply Modal-specific extensions to params dict.
 
     Supported extensions:
@@ -210,12 +222,13 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
         - custom_domain (str): Custom domain for web services
         - verbose (bool): Enable verbose logging
         - secrets (str | list[str]): Modal secret name(s) to attach
+        - volumes (list[dict[str, str | bool]]): Named Modal Volumes to attach.
+          Volumes are resolved at sandbox creation so missing volumes fail loudly.
         - image_registry_secret (str): Modal secret name holding registry credentials,
           used for the image PULL (see convert_compose_to_modal_params). Not applied here.
 
     Unsupported Modal parameters:
         - network_file_systems: Requires modal.NetworkFileSystem objects
-        - volumes: Requires modal.Volume or modal.CloudBucketMount objects
         - proxy: Requires modal.Proxy object
 
     Args:
@@ -223,6 +236,7 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
         extensions: Extensions dict from compose config.
     """
     modal_extensions = extensions.get("x-modal", {})
+    volumes: list[ModalVolumeSpec] = []
 
     # An explicit x-modal port declaration overrides the ports translated from
     # service.ports. Any of the three port keys takes over the whole tunnel set,
@@ -245,6 +259,7 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
         "unencrypted_ports",
         "verbose",
         "secrets",
+        "volumes",
     ]
 
     for key in extension_keys:
@@ -254,8 +269,14 @@ def _apply_modal_extensions(params: dict[str, Any], extensions: dict[str, Any]) 
                 if not isinstance(secrets, list):
                     secrets = [secrets]
                 params[key] = [modal.Secret.from_name(s) for s in secrets]
+            elif key == "volumes":
+                volumes = [
+                    ModalVolumeSpec(**volume) for volume in modal_extensions[key]
+                ]
             else:
                 params[key] = modal_extensions[key]
+
+    return volumes
 
 
 def _service_to_cpu(service: ComposeService) -> float | tuple[float, float] | None:

@@ -100,6 +100,7 @@ The top-level `x-modal` key on a compose file passes settings to [`modal.Sandbox
 | `cidr_allowlist` | list[str] | `None` | CIDR blocks the sandbox is allowed to reach. `None` allows all. |
 | `secrets` | str or list[str] | `None` | Name(s) of Modal secrets to inject as environment variables. |
 | `image_registry_secret` | str | `None` | Name of a Modal secret holding registry credentials, used to authenticate the image pull for `image:`-based services (private registries). Distinct from `secrets`, which has no effect on the pull. Not supported with `build:`. |
+| `volumes` | list[{`name`, `mount_path`, `read_only`}] | `[]` | Named Modal Volumes mounted at their declared paths. A missing Volume makes sandbox creation fail; it is never created implicitly. |
 | `pty` | bool | `False` | Enable a pseudo-TTY. |
 | `encrypted_ports` | list[int] | `[]` | Ports to tunnel into the sandbox over TLS. |
 | `h2_ports` | list[int] | `[]` | Encrypted ports to tunnel via HTTP/2. |
@@ -107,6 +108,16 @@ The top-level `x-modal` key on a compose file passes settings to [`modal.Sandbox
 | `custom_domain` | str | `None` | Custom subdomain parent for sandbox connections. |
 | `verbose` | bool | `False` | Enable verbose Modal logging. |
 :::
+
+Mount a runtime payload Volume read-only:
+
+```yaml
+x-modal:
+  volumes:
+    - name: agent-cli-claude-2-1-205
+      mount_path: /opt/agent-cli/claude
+      read_only: true
+```
 
 Example:
 
@@ -119,7 +130,7 @@ x-modal:
   secrets: ["openai-api-key"]
 ```
 
-Unsupported Modal parameters (require SDK objects, not compose-representable): `network_file_systems`, `volumes`, `proxy`.
+Unsupported Modal parameters (require SDK objects, not compose-representable): `network_file_systems`, `proxy`.
 
 ## Finding sandboxes
 

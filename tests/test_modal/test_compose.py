@@ -558,6 +558,32 @@ def test_convert_compose_with_secret_extensions() -> None:
     assert result.kwargs["secrets"] == secret_objects
 
 
+def test_convert_compose_modal_volume_specs() -> None:
+    """Compose x-modal volumes become read-only Modal volume specifications."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+        **{
+            "x-modal": {
+                "volumes": [
+                    {
+                        "name": "agent-cli-claude-2-1-205",
+                        "mount_path": "/opt/agent-cli/claude",
+                        "read_only": True,
+                    }
+                ]
+            }
+        },
+    )
+
+    with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+        mock_image.from_registry.side_effect = lambda image: f"registry:{image}"
+        params = convert_compose_to_modal_params(config, None)
+
+    assert params.volumes == [
+        ("agent-cli-claude-2-1-205", "/opt/agent-cli/claude", True)
+    ]
+
+
 def test_service_ports_translated_to_unencrypted_ports() -> None:
     """service.ports container side defaults into unencrypted_ports."""
     params: dict[str, Any] = {}
