@@ -11,6 +11,7 @@ from inspect_ai.util import (
     parse_compose_yaml,
 )
 from inspect_sandboxes.modal._compose import (
+    ModalVolumeSpec,
     _apply_modal_extensions,
     _apply_service_ports,
     _service_to_gpu,
@@ -580,8 +581,13 @@ def test_convert_compose_modal_volume_specs() -> None:
         params = convert_compose_to_modal_params(config, None)
 
     assert params.volumes == [
-        ("agent-cli-claude-2-1-205", "/opt/agent-cli/claude", True)
+        ModalVolumeSpec(
+            name="agent-cli-claude-2-1-205",
+            mount_path="/opt/agent-cli/claude",
+            read_only=True,
+        )
     ]
+    assert isinstance(params.volumes[0], ModalVolumeSpec)
 
 
 def test_service_ports_translated_to_unencrypted_ports() -> None:

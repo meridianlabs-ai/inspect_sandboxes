@@ -1332,7 +1332,7 @@ requires-dist = [
     { name = "daytona-sdk", specifier = ">=0.180.0" },
     { name = "e2b", specifier = ">=2.20" },
     { name = "inspect-ai", specifier = ">=0.3.211" },
-    { name = "modal", specifier = ">=1.5.3" },
+    { name = "modal", specifier = ">=1.5.0" },
     { name = "tenacity", specifier = ">=9.1.4" },
 ]
 

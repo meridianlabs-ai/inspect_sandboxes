@@ -114,7 +114,7 @@ Mount a runtime payload Volume read-only:
 ```yaml
 x-modal:
   volumes:
-    - name: agent-cli-claude-2-1-205
+    - name: my-data-vol
       mount_path: /opt/agent-cli/claude
       read_only: true
 ```

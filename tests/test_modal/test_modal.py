@@ -73,7 +73,7 @@ def sandbox_env(mock_modal_sandbox: MagicMock) -> ModalSandboxEnvironment:
 
 def test_modal_volume_supports_read_only_mount_options() -> None:
     """The minimum Modal SDK exposes the required read-only mount API."""
-    volume = modal.Volume.from_name("agent-cli-claude-2-1-205")
+    volume = modal.Volume.from_name("my-data-vol")
 
     assert volume.with_mount_options(read_only=True) is not None
 
@@ -240,7 +240,41 @@ async def test_sample_init_sets_sandbox_name(
 
 
 @pytest.mark.asyncio
+async def test_sample_init_omits_volumes_without_compose_volume_specs(
+    mock_modal_app: MagicMock,
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """sample_init omits volumes when Compose declares no volume specifications."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+    )
+
+    with (
+        patch.object(
+            ModalSandboxEnvironment,
+            "_lookup_app",
+            new_callable=AsyncMock,
+            return_value=mock_modal_app,
+        ),
+        patch.object(
+            ModalSandboxEnvironment,
+            "_create_sandbox",
+            new_callable=AsyncMock,
+            return_value=mock_modal_sandbox,
+        ) as mock_create,
+        patch("inspect_sandboxes.modal._compose.modal.Image.from_registry"),
+    ):
+        await ModalSandboxEnvironment.task_init("test_task", None)
+        await ModalSandboxEnvironment.sample_init("test_task", config, {})
+
+    (_, sandbox_kwargs), _ = mock_create.call_args
+    assert "volumes" not in sandbox_kwargs
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+@pytest.mark.asyncio
 async def test_sample_init_mounts_compose_volumes_read_only(
+    read_only: bool,
     mock_modal_app: MagicMock,
     mock_modal_sandbox: MagicMock,
 ) -> None:
@@ -253,7 +287,7 @@ async def test_sample_init_mounts_compose_volumes_read_only(
                     {
                         "name": "agent-cli-claude-2-1-205",
                         "mount_path": "/opt/agent-cli/claude",
-                        "read_only": True,
+                        "read_only": read_only,
                     }
                 ]
             }
@@ -286,7 +320,7 @@ async def test_sample_init_mounts_compose_volumes_read_only(
         await ModalSandboxEnvironment.sample_init("test_task", config, {})
 
     mock_volume_from_name.assert_called_once_with("agent-cli-claude-2-1-205")
-    volume.with_mount_options.assert_called_once_with(read_only=True)
+    volume.with_mount_options.assert_called_once_with(read_only=read_only)
     (_, sandbox_kwargs), _ = mock_create.call_args
     assert sandbox_kwargs["volumes"] == {"/opt/agent-cli/claude": mounted_volume}
 

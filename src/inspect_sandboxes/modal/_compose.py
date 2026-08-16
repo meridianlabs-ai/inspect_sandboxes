@@ -234,6 +234,10 @@ def _apply_modal_extensions(
     Args:
         params: Parameters dict to modify.
         extensions: Extensions dict from compose config.
+
+    Returns:
+        Volume specifications extracted from ``x-modal.volumes``. Other supported
+        extension values are applied directly to ``params``.
     """
     modal_extensions = extensions.get("x-modal", {})
     volumes: list[ModalVolumeSpec] = []
