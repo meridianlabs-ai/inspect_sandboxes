@@ -325,6 +325,57 @@ async def test_sample_init_mounts_compose_volumes_read_only(
     assert sandbox_kwargs["volumes"] == {"/opt/agent-cli/claude": mounted_volume}
 
 
+@pytest.mark.asyncio
+async def test_sample_init_rejects_duplicate_volume_mount_paths(
+    mock_modal_app: MagicMock,
+    mock_modal_sandbox: MagicMock,
+) -> None:
+    """Two x-modal.volumes entries sharing a mount_path must fail loudly.
+
+    A dict comprehension keyed on mount_path would otherwise silently drop
+    all but the last entry before Modal ever sees the conflict.
+    """
+    config = ComposeConfig(
+        services={"default": ComposeService(image="python:3.12")},
+        **{
+            "x-modal": {
+                "volumes": [
+                    {
+                        "name": "agent-cli-claude-2-1-205",
+                        "mount_path": "/opt/agent-cli/claude",
+                        "read_only": True,
+                    },
+                    {
+                        "name": "agent-cli-claude-2-1-999",
+                        "mount_path": "/opt/agent-cli/claude",
+                        "read_only": False,
+                    },
+                ]
+            }
+        },
+    )
+
+    with (
+        patch.object(
+            ModalSandboxEnvironment,
+            "_lookup_app",
+            new_callable=AsyncMock,
+            return_value=mock_modal_app,
+        ),
+        patch.object(
+            ModalSandboxEnvironment,
+            "_create_sandbox",
+            new_callable=AsyncMock,
+            return_value=mock_modal_sandbox,
+        ),
+        patch("inspect_sandboxes.modal._compose.modal.Image.from_registry"),
+        patch("inspect_sandboxes.modal._modal.modal.Volume.from_name"),
+    ):
+        await ModalSandboxEnvironment.task_init("test_task", None)
+        with pytest.raises(ValueError, match="/opt/agent-cli/claude"):
+            await ModalSandboxEnvironment.sample_init("test_task", config, {})
+
+
 @pytest.mark.parametrize("interrupted", [True, False])
 @pytest.mark.asyncio
 async def test_sample_cleanup(

@@ -168,6 +168,16 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             )
 
         if modal_params is not None and modal_params.volumes:
+            mount_paths = [spec.mount_path for spec in modal_params.volumes]
+            if len(mount_paths) != len(set(mount_paths)):
+                duplicates = sorted(
+                    {path for path in mount_paths if mount_paths.count(path) > 1}
+                )
+                raise ValueError(
+                    "x-modal.volumes has multiple entries with the same "
+                    f"mount_path: {duplicates}. Each mounted Volume needs a "
+                    "distinct mount_path."
+                )
             sandbox_kwargs["volumes"] = {
                 spec.mount_path: modal.Volume.from_name(spec.name).with_mount_options(
                     read_only=spec.read_only
