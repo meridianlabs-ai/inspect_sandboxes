@@ -277,8 +277,7 @@ def _apply_modal_extensions(
                 params[key] = [modal.Secret.from_name(s) for s in secrets]
             elif key == "volumes":
                 volumes = [
-                    _parse_modal_volume_spec(volume)
-                    for volume in modal_extensions[key]
+                    _parse_modal_volume_spec(volume) for volume in modal_extensions[key]
                 ]
             else:
                 params[key] = modal_extensions[key]
