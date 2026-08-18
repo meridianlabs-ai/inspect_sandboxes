@@ -590,6 +590,72 @@ def test_convert_compose_modal_volume_specs() -> None:
     assert isinstance(params.volumes[0], ModalVolumeSpec)
 
 
+class TestModalVolumeValidation:
+    """Malformed x-modal.volumes entries raise errors that name the key."""
+
+    @staticmethod
+    def _config(volumes: list[Any]) -> ComposeConfig:
+        return ComposeConfig(
+            services={"default": ComposeService(image="python:3.12")},
+            **{"x-modal": {"volumes": volumes}},
+        )
+
+    def test_read_only_defaults_to_false_when_omitted(self) -> None:
+        """Omitting read_only is valid; it defaults to False like Modal's own default."""
+        config = self._config(
+            [
+                {
+                    "name": "agent-cli-claude-2-1-205",
+                    "mount_path": "/opt/agent-cli/claude",
+                }
+            ]
+        )
+
+        with patch("inspect_sandboxes.modal._compose.modal.Image") as mock_image:
+            mock_image.from_registry.side_effect = lambda image: f"registry:{image}"
+            params = convert_compose_to_modal_params(config, None)
+
+        assert params.volumes == [
+            ModalVolumeSpec(
+                name="agent-cli-claude-2-1-205",
+                mount_path="/opt/agent-cli/claude",
+                read_only=False,
+            )
+        ]
+
+    def test_unknown_key_names_x_modal_volumes(self) -> None:
+        """An unexpected key raises a ValueError naming x-modal.volumes."""
+        config = self._config(
+            [
+                {
+                    "name": "agent-cli-claude-2-1-205",
+                    "mount_path": "/opt/agent-cli/claude",
+                    "readonly": True,  # typo for read_only
+                }
+            ]
+        )
+
+        with patch("inspect_sandboxes.modal._compose.modal.Image"):
+            with pytest.raises(ValueError, match="x-modal.volumes"):
+                convert_compose_to_modal_params(config, None)
+
+    def test_docker_shorthand_string_names_x_modal_volumes(self) -> None:
+        """Docker Compose's short volume syntax raises a TypeError naming x-modal.volumes."""
+        config = self._config(["agent-cli-claude-2-1-205:/opt/agent-cli/claude:ro"])
+
+        with patch("inspect_sandboxes.modal._compose.modal.Image"):
+            with pytest.raises(TypeError, match="x-modal.volumes"):
+                convert_compose_to_modal_params(config, None)
+
+    def test_missing_required_key_names_x_modal_volumes(self) -> None:
+        """A missing required key raises a ValueError naming x-modal.volumes."""
+        config = self._config([{"name": "agent-cli-claude-2-1-205"}])
+
+        with patch("inspect_sandboxes.modal._compose.modal.Image"):
+            with pytest.raises(ValueError, match="x-modal.volumes"):
+                convert_compose_to_modal_params(config, None)
+
+
 def test_service_ports_translated_to_unencrypted_ports() -> None:
     """service.ports container side defaults into unencrypted_ports."""
     params: dict[str, Any] = {}

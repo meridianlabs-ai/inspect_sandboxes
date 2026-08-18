@@ -26,7 +26,7 @@ class ModalVolumeSpec(NamedTuple):
 
     name: str
     mount_path: str
-    read_only: bool
+    read_only: bool = False
 
 
 @dataclass
@@ -223,7 +223,9 @@ def _apply_modal_extensions(
         - verbose (bool): Enable verbose logging
         - secrets (str | list[str]): Modal secret name(s) to attach
         - volumes (list[dict[str, str | bool]]): Named Modal Volumes to attach.
-          Volumes are resolved at sandbox creation so missing volumes fail loudly.
+          Each entry requires `name` and `mount_path`; `read_only` defaults to
+          `False`. Volumes are resolved at sandbox creation so missing volumes
+          fail loudly.
         - image_registry_secret (str): Modal secret name holding registry credentials,
           used for the image PULL (see convert_compose_to_modal_params). Not applied here.
 
@@ -275,12 +277,44 @@ def _apply_modal_extensions(
                 params[key] = [modal.Secret.from_name(s) for s in secrets]
             elif key == "volumes":
                 volumes = [
-                    ModalVolumeSpec(**volume) for volume in modal_extensions[key]
+                    _parse_modal_volume_spec(volume)
+                    for volume in modal_extensions[key]
                 ]
             else:
                 params[key] = modal_extensions[key]
 
     return volumes
+
+
+_MODAL_VOLUME_KEYS = frozenset(ModalVolumeSpec._fields)
+
+
+def _parse_modal_volume_spec(entry: Any) -> ModalVolumeSpec:
+    """Validate and build a ModalVolumeSpec from an ``x-modal.volumes`` entry.
+
+    Raises a descriptive error naming ``x-modal.volumes`` instead of letting
+    malformed entries surface as opaque ``NamedTuple`` construction errors
+    (e.g. "unexpected keyword argument" or "must be a mapping, not str").
+    """
+    if not isinstance(entry, dict):
+        raise TypeError(
+            "x-modal.volumes entries must be mappings with 'name' and "
+            "'mount_path' keys (e.g. {name: myvol, mount_path: /data}), got "
+            f"{type(entry).__name__}. Docker Compose's short volume syntax "
+            "(e.g. 'myvol:/data:ro') is not supported here."
+        )
+    unknown_keys = set(entry) - _MODAL_VOLUME_KEYS
+    if unknown_keys:
+        raise ValueError(
+            f"x-modal.volumes entry has unexpected key(s) {sorted(unknown_keys)}; "
+            f"expected only {sorted(_MODAL_VOLUME_KEYS)}"
+        )
+    missing_keys = {"name", "mount_path"} - set(entry)
+    if missing_keys:
+        raise ValueError(
+            f"x-modal.volumes entry is missing required key(s) {sorted(missing_keys)}"
+        )
+    return ModalVolumeSpec(**entry)
 
 
 def _service_to_cpu(service: ComposeService) -> float | tuple[float, float] | None:
