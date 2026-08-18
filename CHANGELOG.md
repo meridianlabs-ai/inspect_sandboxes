@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.4.1...v0.5.0) (2026-08-18)
+
+
+### Features
+
+* **modal:** authenticate the image pull via x-modal.image_registry_secret ([#56](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/56)) ([c0b3430](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/c0b3430751b03d25300ee44e9e8d4a6beeb69341))
+* mount Compose Modal Volumes read-only ([#59](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/59)) ([b430342](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/b4303423303757b91a0794e9e7b2debbe3880099))
+
 ## [0.4.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.4.0...v0.4.1) (2026-07-30)
 
 
