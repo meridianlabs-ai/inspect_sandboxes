@@ -1296,6 +1296,7 @@ dependencies = [
     { name = "e2b" },
     { name = "inspect-ai" },
     { name = "modal" },
+    { name = "novita-sandbox" },
     { name = "tenacity" },
 ]
 
@@ -1333,6 +1334,7 @@ requires-dist = [
     { name = "e2b", specifier = ">=2.20" },
     { name = "inspect-ai", specifier = ">=0.3.211" },
     { name = "modal", specifier = ">=1.5.0" },
+    { name = "novita-sandbox", specifier = ">=2.0.8" },
     { name = "tenacity", specifier = ">=9.1.4" },
 ]
 
@@ -2357,6 +2359,28 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/54/d2/92fa3243712b9a3e8bafaf60aac366da1cada3639ca767ff4b5b3654ec28/notebook_shim-0.2.4.tar.gz", hash = "sha256:b4b2cfa1b65d98307ca24361f5b30fe785b53c3fd07b7a47e89acb5e6ac638cb", size = 13167, upload-time = "2024-02-14T23:35:18.353Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f9/33/bd5b9137445ea4b680023eb0469b2bb969d61303dedb2aac6560ff3d14a1/notebook_shim-0.2.4-py3-none-any.whl", hash = "sha256:411a5be4e9dc882a074ccbcae671eda64cceb068767e9a3419096986560e1cef", size = 13307, upload-time = "2024-02-14T23:35:16.286Z" },
+]
+
+[[package]]
+name = "novita-sandbox"
+version = "2.0.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "dockerfile-parse" },
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+    { name = "rich" },
+    { name = "typing-extensions" },
+    { name = "wcmatch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2a/fe/cbaf6b61859023f3f14c7d9ca92058282e89887fafab7ee15a43c80b939d/novita_sandbox-2.0.9.tar.gz", hash = "sha256:7f98db4788faae2e64a872fd75d26a6f13070d267b45c362b21eb6fc0a92e86f", size = 495216, upload-time = "2026-08-11T02:42:55.067Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/43/ce/a8d636c981c57da95cff83174234d6530ab922bbdfc0b6812e72585ba419/novita_sandbox-2.0.9-py3-none-any.whl", hash = "sha256:63d2f42410fb72d5d8af7bd4007162dd0f090392ca996245480dafc61e2e9c6f", size = 623203, upload-time = "2026-08-11T02:42:53.858Z" },
 ]
 
 [[package]]
