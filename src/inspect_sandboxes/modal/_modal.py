@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import shlex
 import sys
 from contextvars import ContextVar
 from logging import getLogger
@@ -329,12 +330,29 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
-        if user is not None:
-            warn_once(
-                logger,
-                "The 'user' parameter is ignored in ModalSandboxEnvironment. "
-                "Commands will run as the container's default user.",
+        # Modal's Sandbox.exec() has no user parameter, so a user switch is
+        # emulated with `su`. Without `-l`, `su` preserves the caller's cwd
+        # and (with `-p`) its environment, so this only changes the
+        # effective uid -- matching the Docker and k8s providers, which
+        # scope `user=` to uid rather than a fresh login environment.
+        # `su` accepts only usernames, while this method's contract is
+        # "username or UID", so a numeric user is resolved to its username
+        # via getent inside the sandbox (the uid->name mapping lives in the
+        # sandbox's /etc/passwd, not on the host). An unmapped uid fails
+        # loudly rather than silently running as the container default.
+        if user is None:
+            exec_cmd = cmd
+        elif user.isdigit():
+            quoted_cmd = shlex.quote(shlex.join(cmd))
+            script = (
+                f"u=$(getent passwd {shlex.quote(user)} | cut -d: -f1); "
+                f'if [ -z "$u" ]; then '
+                f"echo 'su: user {user} does not exist' >&2; exit 1; fi; "
+                f'exec su -p -s /bin/sh "$u" -c {quoted_cmd}'
             )
+            exec_cmd = ["sh", "-c", script]
+        else:
+            exec_cmd = ["su", "-p", "-s", "/bin/sh", user, "-c", shlex.join(cmd)]
 
         # Modal requires absolute paths for workdir
         workdir = cwd
@@ -351,7 +369,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             modal_env = cast(dict[str, str | None] | None, env)
 
             process = await self.sandbox.exec.aio(
-                *cmd,
+                *exec_cmd,
                 workdir=workdir,
                 env=modal_env,
             )

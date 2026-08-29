@@ -694,10 +694,113 @@ async def test_exec_variations(
 
 
 @pytest.mark.asyncio
-async def test_exec_user_param_ignored(sandbox_env: ModalSandboxEnvironment) -> None:
-    """Test that exec runs successfully when user parameter is provided (it is ignored)."""
-    result = await sandbox_env.exec(["echo", "test"], user="root")
-    assert isinstance(result, ExecResult)
+async def test_exec_user_param_wraps_command_in_su(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """exec(user=...) wraps the command in `su`.
+
+    Modal's Sandbox.exec() has no user parameter of its own, unlike the
+    Docker and k8s providers, which switch the effective uid directly.
+    """
+    captured_argv: list[tuple[str, ...]] = []
+
+    async def capturing_exec(*args: str, **kwargs: Any) -> MagicMock:
+        captured_argv.append(args)
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout = MagicMock()
+        process.stdout.read = AsyncMock(return_value="")
+        process.stderr = MagicMock()
+        process.stderr.read = AsyncMock(return_value="")
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.write_eof = MagicMock()
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = capturing_exec
+
+    await sandbox_env.exec(["echo", "hello world"], user="codex")
+
+    assert captured_argv == [
+        ("su", "-p", "-s", "/bin/sh", "codex", "-c", "echo 'hello world'")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exec_numeric_user_resolves_name_before_su(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """exec(user=<uid>) resolves the uid to a username inside the sandbox.
+
+    `su` accepts only usernames, but this method's contract is "username or
+    UID", so a numeric user is wrapped in a getent lookup that resolves the
+    uid against the sandbox's /etc/passwd and fails loudly when unmapped.
+    """
+    captured_argv: list[tuple[str, ...]] = []
+
+    async def capturing_exec(*args: str, **kwargs: Any) -> MagicMock:
+        captured_argv.append(args)
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout = MagicMock()
+        process.stdout.read = AsyncMock(return_value="")
+        process.stderr = MagicMock()
+        process.stderr.read = AsyncMock(return_value="")
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.write_eof = MagicMock()
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = capturing_exec
+
+    await sandbox_env.exec(["echo", "hello world"], user="1000")
+
+    assert len(captured_argv) == 1
+    argv = captured_argv[0]
+    assert argv[:2] == ("sh", "-c")
+    script = argv[2]
+    assert "getent passwd 1000" in script
+    assert "su -p -s /bin/sh" in script
+    assert (
+        "'echo '\"'\"'hello world'\"'\"''" in script or "echo 'hello world'" in script
+    )
+    assert "does not exist" in script
+
+
+@pytest.mark.asyncio
+async def test_exec_without_user_param_runs_command_directly(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """exec() with no user leaves the command untouched (no su wrapping)."""
+    captured_argv: list[tuple[str, ...]] = []
+
+    async def capturing_exec(*args: str, **kwargs: Any) -> MagicMock:
+        captured_argv.append(args)
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout = MagicMock()
+        process.stdout.read = AsyncMock(return_value="")
+        process.stderr = MagicMock()
+        process.stderr.read = AsyncMock(return_value="")
+        process.stdin = MagicMock()
+        process.stdin.write = MagicMock()
+        process.stdin.write_eof = MagicMock()
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = capturing_exec
+
+    await sandbox_env.exec(["echo", "hello world"])
+
+    assert captured_argv == [("echo", "hello world")]
 
 
 @pytest.mark.asyncio
@@ -1132,8 +1235,6 @@ async def test_self_check(modal_sandbox_environment: ModalSandboxEnvironment) ->
     """Run Inspect AI's self-check suite against Modal sandbox."""
     known_failures = [
         "test_read_file_not_allowed",  # user is root, so this doesn't work
-        "test_exec_as_user",  # unsupported
-        "test_exec_as_nonexistent_user",  # unsupported
         "test_write_text_file_without_permissions",  # user is root
         "test_write_binary_file_without_permissions",  # user is root
         "test_exec_permission_error",  # user is root
