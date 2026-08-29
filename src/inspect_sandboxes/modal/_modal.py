@@ -94,6 +94,90 @@ _exec_retry = retry(
     reraise=True,
 )
 
+# Absolute candidates for `su`, in preference order. Resolved only through
+# these paths -- never through $PATH, which exec()'s caller-supplied `env=`
+# may replace before this wrapper runs. A PATH-based lookup would then miss
+# a `su` that is actually present in the sandbox (observed as a spurious
+# "su: not found" even though direct exec of the same image succeeds).
+_SU_CANDIDATES = ("/bin/su", "/usr/bin/su")
+
+
+def _locate_su_snippet(candidates: tuple[str, ...] = _SU_CANDIDATES) -> str:
+    """POSIX-sh snippet that sets `$su` to the first executable candidate.
+
+    Exits with a clear error -- rather than falling back to a PATH-based
+    `su` lookup -- if none of `candidates` is executable.
+    """
+    branches = [
+        f"if [ -x {path} ]; then su={path};"
+        if index == 0
+        else f" elif [ -x {path} ]; then su={path};"
+        for index, path in enumerate(candidates)
+    ]
+    checked = ", ".join(candidates)
+    return (
+        "".join(branches)
+        + f" else echo 'su: not found (checked {checked})' >&2; exit 1; fi"
+    )
+
+
+def _resolve_uid_snippet(uid: str) -> str:
+    """POSIX-sh snippet resolving `uid` to `$u` via a plain /etc/passwd scan.
+
+    Avoids `getent`, which minimal images (e.g. bare `busybox:1.36`) lack.
+    Fails loudly, before `$u` is ever used, when the uid is unmapped.
+    """
+    quoted_uid = shlex.quote(uid)
+    return (
+        'u=""; while IFS=: read -r name _ passwd_uid _; do '
+        f'if [ "$passwd_uid" = {quoted_uid} ]; then u="$name"; break; fi; '
+        "done < /etc/passwd; "
+        f"if [ -z \"$u\" ]; then echo 'su: user {uid} does not exist' >&2; exit 1; fi"
+    )
+
+
+def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
+    """Build the argv Modal's Sandbox.exec() should run to honour `user`.
+
+    Modal's Sandbox.exec() has no user parameter, so a user switch is
+    emulated with `su`. Without `-l`, `su` preserves the caller's cwd and
+    (with `-p`) its environment, so this only changes the effective uid --
+    matching the Docker and k8s providers, which scope `user=` to uid
+    rather than a fresh login environment.
+
+    `su` accepts only usernames, while this method's contract is "username
+    or UID", so a numeric user is resolved to its username inside the
+    sandbox (the uid->name mapping lives there, not on the host) via
+    `_resolve_uid_snippet`. An unmapped uid fails loudly rather than
+    silently running as the container default.
+
+    The `--` immediately before `"$u"` is load-bearing: without it, an
+    option-like username (a literal "-p", or a malformed passwd entry whose
+    name starts with "-") is parsed by `su` as another flag instead of the
+    target user, and the command runs as uid 0 on both util-linux and
+    BusyBox `su`.
+
+    `su` is located via `_locate_su_snippet` (absolute paths only, never
+    $PATH). The caller's `env=` still fully reaches the wrapped command --
+    `su -p` preserves environment, and this wrapper resolves its own
+    utilities (`su`, plus the shell builtins `read`/`echo`/`[`/`exit`)
+    without needing PATH at all.
+    """
+    if user is None:
+        return cmd
+
+    quoted_cmd = shlex.quote(shlex.join(cmd))
+    set_user = (
+        _resolve_uid_snippet(user) + "; "
+        if user.isdigit()
+        else f"u={shlex.quote(user)}; "
+    )
+    script = (
+        f"{set_user}{_locate_su_snippet()}; "
+        f'exec "$su" -p -s /bin/sh -- "$u" -c {quoted_cmd}'
+    )
+    return ["/bin/sh", "-c", script]
+
 
 @sandboxenv(name="modal")
 class ModalSandboxEnvironment(SandboxEnvironment):
@@ -330,29 +414,10 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
-        # Modal's Sandbox.exec() has no user parameter, so a user switch is
-        # emulated with `su`. Without `-l`, `su` preserves the caller's cwd
-        # and (with `-p`) its environment, so this only changes the
-        # effective uid -- matching the Docker and k8s providers, which
-        # scope `user=` to uid rather than a fresh login environment.
-        # `su` accepts only usernames, while this method's contract is
-        # "username or UID", so a numeric user is resolved to its username
-        # via getent inside the sandbox (the uid->name mapping lives in the
-        # sandbox's /etc/passwd, not on the host). An unmapped uid fails
-        # loudly rather than silently running as the container default.
-        if user is None:
-            exec_cmd = cmd
-        elif user.isdigit():
-            quoted_cmd = shlex.quote(shlex.join(cmd))
-            script = (
-                f"u=$(getent passwd {shlex.quote(user)} | cut -d: -f1); "
-                f'if [ -z "$u" ]; then '
-                f"echo 'su: user {user} does not exist' >&2; exit 1; fi; "
-                f'exec su -p -s /bin/sh "$u" -c {quoted_cmd}'
-            )
-            exec_cmd = ["sh", "-c", script]
-        else:
-            exec_cmd = ["su", "-p", "-s", "/bin/sh", user, "-c", shlex.join(cmd)]
+        # See _build_exec_cmd's docstring for the full rationale: user= is
+        # emulated via `su` because Modal's Sandbox.exec() has no user
+        # parameter of its own.
+        exec_cmd = _build_exec_cmd(cmd, user)
 
         # Modal requires absolute paths for workdir
         workdir = cwd

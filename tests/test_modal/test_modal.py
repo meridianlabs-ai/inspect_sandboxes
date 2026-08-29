@@ -1,5 +1,6 @@
 """Tests for Modal sandbox environment implementation."""
 
+import subprocess
 from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -18,6 +19,8 @@ from inspect_ai.util import (
 from inspect_ai.util._sandbox.self_check import self_check
 from inspect_sandboxes.modal._modal import (
     ModalSandboxEnvironment,
+    _build_exec_cmd,
+    _locate_su_snippet,
     running_sandboxes,
     sandbox_cleanup_startup,
 )
@@ -693,11 +696,183 @@ async def test_exec_variations(
     assert result.returncode == returncode
 
 
+def test_build_exec_cmd_without_user_is_unchanged() -> None:
+    """No `user=`: the command passes through with no `su` wrapper at all."""
+    cmd = ["echo", "hello world"]
+    assert _build_exec_cmd(cmd, None) == ["echo", "hello world"]
+
+
+def test_build_exec_cmd_named_user_wraps_in_su_with_dash_dash_guard() -> None:
+    """A named user is wrapped in `su`, with `--` guarding the username.
+
+    The generated argv, byte for byte: without the `--` before `"$u"`, an
+    option-like username would be parsed by `su` as another flag rather
+    than the target user (see the option-like-user regression test below).
+    """
+    assert _build_exec_cmd(["echo", "hello world"], "codex") == [
+        "/bin/sh",
+        "-c",
+        "u=codex; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo 'su: not found (checked /bin/su, /usr/bin/su)' >&2; exit 1; fi; exec \"$su\" -p -s /bin/sh -- \"$u\" -c 'echo '\"'\"'hello world'\"'\"''",
+    ]
+
+
+def test_build_exec_cmd_numeric_user_resolves_uid_before_su() -> None:
+    """A numeric user is resolved to a username via /etc/passwd, not `getent`.
+
+    `getent` is absent from minimal images (e.g. bare `busybox:1.36`), so
+    the uid is resolved with a plain POSIX /etc/passwd scan. The uid-not-
+    found branch (fail-before-su) and the `su`-locate branch each exit
+    loudly rather than falling through to a PATH-based `su`.
+    """
+    exec_cmd = _build_exec_cmd(["echo", "hello world"], "1000")
+    assert exec_cmd == [
+        "/bin/sh",
+        "-c",
+        'u=""; while IFS=: read -r name _ passwd_uid _; do if [ "$passwd_uid" = 1000 ]; then u="$name"; break; fi; done < /etc/passwd; if [ -z "$u" ]; then echo \'su: user 1000 does not exist\' >&2; exit 1; fi; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; exec "$su" -p -s /bin/sh -- "$u" -c \'echo \'"\'"\'hello world\'"\'"\'\'',
+    ]
+    script = exec_cmd[2]
+    assert "getent" not in script
+    assert "cut" not in script
+    assert 'exec "$su" -p -s /bin/sh -- "$u" -c' in script
+    # The uid-not-found exit happens before the su-locate branch even runs.
+    assert script.index("does not exist") < script.index("su: not found")
+
+
+def test_build_exec_cmd_option_like_user_gets_dash_dash_guard() -> None:
+    """A literal option-like username (e.g. "-p") is still guarded by `--`.
+
+    Without the `--`, `su -p -s /bin/sh "-p" -c ...` is parsed by both
+    util-linux and BusyBox `su` as a second `-p` flag rather than a target
+    user, and the command runs as uid 0.
+    """
+    exec_cmd = _build_exec_cmd(["echo", "hello world"], "-p")
+    assert exec_cmd == [
+        "/bin/sh",
+        "-c",
+        "u=-p; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo 'su: not found (checked /bin/su, /usr/bin/su)' >&2; exit 1; fi; exec \"$su\" -p -s /bin/sh -- \"$u\" -c 'echo '\"'\"'hello world'\"'\"''",
+    ]
+
+
+def _run_with_stub_su(
+    script: str, stub_su: str, *, path: str = "/nonexistent"
+) -> subprocess.CompletedProcess[str]:
+    """Run a wrapper script with `su` replaced by `stub_su` and PATH poisoned.
+
+    Poisoning PATH proves the wrapper never needs it: only the caller's
+    `env=` (simulated here as a broken PATH) should be visible to whatever
+    the wrapped command itself looks up, never to the wrapper's own
+    utilities.
+    """
+    patched = script.replace(_locate_su_snippet(), f"su={stub_su}")
+    return subprocess.run(
+        ["/bin/sh", "-c", patched],
+        capture_output=True,
+        text=True,
+        env={"PATH": path},
+    )
+
+
+@pytest.fixture
+def stub_su(tmp_path: Any) -> str:
+    """A fake `su` that dumps its argv, one element per line, and exits 0."""
+    stub = tmp_path / "stub_su"
+    stub.write_text('#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a"; done\n')
+    stub.chmod(0o755)
+    return str(stub)
+
+
+def test_su_wrapper_passes_option_like_user_as_positional_arg_after_dash_dash(
+    stub_su: str,
+) -> None:
+    """Regression: `su` actually receives `-- -p` in that order for user="-p".
+
+    This runs the real generated script through /bin/sh (with `su` stubbed
+    out and PATH poisoned), proving the `--` lands immediately before the
+    option-like username rather than trusting a substring match.
+    """
+    script = _build_exec_cmd(["echo", "hello world"], "-p")[2]
+    result = _run_with_stub_su(script, stub_su)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "-p",
+        "-s",
+        "/bin/sh",
+        "--",
+        "-p",
+        "-c",
+        "echo 'hello world'",
+    ]
+
+
+def test_su_wrapper_resolves_dash_prefixed_passwd_entry_safely(
+    stub_su: str, tmp_path: Any
+) -> None:
+    """Regression: a dash-prefixed passwd name still lands after `--`.
+
+    A malformed passwd entry naming its user "-p" (e.g. on a misconfigured
+    Alpine image) must not be reparsed by `su` as a flag: `--` guards the
+    resolved name exactly as it guards a literal option-like `user=`.
+    """
+    passwd = tmp_path / "passwd"
+    passwd.write_text("-p:x:1000:1000::/home/-p:/bin/sh\n")
+
+    script = _build_exec_cmd(["echo", "x"], "1000")[2].replace(
+        "/etc/passwd", str(passwd)
+    )
+    result = _run_with_stub_su(script, stub_su)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "-p",
+        "-s",
+        "/bin/sh",
+        "--",
+        "-p",
+        "-c",
+        "echo x",
+    ]
+
+
+def test_su_wrapper_fails_before_locating_su_when_uid_unmapped(
+    tmp_path: Any,
+) -> None:
+    """An unmapped uid exits loudly before the `su`-locate branch runs at all."""
+    passwd = tmp_path / "passwd"
+    passwd.write_text("root:x:0:0::/root:/bin/sh\n")
+
+    script = _build_exec_cmd(["echo", "x"], "1000")[2].replace(
+        "/etc/passwd", str(passwd)
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/nonexistent"},
+    )
+    assert result.returncode == 1
+    assert "su: user 1000 does not exist" in result.stderr
+    assert "not found (checked" not in result.stderr
+
+
+def test_locate_su_snippet_fails_clearly_when_no_candidate_is_executable() -> None:
+    """No absolute `su` candidate present: exit 1 with a clear message.
+
+    Never falls back to a PATH-based `su` lookup, which could silently
+    "succeed" against the wrong binary once PATH is caller-controlled.
+    """
+    script = (
+        f"{_locate_su_snippet(('/nonexistent/su1', '/nonexistent/su2'))}; "
+        'exec "$su" -p -s /bin/sh -- codex -c true'
+    )
+    result = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "su: not found (checked /nonexistent/su1, /nonexistent/su2)" in result.stderr
+
+
 @pytest.mark.asyncio
 async def test_exec_user_param_wraps_command_in_su(
     sandbox_env: ModalSandboxEnvironment,
 ) -> None:
-    """exec(user=...) wraps the command in `su`.
+    """exec(user=...) wraps the command in `su`, via _build_exec_cmd.
 
     Modal's Sandbox.exec() has no user parameter of its own, unlike the
     Docker and k8s providers, which switch the effective uid directly.
@@ -724,21 +899,14 @@ async def test_exec_user_param_wraps_command_in_su(
 
     await sandbox_env.exec(["echo", "hello world"], user="codex")
 
-    assert captured_argv == [
-        ("su", "-p", "-s", "/bin/sh", "codex", "-c", "echo 'hello world'")
-    ]
+    assert captured_argv == [tuple(_build_exec_cmd(["echo", "hello world"], "codex"))]
 
 
 @pytest.mark.asyncio
 async def test_exec_numeric_user_resolves_name_before_su(
     sandbox_env: ModalSandboxEnvironment,
 ) -> None:
-    """exec(user=<uid>) resolves the uid to a username inside the sandbox.
-
-    `su` accepts only usernames, but this method's contract is "username or
-    UID", so a numeric user is wrapped in a getent lookup that resolves the
-    uid against the sandbox's /etc/passwd and fails loudly when unmapped.
-    """
+    """exec(user=<uid>) resolves the uid to a username, via _build_exec_cmd."""
     captured_argv: list[tuple[str, ...]] = []
 
     async def capturing_exec(*args: str, **kwargs: Any) -> MagicMock:
@@ -761,16 +929,7 @@ async def test_exec_numeric_user_resolves_name_before_su(
 
     await sandbox_env.exec(["echo", "hello world"], user="1000")
 
-    assert len(captured_argv) == 1
-    argv = captured_argv[0]
-    assert argv[:2] == ("sh", "-c")
-    script = argv[2]
-    assert "getent passwd 1000" in script
-    assert "su -p -s /bin/sh" in script
-    assert (
-        "'echo '\"'\"'hello world'\"'\"''" in script or "echo 'hello world'" in script
-    )
-    assert "does not exist" in script
+    assert captured_argv == [tuple(_build_exec_cmd(["echo", "hello world"], "1000"))]
 
 
 @pytest.mark.asyncio
