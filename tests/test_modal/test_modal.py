@@ -712,7 +712,7 @@ def test_build_exec_cmd_named_user_wraps_in_su_with_dash_dash_guard() -> None:
     assert _build_exec_cmd(["echo", "hello world"], "codex") == [
         "/bin/sh",
         "-c",
-        "u=codex; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo 'su: not found (checked /bin/su, /usr/bin/su)' >&2; exit 1; fi; exec \"$su\" -p -s /bin/sh -- \"$u\" -c 'echo '\"'\"'hello world'\"'\"''",
+        'u=codex; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; path_q=""; rest="$PATH"; while true; do case "$rest" in *\\\'*) path_q="$path_q${rest%%\\\'*}\'\\\'\'"; rest="${rest#*\\\'}";; *) path_q="$path_q$rest"; break;; esac; done; exec "$su" -p -s /bin/sh -- "$u" -c "PATH=\'$path_q\'; export PATH; exec "\'echo \'"\'"\'hello world\'"\'"\'\'',
     ]
 
 
@@ -728,7 +728,7 @@ def test_build_exec_cmd_numeric_user_resolves_uid_before_su() -> None:
     assert exec_cmd == [
         "/bin/sh",
         "-c",
-        'u=""; while IFS=: read -r name _ passwd_uid _; do if [ "$passwd_uid" = 1000 ]; then u="$name"; break; fi; done < /etc/passwd; if [ -z "$u" ]; then echo \'su: user 1000 does not exist\' >&2; exit 1; fi; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; exec "$su" -p -s /bin/sh -- "$u" -c \'echo \'"\'"\'hello world\'"\'"\'\'',
+        'u=""; while IFS=: read -r name _ passwd_uid _; do if [ "$passwd_uid" = 1000 ]; then u="$name"; break; fi; done < /etc/passwd; if [ -z "$u" ]; then echo \'su: user 1000 does not exist\' >&2; exit 1; fi; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; path_q=""; rest="$PATH"; while true; do case "$rest" in *\\\'*) path_q="$path_q${rest%%\\\'*}\'\\\'\'"; rest="${rest#*\\\'}";; *) path_q="$path_q$rest"; break;; esac; done; exec "$su" -p -s /bin/sh -- "$u" -c "PATH=\'$path_q\'; export PATH; exec "\'echo \'"\'"\'hello world\'"\'"\'\'',
     ]
     script = exec_cmd[2]
     assert "getent" not in script
@@ -749,7 +749,7 @@ def test_build_exec_cmd_option_like_user_gets_dash_dash_guard() -> None:
     assert exec_cmd == [
         "/bin/sh",
         "-c",
-        "u=-p; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo 'su: not found (checked /bin/su, /usr/bin/su)' >&2; exit 1; fi; exec \"$su\" -p -s /bin/sh -- \"$u\" -c 'echo '\"'\"'hello world'\"'\"''",
+        'u=-p; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; path_q=""; rest="$PATH"; while true; do case "$rest" in *\\\'*) path_q="$path_q${rest%%\\\'*}\'\\\'\'"; rest="${rest#*\\\'}";; *) path_q="$path_q$rest"; break;; esac; done; exec "$su" -p -s /bin/sh -- "$u" -c "PATH=\'$path_q\'; export PATH; exec "\'echo \'"\'"\'hello world\'"\'"\'\'',
     ]
 
 
@@ -800,7 +800,7 @@ def test_su_wrapper_passes_option_like_user_as_positional_arg_after_dash_dash(
         "--",
         "-p",
         "-c",
-        "echo 'hello world'",
+        "PATH='/nonexistent'; export PATH; exec echo 'hello world'",
     ]
 
 
@@ -828,7 +828,7 @@ def test_su_wrapper_resolves_dash_prefixed_passwd_entry_safely(
         "--",
         "-p",
         "-c",
-        "echo x",
+        "PATH='/nonexistent'; export PATH; exec echo x",
     ]
 
 
@@ -866,6 +866,117 @@ def test_locate_su_snippet_fails_clearly_when_no_candidate_is_executable() -> No
     result = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True)
     assert result.returncode == 1
     assert "su: not found (checked /nonexistent/su1, /nonexistent/su2)" in result.stderr
+
+
+@pytest.fixture
+def path_resetting_stub_su(tmp_path: Any) -> str:
+    """A fake `su` that resets PATH like util-linux, then execs the payload.
+
+    Mimics util-linux `su -p`, whose PAM `pam_env` module (driven by
+    `/etc/login.defs`' `ENV_PATH`) resets PATH for the target user
+    regardless of `-p` -- unlike BusyBox `su`, which preserves it. The
+    wrapper's own construction guarantees the last two argv elements are
+    always `-c <payload>`, so grabbing them positionally reproduces
+    exactly what real `su` does with its `-c` argument.
+    """
+    stub = tmp_path / "path_resetting_stub_su"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'PATH="/usr/bin:/bin"; export PATH\n'
+        "shift $(($# - 1))\n"
+        'exec /bin/sh -c "$1"\n'
+    )
+    stub.chmod(0o755)
+    return str(stub)
+
+
+def test_su_wrapper_restores_caller_path_despite_util_linux_style_reset(
+    path_resetting_stub_su: str, tmp_path: Any
+) -> None:
+    """The wrapped command sees the caller's PATH even when `su` resets it.
+
+    A relative-name tool that exists only on a caller-supplied PATH entry
+    proves the inner `-c` payload's `PATH=...; export PATH;` re-assertion
+    actually took effect for the exec'd command, not merely that some
+    variable equal to the outer PATH exists somewhere in the process tree.
+    """
+    tool_dir = tmp_path / "custom_bin"
+    tool_dir.mkdir()
+    tool = tool_dir / "mytool"
+    tool.write_text("#!/bin/sh\nprintf 'ran with PATH=%s\\n' \"$PATH\"\n")
+    tool.chmod(0o755)
+
+    script = _build_exec_cmd(["mytool"], "codex")[2].replace(
+        _locate_su_snippet(), f"su={path_resetting_stub_su}"
+    )
+    caller_path = f"{tool_dir}:/usr/bin:/bin"
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": caller_path},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"ran with PATH={caller_path}\n"
+
+
+def test_su_wrapper_preserves_path_containing_space_and_single_quote(
+    path_resetting_stub_su: str, tmp_path: Any
+) -> None:
+    """A PATH entry with a space and a literal `'` survives the round trip.
+
+    `_capture_path_snippet` escapes `$PATH` for safe re-embedding between
+    single quotes; a directory name containing a `'` is the case that
+    breaks a naive `PATH='$PATH'` without that escaping.
+    """
+    tool_dir = tmp_path / "weird dir'here"
+    tool_dir.mkdir()
+    tool = tool_dir / "mytool"
+    tool.write_text("#!/bin/sh\nprintf 'ran with PATH=%s\\n' \"$PATH\"\n")
+    tool.chmod(0o755)
+
+    script = _build_exec_cmd(["mytool"], "codex")[2].replace(
+        _locate_su_snippet(), f"su={path_resetting_stub_su}"
+    )
+    caller_path = f"{tool_dir}:/usr/bin:/bin"
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": caller_path},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"ran with PATH={caller_path}\n"
+
+
+def test_su_wrapper_preserves_command_containing_shell_metacharacters(
+    path_resetting_stub_su: str, tmp_path: Any
+) -> None:
+    """A command with quotes, `$`, and backticks reaches it as literal bytes.
+
+    The PATH-restoring `-c` payload is built by quote-switching rather
+    than interpolating the already-quoted command inside a double-quoted
+    fragment, specifically so unescaped `"`, `$`, and `` ` `` in the
+    command are never re-expanded by either shell layer.
+    """
+    tool_dir = tmp_path / "custom_bin"
+    tool_dir.mkdir()
+    tool = tool_dir / "mytool"
+    tool.write_text("#!/bin/sh\nprintf 'args=%s\\n' \"$1\"\n")
+    tool.chmod(0o755)
+
+    tricky_arg = "say \"hi\" $HOME `whoami` and 'single'"
+    script = _build_exec_cmd(["mytool", tricky_arg], "codex")[2].replace(
+        _locate_su_snippet(), f"su={path_resetting_stub_su}"
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{tool_dir}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"args={tricky_arg}\n"
 
 
 @pytest.mark.asyncio

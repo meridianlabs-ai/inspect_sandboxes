@@ -136,6 +136,28 @@ def _resolve_uid_snippet(uid: str) -> str:
     )
 
 
+def _capture_path_snippet() -> str:
+    r"""POSIX-sh snippet that sets `$path_q` to `$PATH`, single-quote-escaped.
+
+    Escapes every `'` in `$PATH` to `'\''` -- the standard substitution for
+    safely re-embedding a value between single quotes -- using only `case`
+    and parameter expansion, never an external tool such as `sed`: at the
+    point this runs, PATH is still whatever the caller's `env=` supplied,
+    and a minimal image is not guaranteed to have anything beyond shell
+    builtins on it.
+    """
+    return (
+        'path_q=""; rest="$PATH"; '
+        "while true; do "
+        'case "$rest" in '
+        "*\\'*) path_q=\"$path_q${rest%%\\'*}'\\''\"; "
+        'rest="${rest#*\\\'}";; '
+        '*) path_q="$path_q$rest"; break;; '
+        "esac; "
+        "done"
+    )
+
+
 def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
     """Build the argv Modal's Sandbox.exec() should run to honour `user`.
 
@@ -158,10 +180,29 @@ def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
     BusyBox `su`.
 
     `su` is located via `_locate_su_snippet` (absolute paths only, never
-    $PATH). The caller's `env=` still fully reaches the wrapped command --
-    `su -p` preserves environment, and this wrapper resolves its own
-    utilities (`su`, plus the shell builtins `read`/`echo`/`[`/`exit`)
-    without needing PATH at all.
+    $PATH).
+
+    util-linux `su -p` does *not* reliably preserve `PATH`: on Debian and
+    Ubuntu, PAM's `pam_env` (driven by `/etc/login.defs`' `ENV_PATH`) resets
+    it for the target user regardless of `-p`, so a caller-supplied `env=`
+    with a custom PATH silently loses it and a relative-name command that
+    only exists on that PATH fails "not found" -- while BusyBox `su`
+    preserves PATH unconditionally, so the same wrapper must not regress
+    it there. The fix: capture the outer wrapper's PATH (still whatever
+    the caller's `env=` supplied, since this runs before `su`) into
+    `$path_q` via `_capture_path_snippet` -- single-quote-escaped so it
+    round-trips safely -- and re-assert it as the first statement *inside*
+    `su`'s `-c` payload, before `exec`ing the wrapped command. That payload
+    is built by quote-switching (a double-quoted `PATH='$path_q'; export
+    PATH; exec ` fragment, glued with no intervening space to the already
+    single-quote-escaped `quoted_cmd`) rather than interpolating
+    `quoted_cmd` inside the double-quoted fragment, because `quoted_cmd`
+    may itself contain unescaped `"`, `$`, or `` ` `` that would otherwise
+    be re-expanded by the outer shell before `su` ever sees them.
+
+    This wrapper resolves its own utilities (`su`, plus the shell builtins
+    `read`/`echo`/`case`/`[`/`exit`) without needing PATH at all, so none
+    of the above depends on PATH being sane before it is restored.
     """
     if user is None:
         return cmd
@@ -173,8 +214,9 @@ def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
         else f"u={shlex.quote(user)}; "
     )
     script = (
-        f"{set_user}{_locate_su_snippet()}; "
-        f'exec "$su" -p -s /bin/sh -- "$u" -c {quoted_cmd}'
+        f"{set_user}{_locate_su_snippet()}; {_capture_path_snippet()}; "
+        f'exec "$su" -p -s /bin/sh -- "$u" -c '
+        f"\"PATH='$path_q'; export PATH; exec \"{quoted_cmd}"
     )
     return ["/bin/sh", "-c", script]
 
