@@ -12,7 +12,7 @@
 
 - Before opening a non-trivial PR, run at least one code review pass in a fresh context—a reviewer that hasn't seen the authoring conversation (e.g. `/code-review` in Claude Code, or a subagent)—on a strong (frontier-class) model; small fast-tier models rarely surface real issues
 - Fix or explicitly dismiss each finding before opening; prefer multiple fresh-context passes for large changes, since each tends to catch what the last missed
-- This pre-open pass is separate from CI: `claude-review.yml` auto-reviews every PR when it opens (or on an `@review` comment)—don't count that CI run as your pass
+- This pre-open pass is separate from CI: `claude-review.yml` auto-reviews same-repo, non-draft PRs when they open (fork PRs need a maintainer to trigger it with a comment containing the review keyword)—don't count that CI run as your pass, and don't write the trigger token in PR comments unless you mean to invoke it
 - Include an `### Agent review` section in every PR description: reviewer model/tool, whether it ran in a fresh context and/or on a different model from the author, pass count, and findings—how many fixed, how many dismissed with a one-line reason each
 - If no review pass was run, say so. Never report a review that didn't happen—"reviewed, looks good" is worse than disclosing none
 
