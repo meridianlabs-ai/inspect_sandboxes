@@ -15,6 +15,7 @@ For sandbox concepts and the `SandboxEnvironment` API, see the [Inspect AI sandb
 | [Daytona](daytona.qmd) | `daytona` | Yes (DinD) | Daytona account + API key |
 | [E2B](e2b.qmd) | `e2b` | Yes (DinD) | E2B account + API key |
 | [Modal](modal.qmd) | `modal` | No ([why?](modal.qmd#modal-limitations)) | Modal account |
+| [Runloop](runloop.qmd) | `runloop` | Yes (DinD) | Runloop account + API key |
 
 ## Installation
 
@@ -109,5 +110,31 @@ eval(task)
 ```
 
 See the [Modal](modal.qmd) provider page for full configuration options.
+
+## Runloop
+
+Authenticate by setting your API key (one-time):
+
+```bash
+export RUNLOOP_API_KEY=your_api_key
+```
+
+Run a minimal evaluation:
+
+```python
+from inspect_ai import Task, eval
+from inspect_ai.dataset import Sample
+from inspect_ai.solver import generate
+
+task = Task(
+    dataset=[Sample(input="What is 2+2?", target="4")],
+    solver=[generate()],
+    sandbox="runloop",
+)
+
+eval(task)
+```
+
+See the [Runloop](runloop.qmd) provider page for full configuration options.
 
 :::
