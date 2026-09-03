@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import shlex
 import sys
 from contextvars import ContextVar
 from logging import getLogger
@@ -92,6 +93,120 @@ _exec_retry = retry(
     ),
     reraise=True,
 )
+
+# Absolute candidates for `su`, in preference order. Resolved only through
+# these paths -- never through $PATH, which exec()'s caller-supplied `env=`
+# may replace before this wrapper runs. A PATH-based lookup would then miss
+# a `su` that is actually present in the sandbox (observed as a spurious
+# "su: not found" even though direct exec of the same image succeeds).
+_SU_CANDIDATES = ("/bin/su", "/usr/bin/su")
+
+
+def _locate_su_snippet(candidates: tuple[str, ...] = _SU_CANDIDATES) -> str:
+    """POSIX-sh snippet that sets `$su` to the first executable candidate.
+
+    Exits with a clear error -- rather than falling back to a PATH-based
+    `su` lookup -- if none of `candidates` is executable.
+    """
+    branches = [
+        f"if [ -x {path} ]; then su={path};"
+        if index == 0
+        else f" elif [ -x {path} ]; then su={path};"
+        for index, path in enumerate(candidates)
+    ]
+    checked = ", ".join(candidates)
+    return (
+        "".join(branches)
+        + f" else echo 'su: not found (checked {checked})' >&2; exit 1; fi"
+    )
+
+
+def _resolve_uid_snippet(uid: str) -> str:
+    """POSIX-sh snippet resolving `uid` to `$u` via a plain /etc/passwd scan.
+
+    Avoids `getent`, which minimal images (e.g. bare `busybox:1.36`) lack.
+    Fails loudly, before `$u` is ever used, when the uid is unmapped.
+
+    The `|| [ -n "$name" ]` guards the last line of a passwd file that has
+    no trailing newline: `read` populates its variables but still returns
+    non-zero at EOF, so without this guard the loop body never runs for
+    that final entry and a uid on the last line resolves as "not found".
+    """
+    quoted_uid = shlex.quote(uid)
+    return (
+        'u=""; while IFS=: read -r name _ passwd_uid _ || [ -n "$name" ]; do '
+        f'if [ "$passwd_uid" = {quoted_uid} ]; then u="$name"; break; fi; '
+        "done < /etc/passwd; "
+        f"if [ -z \"$u\" ]; then echo 'su: user {uid} does not exist' >&2; exit 1; fi"
+    )
+
+
+def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
+    """Build the argv Modal's Sandbox.exec() should run to honour `user`.
+
+    Modal's Sandbox.exec() has no user parameter, so a user switch is
+    emulated with `su`. Without `-l`, `su` preserves the caller's cwd and
+    (with `-p`) its environment, so this only changes the effective uid --
+    matching the Docker and k8s providers, which scope `user=` to uid
+    rather than a fresh login environment.
+
+    `su` accepts only usernames, while this method's contract is "username
+    or UID", so a numeric user is resolved to its username inside the
+    sandbox (the uid->name mapping lives there, not on the host) via
+    `_resolve_uid_snippet`. An unmapped uid fails loudly rather than
+    silently running as the container default. `isascii()` is required
+    alongside `isdigit()` because Python's `str.isdigit()` is also true for
+    non-ASCII digits (Arabic-Indic digits, superscripts like `"\u00b2"`),
+    which would otherwise be routed down the uid-resolution path and fail
+    an `/etc/passwd` comparison that can never match.
+
+    The `--` immediately before `"$u"` is load-bearing: without it, an
+    option-like username (a literal "-p", or a malformed passwd entry whose
+    name starts with "-") is parsed by `su` as another flag instead of the
+    target user, and the command runs as uid 0 on both util-linux and
+    BusyBox `su`.
+
+    `su` is located via `_locate_su_snippet` (absolute paths only, never
+    $PATH).
+
+    util-linux `su -p` does *not* reliably preserve `PATH`: on Debian and
+    Ubuntu, PAM's `pam_env` (driven by `/etc/login.defs`' `ENV_PATH`) resets
+    it for the target user regardless of `-p`, so a caller-supplied `env=`
+    with a custom PATH silently loses it and a relative-name command that
+    only exists on that PATH fails "not found" -- while BusyBox `su`
+    preserves PATH unconditionally, so the same wrapper must not regress it
+    there. The fix: capture the outer wrapper's PATH (still whatever the
+    caller's `env=` supplied, since this runs before `su`) into the
+    `_INSPECT_SB_PATH` environment variable -- which `su -p` passes through
+    unchanged, since PAM only resets `PATH` itself and BusyBox `su -p`
+    preserves everything -- then re-assert it as `PATH` inside `su`'s `-c`
+    payload, before `exec`ing the wrapped command. The whole payload is
+    `shlex.quote`d exactly once on the Python side, so `$_INSPECT_SB_PATH`
+    and the wrapped command both survive the outer shell untouched with no
+    manual quote-escaping to maintain.
+
+    This wrapper resolves its own utilities (`su`, plus the shell builtins
+    `read`/`echo`/`case`/`[`/`exit`) without needing PATH at all, so none
+    of the above depends on PATH being sane before it is restored.
+    """
+    if user is None:
+        return cmd
+
+    set_user = (
+        _resolve_uid_snippet(user) + "; "
+        if user.isascii() and user.isdigit()
+        else f"u={shlex.quote(user)}; "
+    )
+    payload = (
+        'PATH="$_INSPECT_SB_PATH"; export PATH; unset _INSPECT_SB_PATH; exec '
+        + shlex.join(cmd)
+    )
+    script = (
+        f"{set_user}{_locate_su_snippet()}; "
+        f'_INSPECT_SB_PATH="$PATH"; export _INSPECT_SB_PATH; '
+        f'exec "$su" -p -s /bin/sh -- "$u" -c {shlex.quote(payload)}'
+    )
+    return ["/bin/sh", "-c", script]
 
 
 @sandboxenv(name="modal")
@@ -329,12 +444,10 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
-        if user is not None:
-            warn_once(
-                logger,
-                "The 'user' parameter is ignored in ModalSandboxEnvironment. "
-                "Commands will run as the container's default user.",
-            )
+        # See _build_exec_cmd's docstring for the full rationale: user= is
+        # emulated via `su` because Modal's Sandbox.exec() has no user
+        # parameter of its own.
+        exec_cmd = _build_exec_cmd(cmd, user)
 
         # Modal requires absolute paths for workdir
         workdir = cwd
@@ -351,7 +464,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             modal_env = cast(dict[str, str | None] | None, env)
 
             process = await self.sandbox.exec.aio(
-                *cmd,
+                *exec_cmd,
                 workdir=workdir,
                 env=modal_env,
             )
