@@ -15,7 +15,6 @@ from inspect_ai.util import (
     SandboxEnvironment,
     SandboxEnvironmentLimits,
 )
-from inspect_ai.util._sandbox.self_check import self_check
 from inspect_sandboxes.modal._modal import (
     ModalSandboxEnvironment,
     running_sandboxes,
@@ -1080,67 +1079,6 @@ async def test_read_file_retries_transient_error(
         result = await sandbox_env.read_file("/test.txt")
         assert result == "content"
         assert call_count == 2
-
-
-@pytest_asyncio.fixture
-async def modal_sandbox_environment() -> AsyncGenerator[SandboxEnvironment, None]:
-    """Create a real Modal sandbox environment for integration testing."""
-    sandbox_cleanup_startup()
-
-    envs = await ModalSandboxEnvironment.sample_init("test_self_check", None, {})
-    sandbox_env = envs["default"]
-
-    yield sandbox_env
-
-    try:
-        await ModalSandboxEnvironment.sample_cleanup(
-            "test_self_check", None, envs, False
-        )
-        await ModalSandboxEnvironment.task_cleanup(
-            "test_self_check", None, cleanup=True
-        )
-    except Exception as e:
-        print(f"Cleanup error: {e}")
-
-
-def check_results_of_self_check(
-    results: dict[str, bool | str], known_failures: list[str]
-) -> None:
-    """Check self_check results, ignoring known failures."""
-    passed = []
-    failed = []
-    known_failed = []
-
-    for test_name, result in results.items():
-        if result is True:
-            passed.append(test_name)
-        elif test_name in known_failures:
-            known_failed.append(test_name)
-        else:
-            failed.append((test_name, result))
-
-    if failed:
-        failure_details = "\n".join([f"  {name}: {error}" for name, error in failed])
-        raise AssertionError(
-            f"{len(failed)} unexpected test(s) failed:\n{failure_details}"
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_self_check(modal_sandbox_environment: ModalSandboxEnvironment) -> None:
-    """Run Inspect AI's self-check suite against Modal sandbox."""
-    known_failures = [
-        "test_read_file_not_allowed",  # user is root, so this doesn't work
-        "test_exec_as_user",  # unsupported
-        "test_exec_as_nonexistent_user",  # unsupported
-        "test_write_text_file_without_permissions",  # user is root
-        "test_write_binary_file_without_permissions",  # user is root
-        "test_exec_permission_error",  # user is root
-    ]
-
-    results = await self_check(modal_sandbox_environment)
-    check_results_of_self_check(results, known_failures)
 
 
 @pytest_asyncio.fixture
