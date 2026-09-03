@@ -126,35 +126,18 @@ def _resolve_uid_snippet(uid: str) -> str:
 
     Avoids `getent`, which minimal images (e.g. bare `busybox:1.36`) lack.
     Fails loudly, before `$u` is ever used, when the uid is unmapped.
+
+    The `|| [ -n "$name" ]` guards the last line of a passwd file that has
+    no trailing newline: `read` populates its variables but still returns
+    non-zero at EOF, so without this guard the loop body never runs for
+    that final entry and a uid on the last line resolves as "not found".
     """
     quoted_uid = shlex.quote(uid)
     return (
-        'u=""; while IFS=: read -r name _ passwd_uid _; do '
+        'u=""; while IFS=: read -r name _ passwd_uid _ || [ -n "$name" ]; do '
         f'if [ "$passwd_uid" = {quoted_uid} ]; then u="$name"; break; fi; '
         "done < /etc/passwd; "
         f"if [ -z \"$u\" ]; then echo 'su: user {uid} does not exist' >&2; exit 1; fi"
-    )
-
-
-def _capture_path_snippet() -> str:
-    r"""POSIX-sh snippet that sets `$path_q` to `$PATH`, single-quote-escaped.
-
-    Escapes every `'` in `$PATH` to `'\''` -- the standard substitution for
-    safely re-embedding a value between single quotes -- using only `case`
-    and parameter expansion, never an external tool such as `sed`: at the
-    point this runs, PATH is still whatever the caller's `env=` supplied,
-    and a minimal image is not guaranteed to have anything beyond shell
-    builtins on it.
-    """
-    return (
-        'path_q=""; rest="$PATH"; '
-        "while true; do "
-        'case "$rest" in '
-        "*\\'*) path_q=\"$path_q${rest%%\\'*}'\\''\"; "
-        'rest="${rest#*\\\'}";; '
-        '*) path_q="$path_q$rest"; break;; '
-        "esac; "
-        "done"
     )
 
 
@@ -171,7 +154,11 @@ def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
     or UID", so a numeric user is resolved to its username inside the
     sandbox (the uid->name mapping lives there, not on the host) via
     `_resolve_uid_snippet`. An unmapped uid fails loudly rather than
-    silently running as the container default.
+    silently running as the container default. `isascii()` is required
+    alongside `isdigit()` because Python's `str.isdigit()` is also true for
+    non-ASCII digits (Arabic-Indic digits, superscripts like `"\u00b2"`),
+    which would otherwise be routed down the uid-resolution path and fail
+    an `/etc/passwd` comparison that can never match.
 
     The `--` immediately before `"$u"` is load-bearing: without it, an
     option-like username (a literal "-p", or a malformed passwd entry whose
@@ -187,18 +174,16 @@ def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
     it for the target user regardless of `-p`, so a caller-supplied `env=`
     with a custom PATH silently loses it and a relative-name command that
     only exists on that PATH fails "not found" -- while BusyBox `su`
-    preserves PATH unconditionally, so the same wrapper must not regress
-    it there. The fix: capture the outer wrapper's PATH (still whatever
-    the caller's `env=` supplied, since this runs before `su`) into
-    `$path_q` via `_capture_path_snippet` -- single-quote-escaped so it
-    round-trips safely -- and re-assert it as the first statement *inside*
-    `su`'s `-c` payload, before `exec`ing the wrapped command. That payload
-    is built by quote-switching (a double-quoted `PATH='$path_q'; export
-    PATH; exec ` fragment, glued with no intervening space to the already
-    single-quote-escaped `quoted_cmd`) rather than interpolating
-    `quoted_cmd` inside the double-quoted fragment, because `quoted_cmd`
-    may itself contain unescaped `"`, `$`, or `` ` `` that would otherwise
-    be re-expanded by the outer shell before `su` ever sees them.
+    preserves PATH unconditionally, so the same wrapper must not regress it
+    there. The fix: capture the outer wrapper's PATH (still whatever the
+    caller's `env=` supplied, since this runs before `su`) into the
+    `_INSPECT_SB_PATH` environment variable -- which `su -p` passes through
+    unchanged, since PAM only resets `PATH` itself and BusyBox `su -p`
+    preserves everything -- then re-assert it as `PATH` inside `su`'s `-c`
+    payload, before `exec`ing the wrapped command. The whole payload is
+    `shlex.quote`d exactly once on the Python side, so `$_INSPECT_SB_PATH`
+    and the wrapped command both survive the outer shell untouched with no
+    manual quote-escaping to maintain.
 
     This wrapper resolves its own utilities (`su`, plus the shell builtins
     `read`/`echo`/`case`/`[`/`exit`) without needing PATH at all, so none
@@ -207,16 +192,19 @@ def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
     if user is None:
         return cmd
 
-    quoted_cmd = shlex.quote(shlex.join(cmd))
     set_user = (
         _resolve_uid_snippet(user) + "; "
-        if user.isdigit()
+        if user.isascii() and user.isdigit()
         else f"u={shlex.quote(user)}; "
     )
+    payload = (
+        'PATH="$_INSPECT_SB_PATH"; export PATH; unset _INSPECT_SB_PATH; exec '
+        + shlex.join(cmd)
+    )
     script = (
-        f"{set_user}{_locate_su_snippet()}; {_capture_path_snippet()}; "
-        f'exec "$su" -p -s /bin/sh -- "$u" -c '
-        f"\"PATH='$path_q'; export PATH; exec \"{quoted_cmd}"
+        f"{set_user}{_locate_su_snippet()}; "
+        f'_INSPECT_SB_PATH="$PATH"; export _INSPECT_SB_PATH; '
+        f'exec "$su" -p -s /bin/sh -- "$u" -c {shlex.quote(payload)}'
     )
     return ["/bin/sh", "-c", script]
 

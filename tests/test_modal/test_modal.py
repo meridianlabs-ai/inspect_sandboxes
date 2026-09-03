@@ -1,5 +1,6 @@
 """Tests for Modal sandbox environment implementation."""
 
+import shlex
 import subprocess
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -712,7 +713,7 @@ def test_build_exec_cmd_named_user_wraps_in_su_with_dash_dash_guard() -> None:
     assert _build_exec_cmd(["echo", "hello world"], "codex") == [
         "/bin/sh",
         "-c",
-        'u=codex; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; path_q=""; rest="$PATH"; while true; do case "$rest" in *\\\'*) path_q="$path_q${rest%%\\\'*}\'\\\'\'"; rest="${rest#*\\\'}";; *) path_q="$path_q$rest"; break;; esac; done; exec "$su" -p -s /bin/sh -- "$u" -c "PATH=\'$path_q\'; export PATH; exec "\'echo \'"\'"\'hello world\'"\'"\'\'',
+        'u=codex; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; _INSPECT_SB_PATH="$PATH"; export _INSPECT_SB_PATH; exec "$su" -p -s /bin/sh -- "$u" -c \'PATH="$_INSPECT_SB_PATH"; export PATH; unset _INSPECT_SB_PATH; exec echo \'"\'"\'hello world\'"\'"\'\'',
     ]
 
 
@@ -728,7 +729,7 @@ def test_build_exec_cmd_numeric_user_resolves_uid_before_su() -> None:
     assert exec_cmd == [
         "/bin/sh",
         "-c",
-        'u=""; while IFS=: read -r name _ passwd_uid _; do if [ "$passwd_uid" = 1000 ]; then u="$name"; break; fi; done < /etc/passwd; if [ -z "$u" ]; then echo \'su: user 1000 does not exist\' >&2; exit 1; fi; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; path_q=""; rest="$PATH"; while true; do case "$rest" in *\\\'*) path_q="$path_q${rest%%\\\'*}\'\\\'\'"; rest="${rest#*\\\'}";; *) path_q="$path_q$rest"; break;; esac; done; exec "$su" -p -s /bin/sh -- "$u" -c "PATH=\'$path_q\'; export PATH; exec "\'echo \'"\'"\'hello world\'"\'"\'\'',
+        'u=""; while IFS=: read -r name _ passwd_uid _ || [ -n "$name" ]; do if [ "$passwd_uid" = 1000 ]; then u="$name"; break; fi; done < /etc/passwd; if [ -z "$u" ]; then echo \'su: user 1000 does not exist\' >&2; exit 1; fi; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; _INSPECT_SB_PATH="$PATH"; export _INSPECT_SB_PATH; exec "$su" -p -s /bin/sh -- "$u" -c \'PATH="$_INSPECT_SB_PATH"; export PATH; unset _INSPECT_SB_PATH; exec echo \'"\'"\'hello world\'"\'"\'\'',
     ]
     script = exec_cmd[2]
     assert "getent" not in script
@@ -736,6 +737,20 @@ def test_build_exec_cmd_numeric_user_resolves_uid_before_su() -> None:
     assert 'exec "$su" -p -s /bin/sh -- "$u" -c' in script
     # The uid-not-found exit happens before the su-locate branch even runs.
     assert script.index("does not exist") < script.index("su: not found")
+
+
+def test_build_exec_cmd_non_ascii_digit_user_is_treated_as_a_username() -> None:
+    """A non-ASCII digit `user=` is treated as a username, not a uid.
+
+    `str.isdigit()` alone is also true for non-ASCII digits (e.g. the
+    Arabic-Indic digit "\u0661" or the superscript "\u00b2"), which would
+    otherwise be routed down the uid-resolution path where the shlex-quoted
+    comparison can never match an ASCII `/etc/passwd` uid.
+    """
+    exec_cmd = _build_exec_cmd(["echo", "hi"], "\u00b2")
+    script = exec_cmd[2]
+    assert script.startswith("u=" + shlex.quote("\u00b2") + "; ")
+    assert "read -r name" not in script
 
 
 def test_build_exec_cmd_option_like_user_gets_dash_dash_guard() -> None:
@@ -749,7 +764,7 @@ def test_build_exec_cmd_option_like_user_gets_dash_dash_guard() -> None:
     assert exec_cmd == [
         "/bin/sh",
         "-c",
-        'u=-p; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; path_q=""; rest="$PATH"; while true; do case "$rest" in *\\\'*) path_q="$path_q${rest%%\\\'*}\'\\\'\'"; rest="${rest#*\\\'}";; *) path_q="$path_q$rest"; break;; esac; done; exec "$su" -p -s /bin/sh -- "$u" -c "PATH=\'$path_q\'; export PATH; exec "\'echo \'"\'"\'hello world\'"\'"\'\'',
+        'u=-p; if [ -x /bin/su ]; then su=/bin/su; elif [ -x /usr/bin/su ]; then su=/usr/bin/su; else echo \'su: not found (checked /bin/su, /usr/bin/su)\' >&2; exit 1; fi; _INSPECT_SB_PATH="$PATH"; export _INSPECT_SB_PATH; exec "$su" -p -s /bin/sh -- "$u" -c \'PATH="$_INSPECT_SB_PATH"; export PATH; unset _INSPECT_SB_PATH; exec echo \'"\'"\'hello world\'"\'"\'\'',
     ]
 
 
@@ -788,7 +803,10 @@ def test_su_wrapper_passes_option_like_user_as_positional_arg_after_dash_dash(
 
     This runs the real generated script through /bin/sh (with `su` stubbed
     out and PATH poisoned), proving the `--` lands immediately before the
-    option-like username rather than trusting a substring match.
+    option-like username rather than trusting a substring match. The
+    stubbed `su` only dumps argv rather than exec'ing the payload, so the
+    `-c` argument arrives unexpanded (`$_INSPECT_SB_PATH` is deferred to
+    the real `su`'s inner shell, never this outer one).
     """
     script = _build_exec_cmd(["echo", "hello world"], "-p")[2]
     result = _run_with_stub_su(script, stub_su)
@@ -800,7 +818,7 @@ def test_su_wrapper_passes_option_like_user_as_positional_arg_after_dash_dash(
         "--",
         "-p",
         "-c",
-        "PATH='/nonexistent'; export PATH; exec echo 'hello world'",
+        "PATH=\"$_INSPECT_SB_PATH\"; export PATH; unset _INSPECT_SB_PATH; exec echo 'hello world'",
     ]
 
 
@@ -828,7 +846,40 @@ def test_su_wrapper_resolves_dash_prefixed_passwd_entry_safely(
         "--",
         "-p",
         "-c",
-        "PATH='/nonexistent'; export PATH; exec echo x",
+        'PATH="$_INSPECT_SB_PATH"; export PATH; unset _INSPECT_SB_PATH; exec echo x',
+    ]
+
+
+def test_su_wrapper_resolves_uid_on_last_line_of_passwd_without_trailing_newline(
+    stub_su: str, tmp_path: Any
+) -> None:
+    """Regression: a passwd file missing its final newline still resolves.
+
+    `read` returns non-zero at EOF even when it populated its variables
+    from a trailing line with no newline, so a naive `while read; do`
+    silently skips that last entry. If the target uid is on that line, the
+    wrapper must still resolve it rather than reporting "does not exist"
+    for a user that is actually present.
+    """
+    passwd = tmp_path / "passwd"
+    # No trailing newline; the resolved uid (1000) is on this last line.
+    passwd.write_text(
+        "root:x:0:0::/root:/bin/sh\ncodex:x:1000:1000::/home/codex:/bin/sh"
+    )
+
+    script = _build_exec_cmd(["echo", "hi"], "1000")[2].replace(
+        "/etc/passwd", str(passwd)
+    )
+    result = _run_with_stub_su(script, stub_su)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "-p",
+        "-s",
+        "/bin/sh",
+        "--",
+        "codex",
+        "-c",
+        'PATH="$_INSPECT_SB_PATH"; export PATH; unset _INSPECT_SB_PATH; exec echo hi',
     ]
 
 
@@ -925,9 +976,11 @@ def test_su_wrapper_preserves_path_containing_space_and_single_quote(
 ) -> None:
     """A PATH entry with a space and a literal `'` survives the round trip.
 
-    `_capture_path_snippet` escapes `$PATH` for safe re-embedding between
-    single quotes; a directory name containing a `'` is the case that
-    breaks a naive `PATH='$PATH'` without that escaping.
+    PATH is carried through a real shell variable (`_INSPECT_SB_PATH`,
+    re-asserted as `PATH` inside `su`'s `-c` payload via a double-quoted
+    reference) rather than interpolated as literal text, so a directory
+    name containing a space or a `'` needs no special-case escaping to
+    survive the round trip.
     """
     tool_dir = tmp_path / "weird dir'here"
     tool_dir.mkdir()
@@ -954,10 +1007,10 @@ def test_su_wrapper_preserves_command_containing_shell_metacharacters(
 ) -> None:
     """A command with quotes, `$`, and backticks reaches it as literal bytes.
 
-    The PATH-restoring `-c` payload is built by quote-switching rather
-    than interpolating the already-quoted command inside a double-quoted
-    fragment, specifically so unescaped `"`, `$`, and `` ` `` in the
-    command are never re-expanded by either shell layer.
+    The `-c` payload -- the PATH-restoring prefix plus the raw joined
+    command -- is `shlex.quote`d exactly once on the Python side, so
+    unescaped `"`, `$`, and `` ` `` in the command are never re-expanded by
+    either shell layer.
     """
     tool_dir = tmp_path / "custom_bin"
     tool_dir.mkdir()
@@ -979,14 +1032,14 @@ def test_su_wrapper_preserves_command_containing_shell_metacharacters(
     assert result.stdout == f"args={tricky_arg}\n"
 
 
-@pytest.mark.asyncio
-async def test_exec_user_param_wraps_command_in_su(
+@pytest.fixture
+def captured_exec_argv(
     sandbox_env: ModalSandboxEnvironment,
-) -> None:
-    """exec(user=...) wraps the command in `su`, via _build_exec_cmd.
+) -> list[tuple[str, ...]]:
+    """Wire `sandbox_env.sandbox.exec` to a no-op mock that records argv.
 
-    Modal's Sandbox.exec() has no user parameter of its own, unlike the
-    Docker and k8s providers, which switch the effective uid directly.
+    Shared by the `user=`/`_build_exec_cmd` argv tests below, so each keeps
+    only its one interesting assertion.
     """
     captured_argv: list[tuple[str, ...]] = []
 
@@ -1007,70 +1060,48 @@ async def test_exec_user_param_wraps_command_in_su(
 
     sandbox_env.sandbox.exec = MagicMock()
     sandbox_env.sandbox.exec.aio = capturing_exec
+    return captured_argv
 
+
+@pytest.mark.asyncio
+async def test_exec_user_param_wraps_command_in_su(
+    sandbox_env: ModalSandboxEnvironment,
+    captured_exec_argv: list[tuple[str, ...]],
+) -> None:
+    """exec(user=...) wraps the command in `su`, via _build_exec_cmd.
+
+    Modal's Sandbox.exec() has no user parameter of its own, unlike the
+    Docker and k8s providers, which switch the effective uid directly.
+    """
     await sandbox_env.exec(["echo", "hello world"], user="codex")
 
-    assert captured_argv == [tuple(_build_exec_cmd(["echo", "hello world"], "codex"))]
+    assert captured_exec_argv == [
+        tuple(_build_exec_cmd(["echo", "hello world"], "codex"))
+    ]
 
 
 @pytest.mark.asyncio
 async def test_exec_numeric_user_resolves_name_before_su(
     sandbox_env: ModalSandboxEnvironment,
+    captured_exec_argv: list[tuple[str, ...]],
 ) -> None:
     """exec(user=<uid>) resolves the uid to a username, via _build_exec_cmd."""
-    captured_argv: list[tuple[str, ...]] = []
-
-    async def capturing_exec(*args: str, **kwargs: Any) -> MagicMock:
-        captured_argv.append(args)
-        process = MagicMock()
-        process.returncode = 0
-        process.stdout = MagicMock()
-        process.stdout.read = AsyncMock(return_value="")
-        process.stderr = MagicMock()
-        process.stderr.read = AsyncMock(return_value="")
-        process.stdin = MagicMock()
-        process.stdin.write = MagicMock()
-        process.stdin.write_eof = MagicMock()
-        process.stdin.drain = AsyncMock()
-        process.wait = AsyncMock()
-        return process
-
-    sandbox_env.sandbox.exec = MagicMock()
-    sandbox_env.sandbox.exec.aio = capturing_exec
-
     await sandbox_env.exec(["echo", "hello world"], user="1000")
 
-    assert captured_argv == [tuple(_build_exec_cmd(["echo", "hello world"], "1000"))]
+    assert captured_exec_argv == [
+        tuple(_build_exec_cmd(["echo", "hello world"], "1000"))
+    ]
 
 
 @pytest.mark.asyncio
 async def test_exec_without_user_param_runs_command_directly(
     sandbox_env: ModalSandboxEnvironment,
+    captured_exec_argv: list[tuple[str, ...]],
 ) -> None:
     """exec() with no user leaves the command untouched (no su wrapping)."""
-    captured_argv: list[tuple[str, ...]] = []
-
-    async def capturing_exec(*args: str, **kwargs: Any) -> MagicMock:
-        captured_argv.append(args)
-        process = MagicMock()
-        process.returncode = 0
-        process.stdout = MagicMock()
-        process.stdout.read = AsyncMock(return_value="")
-        process.stderr = MagicMock()
-        process.stderr.read = AsyncMock(return_value="")
-        process.stdin = MagicMock()
-        process.stdin.write = MagicMock()
-        process.stdin.write_eof = MagicMock()
-        process.stdin.drain = AsyncMock()
-        process.wait = AsyncMock()
-        return process
-
-    sandbox_env.sandbox.exec = MagicMock()
-    sandbox_env.sandbox.exec.aio = capturing_exec
-
     await sandbox_env.exec(["echo", "hello world"])
 
-    assert captured_argv == [("echo", "hello world")]
+    assert captured_exec_argv == [("echo", "hello world")]
 
 
 @pytest.mark.asyncio
