@@ -112,6 +112,23 @@ def convert_compose_to_modal_params(
             else shlex.split(service.command)
         )
 
+    if service.entrypoint is not None:
+        image = params.get("image")
+        entrypoint = (
+            service.entrypoint
+            if isinstance(service.entrypoint, list)
+            else shlex.split(service.entrypoint)
+        )
+
+        # Sandbox.create() treats positional arguments as the container's main
+        # command, while a registry image may retain its Docker ENTRYPOINT and
+        # CMD. Clear those inherited defaults and launch the Compose entrypoint
+        # followed by its command explicitly. This also handles an empty
+        # entrypoint, which Compose defines as suppressing both image defaults.
+        if image is not None:
+            params["image"] = image.entrypoint([]).cmd([])
+        command = [*entrypoint, *command]
+
     if service.working_dir:
         params["workdir"] = service.working_dir
 
