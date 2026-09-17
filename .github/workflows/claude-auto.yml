@@ -2,7 +2,8 @@
 # @auto autonomous loop (design/auto-agent.md). Independent of the dev agent
 # (claude.yml) and reviewer (claude-review.yml).
 #
-# Requires the MARVIN_TOKEN org secret scoped to this repo (same as claude.yml).
+# Requires the machine account's org secrets scoped to this repo (same as
+# claude.yml): MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY.
 #
 # REQUIRED EDIT: under `workflows:` list THIS repo's CI workflow name(s) — the
 # `name:` field of each CI workflow (not its filename). workflow_run is the only
@@ -42,16 +43,20 @@ jobs:
       id-token: write
       actions: read
     secrets:
-      MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+      MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+      MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+      # codex engine (design/codex-engine.md in the agents repo):
+      # consumed only on items labeled engine:codex; optional.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     with:
       head_branch: ${{ github.event.workflow_run.head_branch }}
       pr_number: ${{ github.event.workflow_run.pull_requests[0].number }}
       ci_run_id: ${{ github.event.workflow_run.id }}
 
-  # Review -> fix / handoff. Fire only on the reviewer's marked summary comment
-  # on a PR. Cheap gate here (it's a PR, author is the reviewer, body has the
-  # marker); the reusable workflow does the rest (same-repo, `auto` label, round
-  # cap). Adjust the reviewer login if yours differs from claude[bot].
+  # Review -> fix / handoff. The marker is a cheap router (it's forgeable — only
+  # the reviewer posts it in practice); the reusable workflow does the authoritative
+  # gating (comment author == reviewer, same-repo, `auto` label, round cap), so
+  # the security boundary is there, not here.
   review-fix:
     if: >-
       github.event_name == 'issue_comment' &&
@@ -65,7 +70,11 @@ jobs:
       id-token: write
       actions: read
     secrets:
-      MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+      MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+      MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+      # codex engine (design/codex-engine.md in the agents repo):
+      # consumed only on items labeled engine:codex; optional.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     with:
       pr_number: ${{ github.event.issue.number }}
       comment_author: ${{ github.event.comment.user.login }}
