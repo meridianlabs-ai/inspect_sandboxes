@@ -714,7 +714,12 @@ async def _check_timeout(env: SandboxEnvironment) -> None:
         )
     assert time.monotonic() - started < 15
 
-    # Nothing of the timed-out commands survives (the pattern does not match itself).
+    result = await env.exec(["echo", "alive"])
+    assert result.stdout == "alive\n", f"{result.stdout=}"
+
+
+async def _count_timed_out_survivors(env: SandboxEnvironment) -> int:
+    """Processes of ``_check_timeout``'s commands still alive (the pattern does not match itself)."""
     result = await env.exec(
         [
             "sh",
@@ -723,9 +728,7 @@ async def _check_timeout(env: SandboxEnvironment) -> None:
             " | grep -c 'sleep [65]0' || true",
         ]
     )
-    assert result.stdout.strip() == "0", f"{result.stdout=}"
-    result = await env.exec(["echo", "alive"])
-    assert result.stdout == "alive\n", f"{result.stdout=}"
+    return int(result.stdout.strip())
 
 
 @pytest.mark.asyncio
@@ -742,6 +745,8 @@ async def test_exec_stream_split_single_service(
     """
     await _check_stream_split(daytona_single_env)
     await _check_timeout(daytona_single_env)
+    # The server kills the whole process tree at the deadline.
+    assert await _count_timed_out_survivors(daytona_single_env) == 0
 
     sentinel = f"inspect-79-{uuid.uuid4().hex}"
     result = await daytona_single_env.exec(
@@ -762,9 +767,16 @@ async def test_exec_stream_split_single_service(
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_exec_stream_split_dind(daytona_dind_env: SandboxEnvironment) -> None:
-    """Live: DinD exec() splits the streams through the VM-side wrapper."""
+    """Live: DinD exec() splits the streams through the VM-side wrapper.
+
+    The timeout still raises, but the processes inside the service container
+    survive it: the server kills the VM-side ``docker compose exec`` and
+    ``docker exec`` detaches on signal (pre-existing; the Docker sandbox wraps
+    the container command in ``/usr/bin/timeout`` for this reason).
+    """
     await _check_stream_split(daytona_dind_env)
     await _check_timeout(daytona_dind_env)
+    assert await _count_timed_out_survivors(daytona_dind_env) > 0, "limitation lifted?"
 
 
 @pytest_asyncio.fixture
