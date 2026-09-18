@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.5.0...v0.5.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* honour user= on Modal sandbox exec() via su ([#61](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/61)) ([02a9f89](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/02a9f898d73bb1598491ba120d1b550f53916a1e))
+
 ## [0.5.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.4.1...v0.5.0) (2026-08-18)
 
 
