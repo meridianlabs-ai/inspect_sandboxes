@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import errno
+import re
 import shlex
 import string
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from logging import getLogger
 
@@ -21,13 +23,11 @@ from daytona import (
     DaytonaError,
     DaytonaNotFoundError,
     ListSandboxesQuery,
-    SessionExecuteRequest,
 )
 from inspect_ai.util import (
     ExecResult,
     OutputLimitExceededError,
     SandboxEnvironmentLimits,
-    trace_message,
 )
 
 from inspect_sandboxes._util.naming import _HEX_LEN
@@ -59,155 +59,168 @@ def build_stdin_command(cmd: list[str], stdin_file: str, cleanup: bool = True) -
     return f"{base}; _ec=$?; exit $_ec"
 
 
-# Daytona's process.exec() API returns one merged output stream, so exec() runs
-# commands through the sandbox's session API instead: the Daytona agent tags
-# every chunk a session command writes with its stream, and the SDK hands back
-# stdout, stderr and the exit status separately. A session is a persistent
-# shell in the sandbox, and commands sent to one session run one after another,
-# so each environment keeps a pool of idle sessions (one per concurrent exec),
-# and every command runs in its own `/bin/sh -c` so cwd and environment never
-# leak between calls. Measured on the default image (2026-09-18): a session
-# `echo` costs about 25 ms more than process.exec(), creating a session about
-# 40 ms; large outputs are slower (5 MiB: 8 s against 0.65 s). The agent
-# appends a newline to an unterminated last line of either stream and replaces
-# invalid UTF-8; NUL bytes and a background child's late output are kept.
+# Daytona's exec API returns one merged output stream, so exec() does not hand
+# the command's streams to the API directly: a wrapper shell runs the command
+# with stdout and stderr piped into two private temp files, then prints both
+# files base64-encoded between per-call sentinels. The wrapper is the only
+# writer of the API stream, so nothing the command runs can put bytes into the
+# stderr segment, base64 keeps the sentinels out of the data, and the pipes
+# make the wrapper wait, as the API itself did, until every writer of the
+# command's streams (background children included) has closed them.
 
-# Where the wrapper's own programs are looked up, and the absolute paths of the
-# programs it runs before the caller's command: the image's PATH is never
-# consulted for them (a directory the sandbox user controls could be first on
-# it). Same pins as inspect_ai's own sandbox commands and Docker sandbox.
+# Where the wrapper's own programs (cat, rm, base64) are looked up. Matches the
+# pin inspect_ai uses for its sandbox commands, so a directory the sandbox user
+# controls on the image's PATH cannot supply them. It applies only to the
+# wrapper's housekeeping subshells; the command keeps its own environment.
 SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
-SHELL_PATH = "/bin/sh"
-TIMEOUT_PATH = "/usr/bin/timeout"
-
-# Grace between the in-command timeout firing and the HTTP request timing out:
-# `timeout -k 5s` escalates to SIGKILL after 5 s, plus agent round trip.
-TIMEOUT_GRACE = 10
 
 
-def build_session_command(
-    command: str,
-    *,
-    cwd: str | None = None,
-    env: dict[str, str] | None = None,
-    user: str | None = None,
-    timeout: int | None = None,
-) -> str:
-    """The text a Daytona session runs for shell snippet *command*.
+def new_capture_tag() -> str:
+    """A fresh per-exec tag naming the temp files and the output sentinels."""
+    return uuid.uuid4().hex
 
-    The session request carries only the command text, so the working
-    directory, environment, user switch and timeout are applied inside it:
-    ``export``s and ``cd`` in a fresh ``/bin/sh -c`` (nothing reaches the
-    session's own shell, whose dialect and state are the image's), then
-    ``exec`` of the command under ``sudo -u <user> bash -c`` when *user* is
-    set (as before) and under ``/usr/bin/timeout -k 5s <timeout>s`` when a
-    timeout is set, run as the requested user so the whole process tree is
-    killed when it fires (the Docker sandbox does the same; exit 124 means it
-    did). The environment is exported before ``sudo``, so ``sudo``'s own
-    policy decides what the switched user sees, as with the exec API.
+
+def capture_files(tag: str) -> tuple[str, str, str]:
+    """The stdout, stderr and exit-status temp files for a capture *tag*."""
+    base = f"/tmp/.inspect-exec-{tag}"
+    return f"{base}.out", f"{base}.err", f"{base}.status"
+
+
+def _sentinels(tag: str) -> tuple[str, str, str, str]:
+    return (
+        f"<<inspect-exec-{tag}:stdout>>",
+        f"<<inspect-exec-{tag}:stderr>>",
+        f"<<inspect-exec-{tag}:end>>",
+        f"<<inspect-exec-{tag}:failed>>",
+    )
+
+
+def build_capture_command(command: str, tag: str) -> str:
+    """Wrap shell *command* so its stdout and stderr come back separately.
+
+    The wrapper creates the three temp files ``0600`` and exclusively (``umask
+    077`` and ``set -C`` in a subshell, so the command's own umask and options
+    are untouched; a stale file from a killed attempt is removed first, a
+    planted entry makes creation fail), opens them on descriptors 3/4/9 for
+    writing and 6/7/8 for reading, and unlinks them before the command runs:
+    the command cannot reach them by name, and nothing is left behind if the
+    process tree is killed. The command runs in a subshell with those
+    descriptors closed, its stdout and stderr piped into two ``cat`` collectors
+    that append to the files; the pipes only close once every writer has,
+    so a background child's late output is collected too. Its exit status is
+    written to the status file. Then ``<stdout>``, base64(stdout),
+    ``<stderr>``, base64(stderr), ``<end>`` are printed, or ``<failed>`` if
+    collection failed, and the wrapper exits with the command's status. Its
+    own programs are resolved through ``SYSTEM_PATH``. Decode the output with
+    :func:`parse_captured_output`.
     """
-    if user is not None:
-        user_arg = shlex.quote(f"#{user}") if user.isdigit() else shlex.quote(user)
-        runner = f"bash -c {shlex.quote(command)}"
-        if timeout is not None:
-            runner = f"{TIMEOUT_PATH} -k 5s {timeout}s {runner}"
-        runner = f"sudo -u {user_arg} {runner}"
-    else:
-        runner = f"{SHELL_PATH} -c {shlex.quote(command)}"
-        if timeout is not None:
-            runner = f"{TIMEOUT_PATH} -k 5s {timeout}s {runner}"
-    parts = [f"export {k}={shlex.quote(v)}" for k, v in (env or {}).items()]
-    if cwd is not None:
-        parts.append(f"cd -- {shlex.quote(cwd)}")
-    if not parts and runner == f"{SHELL_PATH} -c {shlex.quote(command)}":
-        return runner
-    parts.append(f"exec {runner}")
-    return f"{SHELL_PATH} -c {shlex.quote(' && '.join(parts))}"
+    out_file, err_file, status_file = (shlex.quote(f) for f in capture_files(tag))
+    start, mid, end, failed = (shlex.quote(s) for s in _sentinels(tag))
+    pin = f"PATH={SYSTEM_PATH}; export PATH"
+    files = f"{out_file} {err_file} {status_file}"
+    return (
+        # setup: private, exclusive files; open them; unlink them
+        f"if ({pin}; umask 077; set -C; rm -f {files}"
+        f" && : > {out_file} && : > {err_file} && : > {status_file})"
+        f" && exec 3>>{out_file} 4>>{err_file} 9>>{status_file}"
+        f" 6<{out_file} 7<{err_file} 8<{status_file}"
+        f" && ({pin}; rm -f {files}); then "
+        # run: stdout -> pipe -> cat -> fd 3 (out); stderr -> pipe -> cat -> fd 4 (err)
+        f"{{ {{ ( ({command}) 3>&- 4>&- 5>&- 6<&- 7<&- 8<&- 9>&-; echo $? >&9; )"
+        f" 2>&5 | ({pin}; exec cat >&3); }} 5>&1 | ({pin}; exec cat >&4); }}; "
+        f"read -r _ec <&8; "
+        # emit: both streams base64, framed; a collection failure is marked
+        f"({pin}; printf %s {start} && base64 <&6 && printf %s {mid}"
+        f" && base64 <&7 && printf %s {end}) || printf %s {failed}; "
+        f"exit ${{_ec:-1}}; fi; exit 1"
+    )
 
 
-class SessionPool:
-    """Idle Daytona sessions of one sandbox, handed out one per running exec.
+class OutputNotCapturedError(RuntimeError):
+    """The output of a :func:`build_capture_command` run carries no frame.
 
-    Commands sent to one session run sequentially, so a session is lent to a
-    single exec at a time and returned when the command has finished. A
-    session whose command raised is never reused: it may still be running the
-    command, or its shell may have died ("session process has exited"), so it
-    is deleted best-effort and the next exec creates a fresh one. Sessions die
-    with the sandbox.
+    The wrapper prints the frame after the command has run, so a missing frame
+    means the command never ran: ``sudo`` refused the user, ``/tmp`` was not
+    writable, the shell was killed. The raw output is the diagnostics.
     """
 
-    def __init__(self, sandbox: AsyncSandbox) -> None:
-        self.sandbox = sandbox
-        self._idle: list[str] = []
 
-    @asynccontextmanager
-    async def session(self) -> AsyncIterator[str]:
-        """Lend an idle session (creating one if none is idle) for one command."""
-        if self._idle:
-            session_id = self._idle.pop()
-        else:
-            session_id = f"inspect-{uuid.uuid4().hex[:12]}"
-            await self.sandbox.process.create_session(session_id)
-        try:
-            yield session_id
-        except BaseException:
-            await self._discard(session_id)
-            raise
-        self._idle.append(session_id)
-
-    async def _discard(self, session_id: str) -> None:
-        try:
-            await asyncio.wait_for(self.sandbox.process.delete_session(session_id), 10)
-        except BaseException as e:  # noqa: BLE001 - best effort during error handling
-            trace_message(
-                logger,
-                "daytona",
-                f"Could not delete session {session_id} of sandbox {self.sandbox.id}: {e}",
-            )
+class OutputCollectionError(RuntimeError):
+    """The command ran, but the wrapper could not deliver its streams intact."""
 
 
-async def session_exec(
-    pool: SessionPool, command: str, timeout: int | None
-) -> tuple[int, str, str]:
-    """Run *command* (from :func:`build_session_command`) in a pooled session.
+_BASE64_TEXT = r"[A-Za-z0-9+/=\s]*"
 
-    Returns ``(exit_code, stdout, stderr)``. The HTTP request is given
-    ``timeout + TIMEOUT_GRACE`` seconds when a timeout is set, so the
-    in-command ``timeout`` normally fires first and the result comes back
-    cleanly; an HTTP timeout (``DaytonaTimeoutError``) means the agent did not
-    answer, and the session is discarded.
+
+def parse_captured_output(output: str, tag: str) -> tuple[str, str]:
+    """Split the output of a :func:`build_capture_command` run into (stdout, stderr).
+
+    Both streams are base64 in the frame, so a sentinel can never occur inside
+    them and both come back byte for byte (decoded as UTF-8, invalid bytes
+    replaced). Whitespace outside the outer sentinels is the API's to strip or
+    keep.
+
+    Raises:
+        OutputCollectionError: The wrapper ran the command but marked the
+            collection failed, or a segment is not valid base64.
+        OutputNotCapturedError: The frame is missing or incomplete.
     """
-    request = SessionExecuteRequest(command=command, run_async=False)
-    http_timeout = timeout + TIMEOUT_GRACE if timeout is not None else None
-    async with pool.session() as session_id:
-        response = await pool.sandbox.process.execute_session_command(
-            session_id, request, timeout=http_timeout
+    start, mid, end, failed = _sentinels(tag)
+    body = output.strip()
+    # Only the wrapper can print the failure marker (the command's bytes are
+    # never on this stream); the shell's own error text may land before or
+    # after it, so look for it anywhere.
+    if failed in body:
+        raise OutputCollectionError(
+            "Command ran but its output could not be collected: "
+            + body.replace(failed, " ").strip()
         )
-    if response.exit_code is None:
-        raise RuntimeError("Daytona session command returned no exit code")
-    return int(response.exit_code), response.stdout or "", response.stderr or ""
+    frame = re.fullmatch(
+        f"{re.escape(start)}(?P<out>{_BASE64_TEXT}){re.escape(mid)}"
+        f"(?P<err>{_BASE64_TEXT}){re.escape(end)}",
+        body,
+    )
+    if frame is None:
+        raise OutputNotCapturedError(
+            f"Command output was not captured (the exec wrapper did not complete): "
+            f"{body}"
+        )
+    try:
+        return (
+            _decode_stream(frame.group("out")),
+            _decode_stream(frame.group("err")),
+        )
+    except binascii.Error as e:
+        raise OutputCollectionError(
+            f"Command ran but its output could not be decoded: {e}"
+        ) from e
 
 
-def session_exec_result(
-    exit_code: int, stdout: str, stderr: str, timeout: int | None, elapsed: float
-) -> ExecResult[str]:
-    """The :class:`ExecResult` of a timed command, or ``TimeoutError`` if it timed out.
+def _decode_stream(encoded: str) -> str:
+    data = base64.b64decode(re.sub(r"\s", "", encoded), validate=True)
+    return data.decode("utf-8", errors="replace")
 
-    Mirrors inspect_ai's Docker sandbox: exit 124 is GNU ``timeout`` reporting
-    the kill, 137 (SIGKILL escalation) and 143 (BusyBox ``timeout``, SIGTERM)
-    are ambiguous with other signal deaths and count only when the command ran
-    at least *timeout* seconds. The partial output travels on the error's
-    ``truncated_output`` attribute.
+
+def captured_exec_result(exit_code: int, output: str, tag: str) -> ExecResult[str]:
+    """The :class:`ExecResult` of a :func:`build_capture_command` run.
+
+    Output without the frame means the wrapper never reached the command (for
+    example ``sudo: unknown user``, or ``/tmp`` not writable), so the result is
+    a failed exec with the diagnostics on stderr, as a provider with native
+    streams would report a failed user switch. The command cannot produce
+    this itself: it runs with both streams redirected into the collectors, so
+    it has no way to write to the API stream, framed or not. A collection
+    failure after the command ran raises :class:`OutputCollectionError`.
     """
-    if (
-        timeout is not None
-        and exit_code in (124, 137, 143)
-        and (exit_code == 124 or elapsed >= timeout)
-    ):
-        error = TimeoutError(f"Command timed out after {timeout} seconds")
-        if stdout or stderr:
-            setattr(error, "truncated_output", stdout + stderr)  # noqa: B010
-        raise error
+    try:
+        stdout, stderr = parse_captured_output(output, tag)
+    except OutputNotCapturedError:
+        return ExecResult(
+            success=False,
+            returncode=exit_code if exit_code != 0 else 1,
+            stdout="",
+            stderr=output,
+        )
     return ExecResult(
         success=exit_code == 0, returncode=exit_code, stdout=stdout, stderr=stderr
     )

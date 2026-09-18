@@ -6,7 +6,6 @@ import errno
 import shlex
 import shutil
 import tempfile
-import time
 import uuid
 from logging import getLogger
 from pathlib import Path, PurePosixPath
@@ -39,18 +38,17 @@ from ._dind_project import (
     discover_working_dir,
     vm_exec,
 )
-from ._retry import exec_retry, run_with_timeout_retry
+from ._retry import run_with_timeout_retry
 from ._sandbox_utils import (
-    TIMEOUT_PATH,
+    build_capture_command,
     build_remove_command,
-    build_session_command,
     build_stdin_command,
+    captured_exec_result,
     decode_file_content,
     delete_sandbox,
+    new_capture_tag,
     sdk_download,
     sdk_upload,
-    session_exec,
-    session_exec_result,
     verify_file_size,
 )
 
@@ -219,9 +217,9 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
-        # Timeout: applied inside the container with /usr/bin/timeout, as the
-        # Docker sandbox does (docker exec detaches on signal, so killing the
-        # CLI on the VM would leave the in-container process running).
+        # Timeout: The Daytona server kills the VM-level process tree on
+        # timeout, which tears down the docker compose exec session and its
+        # in-container processes. No in-container ``timeout`` wrapping needed.
 
         # Resolve working directory
         workdir = cwd if cwd is not None else self._working_dir
@@ -235,12 +233,10 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         if env:
             for k, v in env.items():
                 exec_cmd.extend(["-e", f"{k}={v}"])
-        exec_cmd.append(self.service)
 
         # Stdin: two-hop upload (VM temp -> compose cp -> container), then pipe
         stdin_vm_file: str | None = None
         stdin_container_file: str | None = None
-        container_cmd: list[str]
         if input is not None:
             data = input.encode("utf-8") if isinstance(input, str) else input
             stdin_vm_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
@@ -256,27 +252,21 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
                     f"Failed to copy stdin to {self.service}: {cp_output}"
                 )
             stdin_cmd = build_stdin_command(cmd, stdin_container_file)
-            container_cmd = ["sh", "-c", stdin_cmd]
+            exec_cmd.extend([self.service, "sh", "-c", stdin_cmd])
         else:
-            container_cmd = list(cmd)
+            exec_cmd.extend([self.service, *cmd])
 
-        # The compose exec runs in a VM session, which returns the container's
-        # stdout and stderr separately (see build_session_command, SessionPool).
-        @exec_retry
+        # Daytona merges stdout and stderr into one output field, so run the
+        # compose exec on the VM inside the capture wrapper, which returns the
+        # two streams framed in one round trip (see build_capture_command).
+        tag = new_capture_tag()
+        vm_command = build_capture_command(compose_command(self.project, exec_cmd), tag)
+
         async def _run(t: int | None) -> ExecResult[str]:
-            timed_cmd = container_cmd
-            if t is not None:
-                timed_cmd = [TIMEOUT_PATH, "-k", "5s", f"{t}s", *container_cmd]
-            vm_command = build_session_command(
-                compose_command(self.project, [*exec_cmd, *timed_cmd])
+            exit_code, output = await vm_exec(
+                self.project.sandbox, vm_command, timeout=t
             )
-            started = time.monotonic()
-            exit_code, stdout, stderr = await session_exec(
-                self.project.sessions, vm_command, t
-            )
-            return session_exec_result(
-                exit_code, stdout, stderr, t, time.monotonic() - started
-            )
+            return captured_exec_result(exit_code, output, tag)
 
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)
