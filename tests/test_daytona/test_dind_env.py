@@ -2,37 +2,73 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import shlex
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from daytona_sdk import DaytonaError
 from inspect_ai.util import ComposeConfig, ComposeService
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._dind_env import DaytonaDinDServiceEnvironment
-from inspect_sandboxes.daytona._dind_project import DaytonaDinDProject
+from inspect_sandboxes.daytona._dind_project import DaytonaDinDProject, compose_command
 from inspect_sandboxes.daytona._sandbox_utils import (
-    STDERR_SENTINEL,
-    build_stderr_capture_command,
-    build_stderr_readback_command,
+    build_capture_command,
+    build_remove_command,
+    capture_files,
 )
 
-# What the VM answers to the stderr readback exec() issues after every
-# command when the command wrote nothing to stderr.
-EMPTY_STDERR_READBACK = f"{STDERR_SENTINEL}{STDERR_SENTINEL}"
+TAG_RE = re.compile(r"inspect-exec-([0-9a-f]{32})")
 
-STDERR_FILE_RE = re.compile(r"/tmp/\.inspect-stderr-[0-9a-f]{32}")
+
+def tag_of(command: str) -> str:
+    match = TAG_RE.search(command)
+    assert match is not None, f"no capture tag in {command!r}"
+    return match.group(1)
+
+
+def framed(command: str, stdout: str = "", stderr: str = "") -> str:
+    """What the capture wrapper in *command* prints for the given streams."""
+    tag = tag_of(command)
+    return (
+        f"<<inspect-exec-{tag}:stdout>>{stdout}<<inspect-exec-{tag}:stderr>>"
+        f"{stderr}<<inspect-exec-{tag}:end>>"
+    )
+
+
+def scripted_vm_exec(*responses: tuple[int, str, str] | Exception) -> AsyncMock:
+    """A ``vm_exec`` fake answering each call in turn, framed for the command's tag."""
+    remaining = list(responses)
+
+    async def run(
+        sandbox: Any, command: str, timeout: int | None = 60
+    ) -> tuple[int, str]:
+        response = remaining.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        exit_code, stdout, stderr = response
+        # Housekeeping commands (rm -f ...) carry no capture tag and no frame.
+        if not TAG_RE.search(command):
+            return exit_code, stdout
+        return exit_code, framed(command, stdout, stderr)
+
+    return AsyncMock(side_effect=run)
 
 
 def make_mock_sandbox(sandbox_id: str = "sb-dind-123") -> MagicMock:
     sandbox = MagicMock()
     sandbox.id = sandbox_id
     sandbox.process = MagicMock()
-    # Every VM command succeeds; as the stderr readback this reads as "".
-    sandbox.process.exec = AsyncMock(
-        return_value=MagicMock(exit_code=0, result=EMPTY_STDERR_READBACK)
-    )
+
+    # Every VM command succeeds with empty streams, framed when captured.
+    async def run(command: str, **kwargs: Any) -> MagicMock:
+        result = framed(command) if TAG_RE.search(command) else ""
+        return MagicMock(exit_code=0, result=result)
+
+    sandbox.process.exec = AsyncMock(side_effect=run)
     sandbox.fs = MagicMock()
     sandbox.fs.upload_file = AsyncMock()
     sandbox.fs.download_file = AsyncMock(return_value=b"content")
@@ -76,14 +112,19 @@ async def test_exec_routes_to_service_with_correct_command() -> None:
     """Test exec builds compose exec args targeting the correct service."""
     env = make_env(service="helper", working_dir="/work")
 
-    with patch(
-        "inspect_sandboxes.daytona._dind_env.compose_exec",
-        new_callable=AsyncMock,
-        return_value=(0, "output"),
-    ) as mock_exec:
+    with (
+        patch(
+            "inspect_sandboxes.daytona._dind_env.compose_command",
+            wraps=compose_command,
+        ) as mock_cmd,
+        patch(
+            "inspect_sandboxes.daytona._dind_env.vm_exec",
+            scripted_vm_exec((0, "output", "")),
+        ),
+    ):
         result = await env.exec(["echo", "hi"])
 
-    cmd = mock_exec.call_args[0][1]
+    cmd = mock_cmd.call_args[0][1]
     assert cmd == ["exec", "-T", "-w", "/work", "helper", "echo", "hi"]
     assert result.success
     assert result.stdout == "output"
@@ -94,13 +135,12 @@ async def test_exec_with_user_adds_user_flag() -> None:
     env = make_env(service="web", working_dir="/app")
 
     with patch(
-        "inspect_sandboxes.daytona._dind_env.compose_exec",
-        new_callable=AsyncMock,
-        return_value=(0, ""),
-    ) as mock_exec:
+        "inspect_sandboxes.daytona._dind_env.compose_command",
+        wraps=compose_command,
+    ) as mock_cmd:
         await env.exec(["whoami"], user="testuser")
 
-    cmd = mock_exec.call_args[0][1]
+    cmd = mock_cmd.call_args[0][1]
     assert cmd == ["exec", "-T", "-w", "/app", "--user", "testuser", "web", "whoami"]
 
 
@@ -110,16 +150,15 @@ async def test_exec_with_env_vars_no_double_quoting() -> None:
     env = make_env(service="web", working_dir="/app")
 
     with patch(
-        "inspect_sandboxes.daytona._dind_env.compose_exec",
-        new_callable=AsyncMock,
-        return_value=(0, ""),
-    ) as mock_exec:
+        "inspect_sandboxes.daytona._dind_env.compose_command",
+        wraps=compose_command,
+    ) as mock_cmd:
         await env.exec(
             ["sh", "-c", "echo $MY_VAR"],
             env={"MY_VAR": "hello world", "OTHER": "simple"},
         )
 
-    cmd = mock_exec.call_args[0][1]
+    cmd = mock_cmd.call_args[0][1]
     # Values should be raw (no shlex.quote wrapping) — compose_exec's shlex.join handles it
     assert cmd == [
         "exec",
@@ -142,13 +181,12 @@ async def test_exec_with_cwd() -> None:
     env = make_env(working_dir="/app")
 
     with patch(
-        "inspect_sandboxes.daytona._dind_env.compose_exec",
-        new_callable=AsyncMock,
-        return_value=(0, ""),
-    ) as mock_exec:
+        "inspect_sandboxes.daytona._dind_env.compose_command",
+        wraps=compose_command,
+    ) as mock_cmd:
         await env.exec(["pwd"], cwd="/tmp")
 
-    cmd = mock_exec.call_args[0][1]
+    cmd = mock_cmd.call_args[0][1]
     assert cmd[3] == "/tmp"
 
 
@@ -157,13 +195,12 @@ async def test_exec_resolves_relative_cwd() -> None:
     env = make_env(working_dir="/app")
 
     with patch(
-        "inspect_sandboxes.daytona._dind_env.compose_exec",
-        new_callable=AsyncMock,
-        return_value=(0, ""),
-    ) as mock_exec:
+        "inspect_sandboxes.daytona._dind_env.compose_command",
+        wraps=compose_command,
+    ) as mock_cmd:
         await env.exec(["pwd"], cwd="subdir")
 
-    cmd = mock_exec.call_args[0][1]
+    cmd = mock_cmd.call_args[0][1]
     assert cmd[3] == "/app/subdir"
 
 
@@ -179,12 +216,11 @@ async def test_exec_stdin_two_hop_upload() -> None:
         patch(
             "inspect_sandboxes.daytona._dind_env.compose_exec",
             new_callable=AsyncMock,
-            return_value=(0, "stdin data"),
-        ),
+            return_value=(0, ""),
+        ) as mock_cp,
         patch(
             "inspect_sandboxes.daytona._dind_env.vm_exec",
-            new_callable=AsyncMock,
-            return_value=(0, EMPTY_STDERR_READBACK),
+            scripted_vm_exec((0, "stdin data", ""), (0, "", "")),
         ) as mock_vm_exec,
     ):
         result = await env.exec(["cat"], input="hello")
@@ -192,101 +228,132 @@ async def test_exec_stdin_two_hop_upload() -> None:
     mock_upload.assert_called_once()
     stdin_vm_file = mock_upload.call_args[0][1]
     assert mock_upload.call_args[0][2] == b"hello"
+    assert mock_cp.call_args[0][1][0] == "cp"
     assert result.stdout == "stdin data"
-    # The stderr readback removes the VM's stdin temp file in the same trip.
-    mock_vm_exec.assert_called_once()
-    readback = mock_vm_exec.call_args[0][1]
-    assert readback.startswith("printf")
-    assert (
-        f"rm -f {shlex.quote(readback_stderr_file(readback))} {stdin_vm_file};"
-        in readback
-    )
+    # The captured exec, then removal of the VM's stdin temp file.
+    commands = [c[0][1] for c in mock_vm_exec.call_args_list]
+    assert len(commands) == 2
+    assert TAG_RE.search(commands[0])
+    assert commands[1] == build_remove_command([stdin_vm_file])
 
 
-def readback_stderr_file(command: str) -> str:
-    match = STDERR_FILE_RE.search(command)
-    assert match is not None, f"no stderr temp file in {command!r}"
-    return match.group(0)
+EXPECTED_COMPOSE = shlex.join(
+    [
+        "docker",
+        "compose",
+        "-p",
+        "inspect-test1234",
+        "--project-directory",
+        "/inspect/compose",
+        "-f",
+        "/inspect/compose/compose.yaml",
+        "exec",
+        "-T",
+        "-w",
+        "/app",
+        "web",
+    ]
+)
 
 
 @pytest.mark.asyncio
-async def test_exec_captures_stderr_on_the_vm() -> None:
-    """The compose exec's stderr is captured to a VM file and read back separately."""
+async def test_exec_captures_both_streams_on_the_vm() -> None:
+    """The compose exec runs on the VM inside the capture wrapper, one round trip."""
     project = make_mock_project()
     env = DaytonaDinDServiceEnvironment(project, "web", "/app")
 
-    commands: list[str] = []
-    outputs: list[tuple[int, str]] = [
-        (0, "out"),
-        (0, f"{STDERR_SENTINEL}err\n{STDERR_SENTINEL}"),
-    ]
-
-    async def fake_vm_exec(
-        sandbox: Any, command: str, timeout: int | None = 60
-    ) -> tuple[int, str]:
-        assert sandbox is project.sandbox
-        commands.append(command)
-        return outputs[len(commands) - 1]
-
-    with (
-        patch("inspect_sandboxes.daytona._dind_project.vm_exec", fake_vm_exec),
-        patch("inspect_sandboxes.daytona._dind_env.vm_exec", fake_vm_exec),
-    ):
+    with patch(
+        "inspect_sandboxes.daytona._dind_env.vm_exec",
+        scripted_vm_exec((0, "out\n", "err\n")),
+    ) as mock_vm_exec:
         result = await env.exec(["sh", "-c", "echo out; echo err >&2"])
 
     assert result.success
-    assert result.stdout == "out"
+    assert result.stdout == "out\n"
     assert result.stderr == "err\n"
 
-    assert len(commands) == 2
-    stderr_file = readback_stderr_file(commands[0])
-    compose_cmd = shlex.join(
-        [
-            "docker",
-            "compose",
-            "-p",
-            "inspect-test1234",
-            "--project-directory",
-            "/inspect/compose",
-            "-f",
-            "/inspect/compose/compose.yaml",
-            "exec",
-            "-T",
-            "-w",
-            "/app",
-            "web",
-            "sh",
-            "-c",
-            "echo out; echo err >&2",
-        ]
-    )
-    assert commands[0] == build_stderr_capture_command(compose_cmd, stderr_file)
-    assert commands[1] == build_stderr_readback_command(stderr_file)
+    mock_vm_exec.assert_called_once()
+    assert mock_vm_exec.call_args[0][0] is project.sandbox
+    command = mock_vm_exec.call_args[0][1]
+    inner = f"{EXPECTED_COMPOSE} sh -c 'echo out; echo err >&2'"
+    assert command == build_capture_command(inner, tag_of(command))
+
+
+def make_local_shell_sandbox() -> MagicMock:
+    """A DinD VM sandbox whose ``process.exec`` runs commands in the local shell.
+
+    The ``docker compose ... exec -T -w /app web`` prefix is dropped so the
+    service command runs directly; everything else (the ``sh -c`` VM wrapper,
+    the capture wrapper, ``vm_exec``'s retry) is the real code path.
+    """
+    sandbox = make_mock_sandbox()
+
+    async def run(command: str, **kwargs: Any) -> MagicMock:
+        proc = await asyncio.create_subprocess_shell(
+            command.replace(shlex.quote(EXPECTED_COMPOSE + " "), "").replace(
+                EXPECTED_COMPOSE + " ", ""
+            ),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await proc.communicate()
+        return MagicMock(exit_code=proc.returncode, result=output.decode().strip())
+
+    sandbox.process.exec = AsyncMock(side_effect=run)
+    return sandbox
 
 
 @pytest.mark.asyncio
-async def test_exec_removes_stderr_file_when_command_fails() -> None:
-    """A failed exec still removes the VM's stderr temp file, best effort."""
+async def test_exec_streams_round_trip_through_the_vm_shell() -> None:
+    """Acceptance through a real ``sh``: stdout and stderr separate and intact."""
+    sandbox = make_local_shell_sandbox()
+    env = DaytonaDinDServiceEnvironment(make_mock_project(sandbox), "web", "/app")
+
+    result = await env.exec(["sh", "-c", "echo out; echo err >&2; exit 5"])
+
+    assert result.stdout == "out\n"
+    assert result.stderr == "err\n"
+    assert result.returncode == 5
+    command = sandbox.process.exec.call_args[0][0]
+    for file in capture_files(tag_of(command)):
+        assert not Path(file).exists(), f"{file} left behind"
+
+
+@pytest.mark.asyncio
+async def test_exec_reruns_command_when_the_vm_response_is_lost() -> None:
+    """A DaytonaError after the VM ran the command retries it via vm_exec's retry."""
+    sandbox = make_local_shell_sandbox()
+    real_run = sandbox.process.exec.side_effect
+    calls = 0
+
+    async def lossy(command: str, **kwargs: Any) -> MagicMock:
+        nonlocal calls
+        calls += 1
+        response = await real_run(command, **kwargs)
+        if calls == 1:
+            raise DaytonaError("response lost after the command ran")
+        return response
+
+    sandbox.process.exec = AsyncMock(side_effect=lossy)
+    env = DaytonaDinDServiceEnvironment(make_mock_project(sandbox), "web", "/app")
+
+    result = await env.exec(["sh", "-c", "echo out; echo err >&2"])
+
+    assert (result.stdout, result.stderr) == ("out\n", "err\n")
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_exec_unframed_vm_output_raises() -> None:
     env = make_env()
 
-    with (
-        patch(
-            "inspect_sandboxes.daytona._dind_env.compose_exec",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("boom"),
-        ) as mock_exec,
-        patch(
-            "inspect_sandboxes.daytona._dind_env.vm_exec",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("vm down"),
-        ) as mock_vm_exec,
+    with patch(
+        "inspect_sandboxes.daytona._dind_env.vm_exec",
+        new_callable=AsyncMock,
+        return_value=(1, "sh: can't create /tmp/.inspect-exec-x.out: No space left"),
     ):
-        with pytest.raises(RuntimeError, match="boom"):
+        with pytest.raises(RuntimeError, match="No space left"):
             await env.exec(["true"])
-
-    stderr_file = mock_exec.call_args[1]["stderr_file"]
-    mock_vm_exec.assert_called_once()
-    assert mock_vm_exec.call_args[0][1] == f"rm -f {stderr_file}"
 
 
 @pytest.mark.asyncio

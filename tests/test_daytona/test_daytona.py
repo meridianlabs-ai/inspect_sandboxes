@@ -601,8 +601,6 @@ async def test_self_check_single_service(
     """Run inspect_ai's self-check suite against a single-service Daytona sandbox."""
     known_failures = [
         "test_exec_permission_error",  # exit code 126, not translated to PermissionError
-        "test_exec_output",  # Daytona strips trailing newline from output
-        "test_exec_env_vars",  # trailing newline stripped (env vars themselves work)
         "test_write_text_file_without_permissions",  # Daytona returns 400, not 403 for write permission errors
         "test_write_binary_file_without_permissions",  # same
         "test_exec_as_user",  # adduser/useradd may not be available in default snapshot
@@ -651,8 +649,6 @@ async def test_self_check_dind(
     """Run inspect_ai's self-check suite against a DinD Daytona sandbox."""
     known_failures = [
         "test_exec_permission_error",  # exit code 126, not translated to PermissionError
-        "test_exec_output",  # trailing newline stripped by compose exec
-        "test_exec_env_vars",  # trailing newline stripped
         "test_write_text_file_without_permissions",  # root user in container
         "test_write_binary_file_without_permissions",  # same
         "test_read_file_not_allowed",  # root user

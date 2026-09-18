@@ -33,12 +33,7 @@ from inspect_sandboxes._util.dind_compose import (
 )
 
 from ._retry import exec_retry, standard_retry
-from ._sandbox_utils import (
-    build_stderr_capture_command,
-    create_sandbox,
-    delete_sandbox,
-    sdk_upload,
-)
+from ._sandbox_utils import create_sandbox, delete_sandbox, sdk_upload
 
 logger = getLogger(__name__)
 
@@ -80,20 +75,12 @@ async def vm_exec(
     return response.exit_code, response.result
 
 
-async def compose_exec(
+def compose_command(
     project: DaytonaDinDProject,
     subcommand: list[str],
     env: dict[str, str] | None = None,
-    timeout: int | None = 60,
-    *,
-    stderr_file: str | None = None,
-) -> tuple[int, str]:
-    """Run a ``docker compose`` subcommand on the DinD sandbox.
-
-    Returns (exit_code, output). With *stderr_file*, the command's stderr is
-    written to that file on the VM (see ``build_stderr_capture_command``)
-    instead of being merged into the output.
-    """
+) -> str:
+    """The shell command running a ``docker compose`` subcommand on the DinD VM."""
     parts = [
         "docker",
         "compose",
@@ -112,9 +99,20 @@ async def compose_exec(
         prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
         cmd = f"{prefix} {cmd}"
 
-    if stderr_file is not None:
-        cmd = build_stderr_capture_command(cmd, stderr_file)
+    return cmd
 
+
+async def compose_exec(
+    project: DaytonaDinDProject,
+    subcommand: list[str],
+    env: dict[str, str] | None = None,
+    timeout: int | None = 60,
+) -> tuple[int, str]:
+    """Run a ``docker compose`` subcommand on the DinD sandbox.
+
+    Returns (exit_code, output).
+    """
+    cmd = compose_command(project, subcommand, env)
     return await vm_exec(project.sandbox, cmd, timeout=timeout)
 
 

@@ -26,11 +26,13 @@ from typing_extensions import override
 
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
 from ._sandbox_utils import (
-    build_stderr_capture_command,
+    build_capture_command,
+    build_remove_command,
     build_stdin_command,
     decode_file_content,
     delete_sandbox,
-    read_stderr_file,
+    new_capture_tag,
+    parse_captured_output,
     verify_file_size,
 )
 
@@ -98,10 +100,12 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
     ) -> ExecResult[str]:
         """Execute a command in the sandbox.
 
-        stderr: The Daytona API returns a single combined output field, so the
-            command's stderr is redirected to a private temp file in the
-            sandbox and read back (and removed) with a second exec once the
-            command has finished. Requires a writable ``/tmp``.
+        Streams: The Daytona API returns a single merged output field with its
+            trailing newline stripped, so the command runs with stdout and
+            stderr redirected to two private temp files under ``/tmp`` (created
+            as the requested ``user``) and the same shell prints both framed by
+            per-call sentinels; see ``build_capture_command``. One API round
+            trip; requires a writable ``/tmp``.
 
         Timeout: The Daytona server enforces timeouts server-side, killing
             the process tree. No in-container ``timeout`` wrapping needed
@@ -118,6 +122,12 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         else:
             command = shlex.join(cmd)
 
+        # Capture stdout and stderr separately. The wrapper goes inside the
+        # user switch below so the temp files are created, read and removed
+        # with the requested user's authority, not the default user's.
+        tag = new_capture_tag()
+        command = build_capture_command(command, tag)
+
         # Daytona's process.exec() has no user param — use sudo -u to switch.
         if user is not None:
             if user.isdigit():
@@ -126,58 +136,34 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
                 user_arg = shlex.quote(user)
             command = f"sudo -u {user_arg} bash -c {shlex.quote(command)}"
 
-        # Daytona merges stdout and stderr into one output field, so capture
-        # stderr to a temp file and read it back after the command has run.
-        stderr_file = f"/tmp/.inspect-stderr-{uuid.uuid4().hex}"
-        command = build_stderr_capture_command(command, stderr_file)
-
         @exec_retry
-        async def _run(t: int | None) -> tuple[int, str]:
+        async def _run(t: int | None) -> ExecResult[str]:
             response = await self.sandbox.process.exec(
                 command,
                 cwd=cwd,
                 env=env,
                 timeout=t,
             )
-            return response.exit_code, response.result
-
-        # When running as a different user, the su'd process can't delete
-        # root-owned temp files in sticky /tmp, so the stdin file is removed
-        # as the default user in the stderr readback's round trip instead.
-        extra_cleanup = (
-            [stdin_file] if stdin_file is not None and user is not None else []
-        )
-        readback_done = False
-        try:
-            exit_code, stdout = await run_with_timeout_retry(
-                _run, timeout, timeout_retry
-            )
-            stderr = await read_stderr_file(
-                self._exec_shell, stderr_file, extra_cleanup
-            )
-            readback_done = True
+            stdout, stderr = parse_captured_output(response.result, tag)
             return ExecResult(
-                success=exit_code == 0,
-                returncode=exit_code,
+                success=response.exit_code == 0,
+                returncode=response.exit_code,
                 stdout=stdout,
                 stderr=stderr,
             )
-        finally:
-            if not readback_done:
-                await self._remove_files([stderr_file, *extra_cleanup])
 
-    @exec_retry
-    async def _exec_shell(self, command: str) -> tuple[int, str]:
-        """Run a housekeeping shell command as the default user."""
-        response = await self.sandbox.process.exec(command, timeout=30)
-        return response.exit_code, response.result
+        try:
+            return await run_with_timeout_retry(_run, timeout, timeout_retry)
+        finally:
+            # When running as a different user, the su'd process can't delete
+            # root-owned temp files in sticky /tmp. Clean up as the default user.
+            if stdin_file is not None and user is not None:
+                await self._remove_files([stdin_file])
 
     async def _remove_files(self, files: list[str]) -> None:
-        """Best-effort removal of temp files left by a failed exec."""
+        """Best-effort removal of temp files as the default user."""
         try:
-            await self.sandbox.process.exec(
-                f"rm -f {' '.join(shlex.quote(f) for f in files)}", timeout=10
-            )
+            await self.sandbox.process.exec(build_remove_command(files), timeout=10)
         except Exception as e:
             trace_message(
                 logger,

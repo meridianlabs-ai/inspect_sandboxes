@@ -52,91 +52,100 @@ def build_stdin_command(cmd: list[str], stdin_file: str, cleanup: bool = True) -
     return f"{base}; _ec=$?; exit $_ec"
 
 
-# Daytona's exec API returns one merged output stream, so a command's stderr is
-# captured to a private temp file in the sandbox and read back with a second
-# exec. The readback brackets the file contents with this sentinel because the
-# API strips the trailing newline from the output (as stdout shows today);
-# the sentinels keep that, or any wider trimming, away from the stderr bytes.
-STDERR_SENTINEL = "<<inspect-stderr>>"
+# Daytona's exec API returns one merged output stream and strips its trailing
+# newline, so exec() does not hand the command's streams to the API directly:
+# the command runs with stdout and stderr redirected to two private temp files,
+# and the same shell then prints both files framed by per-call sentinels. The
+# wrapper shell is the only writer of the API stream, so nothing the command
+# runs (not even a background child) can put bytes into the stderr segment, and
+# both streams come back byte for byte.
+
+# Where the wrapper's own programs (cat, rm) are looked up. Matches the pin
+# inspect_ai uses for its sandbox commands, so a directory the sandbox user
+# controls on the image's PATH cannot supply them. It applies only to the
+# wrapper's housekeeping subshells; the command keeps its own environment.
+SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 
-def build_stderr_capture_command(command: str, stderr_file: str) -> str:
-    """Wrap a shell *command* so its stderr goes to *stderr_file* instead of the output.
-
-    The file is created ``0600`` (``umask 077`` in a subshell, so the command's
-    own umask is untouched) before the command runs, so other users in the
-    sandbox cannot read a privileged command's stderr from ``/tmp``. Its
-    contents are read back with :func:`build_stderr_readback_command`.
-    """
-    quoted_file = shlex.quote(stderr_file)
-    return f"(umask 077 && : > {quoted_file}) && {{ {command}; }} 2>>{quoted_file}"
+def new_capture_tag() -> str:
+    """A fresh per-exec tag naming the temp files and the output sentinels."""
+    return uuid.uuid4().hex
 
 
-def build_stderr_readback_command(
-    stderr_file: str, cleanup_files: Sequence[str] = ()
-) -> str:
-    """Build a shell command that prints *stderr_file* between sentinels and removes it.
+def capture_files(tag: str) -> tuple[str, str]:
+    """The stdout and stderr temp files for a capture *tag*."""
+    return f"/tmp/.inspect-exec-{tag}.out", f"/tmp/.inspect-exec-{tag}.err"
 
-    Args:
-        stderr_file: The file :func:`build_stderr_capture_command` wrote.
-        cleanup_files: Other temp files to remove in the same round trip
-            (the stdin file, when the command ran as a different user).
 
-    The exit status is ``cat``'s, so a missing or unreadable file is reported
-    rather than read as empty stderr. Decode the output with
-    :func:`parse_stderr_readback`.
-    """
-    quoted_file = shlex.quote(stderr_file)
-    remove = " ".join(shlex.quote(f) for f in (stderr_file, *cleanup_files))
-    sentinel = shlex.quote(STDERR_SENTINEL)
+def _sentinels(tag: str) -> tuple[str, str, str]:
     return (
-        f"printf %s {sentinel}; cat {quoted_file}; _ec=$?; rm -f {remove}; "
-        f"printf %s {sentinel}; exit $_ec"
+        f"<<inspect-exec-{tag}:stdout>>",
+        f"<<inspect-exec-{tag}:stderr>>",
+        f"<<inspect-exec-{tag}:end>>",
     )
 
 
-def parse_stderr_readback(exit_code: int, output: str, stderr_file: str) -> str:
-    """Return the stderr contents from a :func:`build_stderr_readback_command` run.
+def build_capture_command(command: str, tag: str) -> str:
+    """Wrap shell *command* so its stdout and stderr come back separately.
+
+    The wrapper creates the two temp files ``0600`` and exclusively (``umask
+    077`` and ``set -C`` inside a subshell, so the command's own umask and
+    options are untouched; a stale file from a killed attempt is removed first,
+    a planted entry makes creation fail), runs the command in a subshell with
+    stdout and stderr appended to them, then prints ``<start>``, stdout,
+    ``<stderr>``, stderr, ``<end>`` and removes the files, exiting with the
+    command's status. Its own programs are resolved through ``SYSTEM_PATH``.
+    Decode the output with :func:`parse_captured_output`.
+    """
+    out_file, err_file = (shlex.quote(f) for f in capture_files(tag))
+    start, mid, end = (shlex.quote(s) for s in _sentinels(tag))
+    pin = f"PATH={SYSTEM_PATH}; export PATH"
+    return (
+        f"({pin}; umask 077; set -C; rm -f {out_file} {err_file}"
+        f" && : > {out_file} && : > {err_file})"
+        f" && ({command}) >>{out_file} 2>>{err_file}; _ec=$?; "
+        f"({pin}; printf %s {start}; cat {out_file}; printf %s {mid}; cat {err_file};"
+        f" rm -f {out_file} {err_file}; printf %s {end}); exit $_ec"
+    )
+
+
+def parse_captured_output(output: str, tag: str) -> tuple[str, str]:
+    """Split the output of a :func:`build_capture_command` run into (stdout, stderr).
+
+    The stderr sentinel is searched from the end: the wrapper prints it after
+    the command has finished, so whatever the command wrote to stdout, even a
+    copy of the sentinel, stays in stdout. Whitespace outside the outer
+    sentinels is the API's to strip (it drops the trailing newline).
 
     Raises:
-        RuntimeError: The readback did not complete or ``cat`` failed; stderr
-            is not silently reported as empty.
+        RuntimeError: The frame is missing, so the wrapper did not run to
+            completion (for example ``/tmp`` was not writable); the raw output
+            carries the shell's error.
     """
-    n = len(STDERR_SENTINEL)
-    # Nothing of ours lies outside the sentinels, so whitespace there is the
-    # API's to strip or keep.
-    output = output.strip()
-    framed = (
-        len(output) >= 2 * n
-        and output.startswith(STDERR_SENTINEL)
-        and output.endswith(STDERR_SENTINEL)
-    )
-    if exit_code != 0 or not framed:
-        detail = output[n:-n] if framed else output
+    start, mid, end = _sentinels(tag)
+    body = output.strip()
+    if not (
+        body.startswith(start)
+        and body.endswith(end)
+        and len(body) >= len(start) + len(end)
+    ):
         raise RuntimeError(
-            f"Failed to read the command's stderr from {stderr_file} "
-            f"(exit code {exit_code}): {detail.strip()}"
+            f"Command output was not captured (the exec wrapper did not complete): "
+            f"{output.strip()}"
         )
-    return output[n:-n]
+    body = body[len(start) : len(body) - len(end)]
+    split = body.rfind(mid)
+    if split < 0:
+        raise RuntimeError(
+            f"Command output was not captured (stderr sentinel missing): {output.strip()}"
+        )
+    return body[:split], body[split + len(mid) :]
 
 
-async def read_stderr_file(
-    run: Callable[[str], Awaitable[tuple[int, str]]],
-    stderr_file: str,
-    cleanup_files: Sequence[str] = (),
-) -> str:
-    """Read back and remove the stderr file a captured command wrote.
-
-    Args:
-        run: Executes a shell command in the sandbox (or on the DinD VM) and
-            returns ``(exit_code, output)``.
-        stderr_file: The file :func:`build_stderr_capture_command` wrote.
-        cleanup_files: Other temp files to remove in the same round trip.
-    """
-    exit_code, output = await run(
-        build_stderr_readback_command(stderr_file, cleanup_files)
-    )
-    return parse_stderr_readback(exit_code, output, stderr_file)
+def build_remove_command(files: Sequence[str]) -> str:
+    """A shell command removing temp *files*, with ``rm`` resolved via ``SYSTEM_PATH``."""
+    quoted = " ".join(shlex.quote(f) for f in files)
+    return f"PATH={SYSTEM_PATH}; export PATH; rm -f {quoted}"
 
 
 async def verify_file_size(

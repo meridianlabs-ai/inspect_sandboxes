@@ -31,6 +31,7 @@ from ._compose import (
 )
 from ._dind_project import (
     DaytonaDinDProject,
+    compose_command,
     compose_exec,
     create_dind_project,
     destroy_dind_project,
@@ -39,10 +40,13 @@ from ._dind_project import (
 )
 from ._retry import run_with_timeout_retry
 from ._sandbox_utils import (
+    build_capture_command,
+    build_remove_command,
     build_stdin_command,
     decode_file_content,
     delete_sandbox,
-    read_stderr_file,
+    new_capture_tag,
+    parse_captured_output,
     sdk_download,
     sdk_upload,
     verify_file_size,
@@ -252,53 +256,33 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         else:
             exec_cmd.extend([self.service, *cmd])
 
-        # Daytona merges stdout and stderr into one output field, so capture
-        # the compose exec's stderr to a temp file on the VM and read it back
-        # after the command has run.
-        stderr_vm_file = f"/tmp/.inspect-stderr-{uuid.uuid4().hex}"
+        # Daytona merges stdout and stderr into one output field, so run the
+        # compose exec on the VM inside the capture wrapper, which returns the
+        # two streams framed in one round trip (see build_capture_command).
+        tag = new_capture_tag()
+        vm_command = build_capture_command(compose_command(self.project, exec_cmd), tag)
 
-        async def _run(t: int | None) -> tuple[int, str]:
-            return await compose_exec(
-                self.project, exec_cmd, timeout=t, stderr_file=stderr_vm_file
+        async def _run(t: int | None) -> ExecResult[str]:
+            exit_code, output = await vm_exec(
+                self.project.sandbox, vm_command, timeout=t
             )
-
-        async def _vm_shell(command: str) -> tuple[int, str]:
-            return await vm_exec(self.project.sandbox, command, timeout=30)
-
-        # The stdin file on the VM is removed in the readback's round trip.
-        extra_cleanup = [stdin_vm_file] if stdin_vm_file is not None else []
-        readback_done = False
-        try:
-            exit_code, stdout = await run_with_timeout_retry(
-                _run, timeout, timeout_retry
-            )
-            stderr = await read_stderr_file(_vm_shell, stderr_vm_file, extra_cleanup)
-            readback_done = True
+            stdout, stderr = parse_captured_output(output, tag)
             return ExecResult(
                 success=exit_code == 0,
                 returncode=exit_code,
                 stdout=stdout,
                 stderr=stderr,
             )
-        finally:
-            if not readback_done:
-                await self._remove_vm_files([stderr_vm_file, *extra_cleanup])
 
-    async def _remove_vm_files(self, files: list[str]) -> None:
-        """Best-effort removal of VM temp files left by a failed exec."""
         try:
-            await vm_exec(
-                self.project.sandbox,
-                f"rm -f {' '.join(shlex.quote(f) for f in files)}",
-                timeout=10,
-            )
-        except Exception as e:
-            trace_message(
-                logger,
-                "daytona",
-                f"Could not remove temp files {files} from DinD sandbox "
-                f"{self.project.sandbox.id}: {e}",
-            )
+            return await run_with_timeout_retry(_run, timeout, timeout_retry)
+        finally:
+            if stdin_vm_file is not None:
+                await vm_exec(
+                    self.project.sandbox,
+                    build_remove_command([stdin_vm_file]),
+                    timeout=10,
+                )
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
