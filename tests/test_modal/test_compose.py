@@ -122,6 +122,7 @@ def test_service_to_gpu(
                     "h2_ports": [8080],
                     "unencrypted_ports": [80],
                     "custom_domain": "example.com",
+                    "experimental_options": {"vm_runtime": True},
                     "verbose": True,
                 }
             },
@@ -137,6 +138,7 @@ def test_service_to_gpu(
                 "h2_ports": [8080],
                 "unencrypted_ports": [80],
                 "custom_domain": "example.com",
+                "experimental_options": {"vm_runtime": True},
                 "verbose": True,
             },
         ),
@@ -176,6 +178,17 @@ def test_apply_modal_extensions_secrets(
 
     assert mock_secret.call_args_list == [call(name) for name in expected_names]
     assert params["secrets"] == secret_objects
+
+
+@pytest.mark.parametrize("value", [True, "vm_runtime", ["vm_runtime"]])
+def test_apply_modal_extensions_rejects_invalid_experimental_options(
+    value: object,
+) -> None:
+    """Test x-modal experimental options must be supplied as a mapping."""
+    with pytest.raises(
+        TypeError, match="x-modal.experimental_options must be a mapping"
+    ):
+        _apply_modal_extensions({}, {"x-modal": {"experimental_options": value}})
 
 
 @pytest.mark.parametrize(

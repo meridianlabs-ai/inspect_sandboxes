@@ -221,6 +221,7 @@ def _apply_modal_extensions(
         - unencrypted_ports (list[int]): HTTP ports
         - custom_domain (str): Custom domain for web services
         - verbose (bool): Enable verbose logging
+        - experimental_options (dict[str, Any]): Experimental Modal Sandbox options
         - secrets (str | list[str]): Modal secret name(s) to attach
         - volumes (list[dict[str, str | bool]]): Named Modal Volumes to attach.
           Each entry requires `name` and `mount_path`; `read_only` defaults to
@@ -256,6 +257,7 @@ def _apply_modal_extensions(
         "cloud",
         "custom_domain",
         "encrypted_ports",
+        "experimental_options",
         "gpu",
         "h2_ports",
         "idle_timeout",
@@ -275,6 +277,14 @@ def _apply_modal_extensions(
                 if not isinstance(secrets, list):
                     secrets = [secrets]
                 params[key] = [modal.Secret.from_name(s) for s in secrets]
+            elif key == "experimental_options":
+                options = modal_extensions[key]
+                if not isinstance(options, dict):
+                    raise TypeError(
+                        "x-modal.experimental_options must be a mapping, got "
+                        f"{type(options).__name__}"
+                    )
+                params[key] = options
             elif key == "volumes":
                 volumes = [
                     _parse_modal_volume_spec(volume) for volume in modal_extensions[key]
