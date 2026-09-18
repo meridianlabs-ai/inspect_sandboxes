@@ -15,6 +15,7 @@ dependencies = [
     "e2b>=2.20",
     "inspect-ai>=0.3.211",
     "modal>=1.5.0",
+    "novita-sandbox>=2.0.8",
     "tenacity>=9.1.4",
 ]
 classifiers = [
@@ -98,6 +99,10 @@ ignore_missing_imports = true
 module = "e2b.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "novita_sandbox.*"
+ignore_missing_imports = true
+
 [tool.pyright]
 include = ["src", "tests"]
 reportUnknownParameterType = true
@@ -139,5 +144,5 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-m 'not integration'"
 markers = [
-    "integration: marks tests that require real Modal/Daytona/E2B resources (run with '-m integration')",
+    "integration: marks tests that require real Modal/Daytona/E2B/Novita resources (run with '-m integration')",
 ]
