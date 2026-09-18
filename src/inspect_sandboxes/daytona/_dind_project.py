@@ -33,7 +33,7 @@ from inspect_sandboxes._util.dind_compose import (
 )
 
 from ._retry import exec_retry, standard_retry
-from ._sandbox_utils import create_sandbox, delete_sandbox, sdk_upload
+from ._sandbox_utils import SessionPool, create_sandbox, delete_sandbox, sdk_upload
 
 logger = getLogger(__name__)
 
@@ -56,6 +56,11 @@ class DaytonaDinDProject:
     project_name: str
     compose_path: str
     services: list[str] = field(default_factory=list)
+    # VM sessions used by the services' exec(); see SessionPool.
+    sessions: SessionPool = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.sessions = SessionPool(self.sandbox)
 
 
 @exec_retry

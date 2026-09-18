@@ -1,10 +1,8 @@
 """Tests for DaytonaSingleServiceEnvironment."""
 
 import asyncio
-import base64
-import os
 import re
-import shlex
+import shutil
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -19,67 +17,48 @@ from inspect_ai.util import (
 )
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._sandbox_utils import (
-    OutputCollectionError,
-    build_capture_command,
+    TIMEOUT_GRACE,
+    TIMEOUT_PATH,
     build_remove_command,
-    capture_files,
+    build_session_command,
 )
 from inspect_sandboxes.daytona._single_env import DaytonaSingleServiceEnvironment
 
-TAG_RE = re.compile(r"inspect-exec-([0-9a-f]{32})")
 
-
-def tag_of(command: str) -> str:
-    """The capture tag of an exec command string."""
-    match = TAG_RE.search(command)
-    assert match is not None, f"no capture tag in {command!r}"
-    return match.group(1)
-
-
-def framed(command: str, stdout: str = "", stderr: str = "") -> str:
-    """What the capture wrapper of *command* prints for the given streams."""
-    tag = tag_of(command)
-    out = base64.b64encode(stdout.encode()).decode()
-    err = base64.b64encode(stderr.encode()).decode()
-    return (
-        f"<<inspect-exec-{tag}:stdout>>{out}<<inspect-exec-{tag}:stderr>>"
-        f"{err}<<inspect-exec-{tag}:end>>"
-    )
-
-
-def exec_response(exit_code: int, result: str) -> MagicMock:
+def session_response(exit_code: int, stdout: str = "", stderr: str = "") -> MagicMock:
+    """A fake ``execute_session_command`` response."""
     response = MagicMock()
     response.exit_code = exit_code
-    response.result = result
+    response.stdout = stdout
+    response.stderr = stderr
     return response
 
 
-def scripted_exec(*responses: tuple[int, str, str] | Exception) -> AsyncMock:
-    """A ``process.exec`` fake answering each call in turn.
-
-    A ``(exit_code, stdout, stderr)`` tuple is returned framed the way the
-    capture wrapper of the received command would print it; an exception is
-    raised.
-    """
+def scripted_session(*responses: tuple[int, str, str] | Exception) -> AsyncMock:
+    """An ``execute_session_command`` fake answering each call in turn."""
     remaining = list(responses)
 
-    async def run(command: str, **kwargs: Any) -> MagicMock:
+    async def run(
+        session_id: str, request: Any, timeout: int | None = None
+    ) -> MagicMock:
         response = remaining.pop(0)
         if isinstance(response, Exception):
             raise response
-        exit_code, stdout, stderr = response
-        return exec_response(exit_code, framed(command, stdout, stderr))
+        return session_response(*response)
 
     return AsyncMock(side_effect=run)
 
 
 def make_mock_sandbox(sandbox_id: str = "sb-test-123") -> MagicMock:
-    """Create a mock AsyncSandbox whose exec answers ``output`` on stdout."""
+    """Create a mock AsyncSandbox whose session exec answers ``output`` on stdout."""
     sandbox = MagicMock()
     sandbox.id = sandbox_id
 
     sandbox.process = MagicMock()
-    sandbox.process.exec = scripted_exec((0, "output", ""))
+    sandbox.process.create_session = AsyncMock()
+    sandbox.process.delete_session = AsyncMock()
+    sandbox.process.execute_session_command = scripted_session((0, "output", ""))
+    sandbox.process.exec = AsyncMock(return_value=MagicMock(exit_code=0, result=""))
 
     sandbox.fs = MagicMock()
     sandbox.fs.upload_file = AsyncMock()
@@ -90,55 +69,48 @@ def make_mock_sandbox(sandbox_id: str = "sb-test-123") -> MagicMock:
     return sandbox
 
 
-SUDO_RE = re.compile(r"^sudo -u \S+ (bash -c )")
+SUDO_RE = re.compile(r"sudo -u \S+ ")
+LOCAL_TIMEOUT = shutil.which("timeout") or shutil.which("gtimeout")
 
 
-def make_local_shell_sandbox(base_env: dict[str, str] | None = None) -> MagicMock:
-    """A fake AsyncSandbox whose ``process.exec`` runs commands in the local ``sh``.
+def make_local_shell_sandbox() -> MagicMock:
+    """A fake AsyncSandbox whose sessions run commands in the local shell.
 
-    Behaves like the Daytona API: one merged output stream (stderr folded
-    into stdout) with the trailing newline stripped (emulated here as a full
-    trim, the harsher case), plus the exit code. Passwordless ``sudo -u`` is
-    emulated by running the wrapped ``bash -c`` as the current user, and
-    ``fs.upload_file`` writes to the local path so stdin temp files work.
-    *base_env* is the image's environment (its PATH in particular).
+    Behaves like a Daytona session: stdout, stderr and the exit code come back
+    separately. Passwordless ``sudo -u`` is emulated by dropping the prefix,
+    ``/usr/bin/timeout`` is mapped to the local ``timeout`` (or ``gtimeout``)
+    when the platform has one, and ``fs.upload_file`` writes to the local path
+    so stdin temp files work.
     """
     sandbox = make_mock_sandbox()
-    image_env = {**os.environ, **(base_env or {})}
 
     async def run(
-        command: str,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
-        timeout: int | None = None,
+        session_id: str, request: Any, timeout: int | None = None
     ) -> MagicMock:
+        command = SUDO_RE.sub("", request.command)
+        if LOCAL_TIMEOUT:
+            command = command.replace(TIMEOUT_PATH, LOCAL_TIMEOUT)
         proc = await asyncio.create_subprocess_shell(
-            SUDO_RE.sub(r"\1", command),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
-            env={**image_env, **(env or {})},
+            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        output, _ = await proc.communicate()
+        out, err = await proc.communicate()
         assert proc.returncode is not None
-        return exec_response(proc.returncode, output.decode().strip())
+        return session_response(proc.returncode, out.decode(), err.decode())
 
     async def upload(data: bytes, path: str) -> None:
         Path(path).write_bytes(data)
 
-    sandbox.process.exec = AsyncMock(side_effect=run)
+    sandbox.process.execute_session_command = AsyncMock(side_effect=run)
     sandbox.fs.upload_file = AsyncMock(side_effect=upload)
     return sandbox
 
 
-def exec_commands(sandbox: MagicMock) -> list[str]:
-    """The command strings passed to ``process.exec``, in order."""
-    return [call[0][0] for call in sandbox.process.exec.call_args_list]
-
-
-def assert_no_capture_files(command: str) -> None:
-    for file in capture_files(tag_of(command)):
-        assert not Path(file).exists(), f"{file} left behind"
+def session_commands(sandbox: MagicMock) -> list[str]:
+    """The command texts sent to ``execute_session_command``, in order."""
+    return [
+        c.args[1].command
+        for c in sandbox.process.execute_session_command.call_args_list
+    ]
 
 
 @pytest.fixture
@@ -163,7 +135,7 @@ async def test_exec_basic(
     mock_sandbox: MagicMock,
 ) -> None:
     """Test exec with various command combinations."""
-    mock_sandbox.process.exec = scripted_exec(
+    mock_sandbox.process.execute_session_command = scripted_session(
         (returncode, expected_stdout, expected_stderr)
     )
 
@@ -183,57 +155,97 @@ async def test_exec_joins_args_with_shlex(mock_sandbox: MagicMock) -> None:
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
     await env.exec(["echo", "hello world"])
 
-    command_arg = exec_commands(mock_sandbox)[0]
-    assert command_arg == build_capture_command(
-        "echo 'hello world'", tag_of(command_arg)
-    )
+    assert session_commands(mock_sandbox) == [
+        build_session_command("echo 'hello world'")
+    ]
 
 
 @pytest.mark.asyncio
 async def test_exec_passes_cwd_and_env(mock_sandbox: MagicMock) -> None:
-    """Test that exec passes cwd and env to process.exec."""
+    """Cwd and env travel inside the session command."""
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
     await env.exec(["ls"], cwd="/workspace", env={"MY_VAR": "value"})
 
-    call_kwargs = mock_sandbox.process.exec.call_args_list[0][1]
-    assert call_kwargs["cwd"] == "/workspace"
-    assert call_kwargs["env"] == {"MY_VAR": "value"}
+    assert session_commands(mock_sandbox) == [
+        build_session_command("ls", cwd="/workspace", env={"MY_VAR": "value"})
+    ]
 
 
 @pytest.mark.asyncio
-async def test_exec_with_user_wraps_with_su(mock_sandbox: MagicMock) -> None:
-    """Test that exec wraps command with su when user is specified."""
+async def test_exec_with_user_wraps_with_sudo(mock_sandbox: MagicMock) -> None:
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
     await env.exec(["whoami"], user="testuser")
 
-    # The capture wrapper sits inside the user switch, so the temp files are
-    # created, read and removed with the requested user's authority.
-    command = exec_commands(mock_sandbox)[0]
-    wrapped = build_capture_command("whoami", tag_of(command))
-    assert command == f"sudo -u testuser bash -c {shlex.quote(wrapped)}"
+    command = session_commands(mock_sandbox)[0]
+    assert command == build_session_command("whoami", user="testuser")
+    assert "sudo -u testuser bash -c whoami" in command
 
 
 @pytest.mark.asyncio
-async def test_exec_with_numeric_user_resolves_via_getent(
-    mock_sandbox: MagicMock,
-) -> None:
-    """Test that numeric UIDs are resolved via getent."""
+async def test_exec_with_numeric_user(mock_sandbox: MagicMock) -> None:
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
     await env.exec(["whoami"], user="1000")
 
-    command = exec_commands(mock_sandbox)[0]
-    wrapped = build_capture_command("whoami", tag_of(command))
-    assert command == f"sudo -u '#1000' bash -c {shlex.quote(wrapped)}"
+    command = session_commands(mock_sandbox)[0]
+    assert command == build_session_command("whoami", user="1000")
+    assert "sudo -u " in command and "#1000" in command
+
+
+@pytest.mark.asyncio
+async def test_exec_timeout_wraps_the_command_and_the_request(
+    mock_sandbox: MagicMock,
+) -> None:
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+    await env.exec(["sleep", "1"], timeout=30)
+
+    assert session_commands(mock_sandbox) == [
+        build_session_command("sleep 1", timeout=30)
+    ]
+    call = mock_sandbox.process.execute_session_command.call_args
+    assert call.kwargs["timeout"] == 30 + TIMEOUT_GRACE
+
+
+@pytest.mark.asyncio
+async def test_exec_in_command_timeout_raises_with_partial_output(
+    mock_sandbox: MagicMock,
+) -> None:
+    """Exit 124 from /usr/bin/timeout is a TimeoutError; the session is reused."""
+    mock_sandbox.process.execute_session_command = scripted_session(
+        (124, "partial\n", ""), (0, "next", "")
+    )
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+
+    with pytest.raises(TimeoutError, match="timed out after 5 seconds") as info:
+        await env.exec(["sleep", "30"], timeout=5)
+    assert vars(info.value)["truncated_output"] == "partial\n"
+
+    result = await env.exec(["echo", "next"])
+    assert result.stdout == "next"
+    mock_sandbox.process.create_session.assert_awaited_once()
+    mock_sandbox.process.delete_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exec_reuses_one_session_for_sequential_calls(
+    mock_sandbox: MagicMock,
+) -> None:
+    mock_sandbox.process.execute_session_command = scripted_session(
+        (0, "a", ""), (0, "b", "")
+    )
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+    await env.exec(["echo", "a"])
+    await env.exec(["echo", "b"])
+
+    mock_sandbox.process.create_session.assert_awaited_once()
+    sessions = [
+        c.args[0] for c in mock_sandbox.process.execute_session_command.call_args_list
+    ]
+    assert sessions[0] == sessions[1]
 
 
 @pytest.mark.asyncio
 async def test_exec_separates_stderr_from_stdout() -> None:
-    """Both streams come back byte for byte through the merged Daytona output.
-
-    Runs the generated command in the local shell with the API's behaviour
-    emulated (one merged stream, trimmed), so this covers the capture wrapper
-    and the sentinel framing end to end. One API call, no files left behind.
-    """
+    """Both streams come back byte for byte through a real shell (issue #79 acceptance)."""
     sandbox = make_local_shell_sandbox()
     env = DaytonaSingleServiceEnvironment(sandbox)
 
@@ -242,10 +254,7 @@ async def test_exec_separates_stderr_from_stdout() -> None:
     assert result.stdout == "out\n"
     assert result.stderr == "err\n"
     assert result.success
-
-    commands = exec_commands(sandbox)
-    assert len(commands) == 1
-    assert_no_capture_files(commands[0])
+    assert len(session_commands(sandbox)) == 1
 
 
 @pytest.mark.asyncio
@@ -262,33 +271,21 @@ async def test_exec_stderr_keeps_exit_code_and_empty_stdout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exec_sentinels_in_the_streams_are_data() -> None:
-    """The real sentinels printed by the command stay in their stream, byte for byte."""
+async def test_exec_applies_cwd_and_env_to_the_command(tmp_path: Path) -> None:
     sandbox = make_local_shell_sandbox()
     env = DaytonaSingleServiceEnvironment(sandbox)
 
-    # The tag is on the wrapper's command line (the command's parent shell), so
-    # the command can read the real sentinels; it prints them to both streams.
-    script = (
-        "tag=$( { if [ -r /proc/$PPID/cmdline ]; then tr '\\0' ' ' < /proc/$PPID/cmdline;"
-        " else ps -o command= -p $PPID; fi; }"
-        " | sed -n 's/.*inspect-exec-\\([0-9a-f]\\{32\\}\\).*/\\1/p' | head -n 1);"
-        ' printf "<<inspect-exec-$tag:stderr>>OUT\\n"; printf "before\\n<<inspect-exec-$tag:stderr>>after\\n" >&2;'
-        ' printf "<<inspect-exec-$tag:end>>\\n"'
+    result = await env.exec(
+        ["sh", "-c", 'pwd; echo "$MY_VAR"'], cwd=str(tmp_path), env={"MY_VAR": "a b"}
     )
-    result = await env.exec(["sh", "-c", script])
 
-    tag = tag_of(exec_commands(sandbox)[0])
-    assert (
-        result.stdout
-        == f"<<inspect-exec-{tag}:stderr>>OUT\n<<inspect-exec-{tag}:end>>\n"
-    )
-    assert result.stderr == f"before\n<<inspect-exec-{tag}:stderr>>after\n"
+    assert result.stdout == f"{tmp_path.resolve()}\na b\n"
+    assert result.stderr == ""
 
 
 @pytest.mark.asyncio
 async def test_exec_waits_for_background_writers() -> None:
-    """Output of a child that outlives the command is collected, as the API did."""
+    """Output of a child that outlives the command is collected, as the API does."""
     sandbox = make_local_shell_sandbox()
     env = DaytonaSingleServiceEnvironment(sandbox)
 
@@ -301,45 +298,23 @@ async def test_exec_waits_for_background_writers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exec_survives_the_command_removing_temp_files() -> None:
-    """The capture files are unlinked before the command runs."""
+async def test_exec_special_text_is_data() -> None:
+    """Nothing in the transport is in-band: marker-like text passes through both streams."""
     sandbox = make_local_shell_sandbox()
     env = DaytonaSingleServiceEnvironment(sandbox)
+    text = "\x01\x01\x01<<inspect-exec-x:stderr>>INSPECT_FRAMEWORK_DIRECTORY_VERIFIED"
 
     result = await env.exec(
-        [
-            "sh",
-            "-c",
-            "ls /tmp/.inspect-exec-* 2>/dev/null | wc -l; rm -f /tmp/.inspect-exec-*; echo err >&2",
-        ]
+        ["sh", "-c", f"printf '%s\\n' '{text}'; printf '%s\\n' '{text}' >&2"]
     )
 
-    assert result.stdout.strip() == "0"
-    assert result.stderr == "err\n"
-    assert result.success
-
-
-@pytest.mark.asyncio
-async def test_exec_collection_failure_raises(mock_sandbox: MagicMock) -> None:
-    """A frame with the failure marker (the command ran, its output is lost) raises."""
-
-    async def run(command: str, **kwargs: Any) -> MagicMock:
-        tag = tag_of(command)
-        return exec_response(
-            0,
-            f"<<inspect-exec-{tag}:stdout>><<inspect-exec-{tag}:failed>>sh: base64: not found",
-        )
-
-    mock_sandbox.process.exec = AsyncMock(side_effect=run)
-    env = DaytonaSingleServiceEnvironment(mock_sandbox)
-
-    with pytest.raises(OutputCollectionError, match="base64"):
-        await env.exec(["echo", "out"])
+    assert result.stdout == f"{text}\n"
+    assert result.stderr == f"{text}\n"
 
 
 @pytest.mark.asyncio
 async def test_exec_stderr_with_stdin() -> None:
-    """The stdin redirection and the stream capture compose."""
+    """The stdin redirection and the session transport compose."""
     sandbox = make_local_shell_sandbox()
     env = DaytonaSingleServiceEnvironment(sandbox)
 
@@ -349,12 +324,10 @@ async def test_exec_stderr_with_stdin() -> None:
     assert result.stderr == "e\n"
     stdin_file = sandbox.fs.upload_file.call_args[0][1]
     assert not Path(stdin_file).exists(), "the command's own rm removes stdin"
-    assert_no_capture_files(exec_commands(sandbox)[0])
 
 
 @pytest.mark.asyncio
-async def test_exec_as_user_with_stdin_captures_inside_sudo() -> None:
-    """With ``user=`` the wrapper runs under sudo; only the stdin file needs the default user."""
+async def test_exec_as_user_with_stdin_cleans_up_as_the_default_user() -> None:
     sandbox = make_local_shell_sandbox()
     env = DaytonaSingleServiceEnvironment(sandbox)
 
@@ -362,82 +335,22 @@ async def test_exec_as_user_with_stdin_captures_inside_sudo() -> None:
 
     assert result.stdout == "hi"
     assert result.stderr == "e\n"
-    commands = exec_commands(sandbox)
-    assert len(commands) == 2
-    assert commands[0].startswith("sudo -u root bash -c ")
+    assert "sudo -u root bash -c " in session_commands(sandbox)[0]
     stdin_file = sandbox.fs.upload_file.call_args[0][1]
-    assert commands[1] == build_remove_command([stdin_file])
-    assert not Path(stdin_file).exists()
-    assert_no_capture_files(commands[0])
-
-
-@pytest.mark.asyncio
-async def test_exec_housekeeping_ignores_a_hostile_image_path(tmp_path: Path) -> None:
-    """The wrapper's cat/rm come from SYSTEM_PATH even when the image PATH is hostile.
-
-    A directory the sandbox user controls sits first on the image's PATH with
-    a ``cat`` that prints the framework helper's verified marker. The caller's
-    pinned ``env['PATH']`` is not consulted for the wrapper either way.
-    """
-    marker = tmp_path / "shim-ran"
-    for name in ("cat", "rm"):
-        shim = tmp_path / name
-        shim.write_text(
-            f"#!/bin/sh\ntouch {marker}\nprintf 'INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\\n'\n"
-        )
-        shim.chmod(0o700)
-    sandbox = make_local_shell_sandbox(base_env={"PATH": f"{tmp_path}:/usr/bin:/bin"})
-    env = DaytonaSingleServiceEnvironment(sandbox)
-
-    for call_env in (None, {"PATH": "/usr/bin:/bin"}):
-        result = await env.exec(["sh", "-c", "printf 'ORIGINAL\\n' >&2"], env=call_env)
-        assert result.stderr == "ORIGINAL\n", call_env
-        assert result.stdout == ""
-        assert not marker.exists()
-    for command in exec_commands(sandbox):
-        assert_no_capture_files(command)
-
-
-@pytest.mark.asyncio
-async def test_exec_reruns_command_when_the_response_is_lost() -> None:
-    """A DaytonaError after the command ran retries the whole exec (no half state)."""
-    sandbox = make_local_shell_sandbox()
-    real_run = sandbox.process.exec.side_effect
-    calls = 0
-
-    async def lossy(command: str, **kwargs: Any) -> MagicMock:
-        nonlocal calls
-        calls += 1
-        response = await real_run(command, **kwargs)
-        if calls == 1:
-            raise DaytonaError("response lost after the command ran")
-        return response
-
-    sandbox.process.exec = AsyncMock(side_effect=lossy)
-    env = DaytonaSingleServiceEnvironment(sandbox)
-
-    result = await env.exec(["sh", "-c", "echo out; echo err >&2"])
-
-    assert (result.stdout, result.stderr) == ("out\n", "err\n")
-    assert calls == 2
-    assert_no_capture_files(exec_commands(sandbox)[0])
-
-
-@pytest.mark.asyncio
-async def test_exec_unframed_output_is_a_failed_exec(mock_sandbox: MagicMock) -> None:
-    """Output without the frame (the wrapper never ran) fails with it on stderr, not stdout."""
-    mock_sandbox.process.exec = AsyncMock(
-        return_value=exec_response(1, "sudo: unknown user nonexistent")
+    sandbox.process.exec.assert_awaited_once_with(
+        build_remove_command([stdin_file]), timeout=10
     )
-    env = DaytonaSingleServiceEnvironment(mock_sandbox)
 
-    result = await env.exec(["whoami"], user="nonexistent")
 
-    assert not result.success
-    assert result.returncode == 1
-    assert result.stdout == ""
-    assert result.stderr == "sudo: unknown user nonexistent"
-    assert mock_sandbox.process.exec.call_count == 1
+@pytest.mark.skipif(LOCAL_TIMEOUT is None, reason="no timeout binary on this platform")
+@pytest.mark.asyncio
+async def test_exec_in_command_timeout_kills_the_command_locally() -> None:
+    sandbox = make_local_shell_sandbox()
+    env = DaytonaSingleServiceEnvironment(sandbox)
+
+    with pytest.raises(TimeoutError, match="timed out after 1 seconds") as info:
+        await env.exec(["sh", "-c", "echo partial; sleep 30"], timeout=1)
+    assert vars(info.value)["truncated_output"] == "partial\n"
 
 
 @pytest.mark.asyncio
@@ -452,7 +365,7 @@ async def test_exec_with_stdin_string(mock_sandbox: MagicMock) -> None:
     stdin_path = call_args[0][1]
     assert stdin_path.startswith("/tmp/.inspect-stdin-")
 
-    exec_command = exec_commands(mock_sandbox)[0]
+    exec_command = session_commands(mock_sandbox)[0]
     assert f"< {stdin_path}" in exec_command
     assert f"rm -f {stdin_path}" in exec_command
 
@@ -474,67 +387,76 @@ async def test_exec_without_stdin_no_upload(mock_sandbox: MagicMock) -> None:
     await env.exec(["echo", "hi"])
 
     mock_sandbox.fs.upload_file.assert_not_called()
-    command = exec_commands(mock_sandbox)[0]
-    assert command == build_capture_command("echo hi", tag_of(command))
+    assert session_commands(mock_sandbox) == [build_session_command("echo hi")]
 
 
 @pytest.mark.asyncio
 async def test_exec_with_stdin_and_user_skips_inline_cleanup(
     mock_sandbox: MagicMock,
 ) -> None:
-    """Test that stdin + no baked-in rm (cleanup done in finally as root)."""
-    mock_sandbox.process.exec = scripted_exec((0, "", ""), (0, "", ""))
+    """Test that stdin + no baked-in rm (cleanup done in finally as the default user)."""
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
     await env.exec(["cat"], input="hello", user="testuser")
 
-    commands = exec_commands(mock_sandbox)
-    # First call: the sudo-wrapped command; the stdin file is not removed by it
     stdin_file = mock_sandbox.fs.upload_file.call_args[0][1]
-    exec_command = commands[0]
-    assert exec_command.startswith("sudo -u testuser bash -c ")
+    exec_command = session_commands(mock_sandbox)[0]
+    assert "sudo -u testuser bash -c " in exec_command
     assert f"rm -f {stdin_file}" not in exec_command
-    # Second call: cleanup of the stdin file as the default user
-    assert len(commands) == 2
-    assert commands[1] == build_remove_command([stdin_file])
+    mock_sandbox.process.exec.assert_awaited_once_with(
+        build_remove_command([stdin_file]), timeout=10
+    )
 
 
 @pytest.mark.asyncio
-async def test_exec_retries_transient_error(mock_sandbox: MagicMock) -> None:
-    """Test that exec retries on transient DaytonaError."""
-    mock_sandbox.process.exec = scripted_exec(
-        DaytonaError("transient API failure"), (0, "ok", "")
+async def test_exec_retries_transient_error_in_a_fresh_session(
+    mock_sandbox: MagicMock,
+) -> None:
+    """A DaytonaError discards the session and the retry runs in a new one."""
+    mock_sandbox.process.execute_session_command = scripted_session(
+        DaytonaError("session process has exited"), (0, "ok", "")
     )
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
     result = await env.exec(["echo", "test"])
 
     assert result.success
     assert result.stdout == "ok"
-    assert mock_sandbox.process.exec.call_count == 2
+    calls = mock_sandbox.process.execute_session_command.call_args_list
+    assert len(calls) == 2
+    assert calls[0].args[0] != calls[1].args[0]
+    mock_sandbox.process.delete_session.assert_awaited_once_with(calls[0].args[0])
+    assert mock_sandbox.process.create_session.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_exec_does_not_retry_timeout(mock_sandbox: MagicMock) -> None:
-    """Test that DaytonaTimeoutError propagates to the timeout retry loop."""
-    mock_sandbox.process.exec = AsyncMock(side_effect=DaytonaTimeoutError("timed out"))
+    """An HTTP timeout goes to the timeout retry loop, each attempt in a fresh session."""
+    mock_sandbox.process.execute_session_command = AsyncMock(
+        side_effect=DaytonaTimeoutError("timed out")
+    )
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
 
     with pytest.raises(TimeoutError):
         await env.exec(["sleep", "100"], timeout=5)
 
     # Outer timeout loop makes 3 attempts (original, 5s cap, 5s cap)
-    assert mock_sandbox.process.exec.call_count == 3
+    assert mock_sandbox.process.execute_session_command.call_count == 3
+    assert mock_sandbox.process.create_session.await_count == 3
+    assert mock_sandbox.process.delete_session.await_count == 3
 
 
 @pytest.mark.asyncio
 async def test_exec_does_not_retry_non_daytona_error(mock_sandbox: MagicMock) -> None:
     """Test that non-DaytonaError exceptions are not retried."""
-    mock_sandbox.process.exec = AsyncMock(side_effect=RuntimeError("unexpected"))
+    mock_sandbox.process.execute_session_command = AsyncMock(
+        side_effect=RuntimeError("unexpected")
+    )
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
 
     with pytest.raises(RuntimeError, match="unexpected"):
         await env.exec(["echo", "test"])
 
-    assert mock_sandbox.process.exec.call_count == 1
+    assert mock_sandbox.process.execute_session_command.call_count == 1
+    mock_sandbox.process.delete_session.assert_awaited_once()
 
 
 @pytest.mark.asyncio

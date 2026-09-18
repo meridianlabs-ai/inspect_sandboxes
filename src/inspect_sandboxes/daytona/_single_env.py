@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import shlex
+import time
 import uuid
 from logging import getLogger
 from pathlib import PurePosixPath
@@ -26,13 +27,14 @@ from typing_extensions import override
 
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
 from ._sandbox_utils import (
-    build_capture_command,
+    SessionPool,
     build_remove_command,
+    build_session_command,
     build_stdin_command,
-    captured_exec_result,
     decode_file_content,
     delete_sandbox,
-    new_capture_tag,
+    session_exec,
+    session_exec_result,
     verify_file_size,
 )
 
@@ -47,6 +49,7 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
     ) -> None:
         super().__init__()
         self.sandbox = sandbox
+        self._sessions = SessionPool(sandbox)
         # Container ports declared via Compose `ports`, surfaced lazily through
         # connection() as get_preview_link URLs.
         self._connection_ports = connection_ports or []
@@ -100,18 +103,17 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
     ) -> ExecResult[str]:
         """Execute a command in the sandbox.
 
-        Streams: The Daytona API returns a single merged output field with its
-            trailing newline stripped, so the command runs with stdout and
-            stderr redirected to two private temp files under ``/tmp`` (created
-            as the requested ``user``) and the same shell prints both framed by
-            per-call sentinels; see ``build_capture_command``. One API round
-            trip; requires a writable ``/tmp``.
+        Streams: The Daytona process.exec() API returns one merged output
+            field, so the command runs through a session (see
+            ``build_session_command`` and ``SessionPool``), which returns
+            stdout, stderr and the exit status separately.
 
-        Timeout: The Daytona server enforces timeouts server-side, killing
-            the process tree. No in-container ``timeout`` wrapping needed
-            (unlike the Docker sandbox).
+        Timeout: Applied inside the command with ``/usr/bin/timeout`` (as the
+            Docker sandbox does), which kills the process tree; the HTTP
+            request gets a little longer. Requires ``/usr/bin/timeout`` in the
+            image when a timeout is given.
         """
-        # Daytona's process.exec() doesn't support stdin natively.
+        # Daytona sessions don't support stdin.
         # When input is provided, write it to a temp file and pipe it into the command.
         stdin_file: str | None = None
         if input is not None:
@@ -122,29 +124,18 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         else:
             command = shlex.join(cmd)
 
-        # Capture stdout and stderr separately. The wrapper goes inside the
-        # user switch below so the temp files are created, read and removed
-        # with the requested user's authority, not the default user's.
-        tag = new_capture_tag()
-        command = build_capture_command(command, tag)
-
-        # Daytona's process.exec() has no user param — use sudo -u to switch.
-        if user is not None:
-            if user.isdigit():
-                user_arg = shlex.quote(f"#{user}")
-            else:
-                user_arg = shlex.quote(user)
-            command = f"sudo -u {user_arg} bash -c {shlex.quote(command)}"
-
         @exec_retry
         async def _run(t: int | None) -> ExecResult[str]:
-            response = await self.sandbox.process.exec(
-                command,
-                cwd=cwd,
-                env=env,
-                timeout=t,
+            session_command = build_session_command(
+                command, cwd=cwd, env=env, user=user, timeout=t
             )
-            return captured_exec_result(response.exit_code, response.result, tag)
+            started = time.monotonic()
+            exit_code, stdout, stderr = await session_exec(
+                self._sessions, session_command, t
+            )
+            return session_exec_result(
+                exit_code, stdout, stderr, t, time.monotonic() - started
+            )
 
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)

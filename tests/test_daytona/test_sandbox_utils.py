@@ -1,10 +1,7 @@
-"""Tests for Daytona sandbox create-retry, zombie-reap and exec capture helpers."""
+"""Tests for Daytona sandbox create-retry, zombie-reap and session exec helpers."""
 
 import asyncio
-import base64
-import os
-import shutil
-import sys
+import shlex
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,21 +14,21 @@ from daytona import (
     DaytonaNotFoundError,
     DaytonaTimeoutError,
 )
-from inspect_sandboxes.daytona import _sandbox_utils as sandbox_utils
 from inspect_sandboxes.daytona._sandbox_utils import (
     CREATE_SANDBOX_ATTEMPTS,
+    SHELL_PATH,
     SYSTEM_PATH,
-    OutputCollectionError,
-    OutputNotCapturedError,
+    TIMEOUT_GRACE,
+    TIMEOUT_PATH,
+    SessionPool,
     _respin_create_params,
-    build_capture_command,
     build_remove_command,
-    capture_files,
-    captured_exec_result,
+    build_session_command,
     create_sandbox,
-    parse_captured_output,
     reap_zombie_sandboxes,
     reset_zombie_registry,
+    session_exec,
+    session_exec_result,
     zombie_registry,
 )
 
@@ -265,40 +262,41 @@ async def test_zombie_registry_visible_across_child_task() -> None:
     assert "zombie-from-child" in zombie_registry()
 
 
-# --- exec stream capture ------------------------------------------------------
-
-TAG = "0123456789abcdef0123456789abcdef"
-OUT_FILE, ERR_FILE, STATUS_FILE = capture_files(TAG)
-START = f"<<inspect-exec-{TAG}:stdout>>"
-MID = f"<<inspect-exec-{TAG}:stderr>>"
-END = f"<<inspect-exec-{TAG}:end>>"
-FAILED = f"<<inspect-exec-{TAG}:failed>>"
+# --- session exec transport ---------------------------------------------------
 
 
-def b64(text: str) -> str:
-    return base64.b64encode(text.encode()).decode()
+def sh_c(snippet: str) -> str:
+    return f"{SHELL_PATH} -c {shlex.quote(snippet)}"
 
 
-def framed(stdout: str, stderr: str) -> str:
-    return f"{START}{b64(stdout)}{MID}{b64(stderr)}{END}"
+def test_build_session_command_plain() -> None:
+    assert build_session_command("echo 'a b'") == sh_c("echo 'a b'")
 
 
-def test_build_capture_command_shape() -> None:
-    command = build_capture_command("echo 'a b' >&2", TAG)
-    pin = f"PATH={SYSTEM_PATH}; export PATH"
-    files = f"{OUT_FILE} {ERR_FILE} {STATUS_FILE}"
-    assert command == (
-        f"if ({pin}; umask 077; set -C; rm -f {files}"
-        f" && : > {OUT_FILE} && : > {ERR_FILE} && : > {STATUS_FILE})"
-        f" && exec 3>>{OUT_FILE} 4>>{ERR_FILE} 9>>{STATUS_FILE}"
-        f" 6<{OUT_FILE} 7<{ERR_FILE} 8<{STATUS_FILE}"
-        f" && ({pin}; rm -f {files}); then "
-        "{ { ( (echo 'a b' >&2) 3>&- 4>&- 5>&- 6<&- 7<&- 8<&- 9>&-; echo $? >&9; )"
-        f" 2>&5 | ({pin}; exec cat >&3); }} 5>&1 | ({pin}; exec cat >&4); }}; "
-        "read -r _ec <&8; "
-        f"({pin}; printf %s '{START}' && base64 <&6 && printf %s '{MID}'"
-        f" && base64 <&7 && printf %s '{END}') || printf %s '{FAILED}'; "
-        "exit ${_ec:-1}; fi; exit 1"
+def test_build_session_command_applies_env_and_cwd_in_a_child_shell() -> None:
+    command = build_session_command(
+        "echo hi", cwd="/work dir", env={"A": "x y", "B": "1"}
+    )
+    assert command == sh_c(
+        "export A='x y' && export B=1 && cd -- '/work dir' && exec " + sh_c("echo hi")
+    )
+
+
+def test_build_session_command_user_switch() -> None:
+    assert build_session_command("whoami", user="tester") == sh_c(
+        "exec sudo -u tester bash -c whoami"
+    )
+    assert build_session_command("whoami", user="1000") == sh_c(
+        "exec sudo -u '#1000' bash -c whoami"
+    )
+
+
+def test_build_session_command_timeout_runs_as_the_requested_user() -> None:
+    assert build_session_command("sleep 9", timeout=30) == sh_c(
+        f"exec {TIMEOUT_PATH} -k 5s 30s {sh_c('sleep 9')}"
+    )
+    assert build_session_command("sleep 9", user="root", timeout=30) == sh_c(
+        f"exec sudo -u root {TIMEOUT_PATH} -k 5s 30s bash -c 'sleep 9'"
     )
 
 
@@ -308,253 +306,159 @@ def test_build_remove_command_pins_path() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("stdout", "stderr"),
-    [
-        ("out\n", "err\n"),
-        ("", ""),
-        ("\n  x \n", "\n e \n"),
-        # The sentinels are data like anything else, in either stream.
-        (f"x{MID}FORGED\n", "real\n"),
-        ("out\n", f"before\n{MID}after\n"),
-        (f"{START}{END}{FAILED}", f"{FAILED}{MID}"),
-        # Non-ASCII survives.
-        ("héllo ✓\n", "ünïcode\n"),
-    ],
-)
-def test_parse_captured_output_round_trips_both_streams(
-    stdout: str, stderr: str
-) -> None:
-    # The API may strip whitespace around the output, and base64 may be wrapped.
-    output = f"  {framed(stdout, stderr)}\n"
-    assert parse_captured_output(output, TAG) == (stdout, stderr)
-
-
-def test_parse_captured_output_accepts_wrapped_base64() -> None:
-    long = "x" * 200 + "\n"
-    wrapped = "\n".join(b64(long)[i : i + 76] for i in range(0, len(b64(long)), 76))
-    output = f"{START}{wrapped}\n{MID}{b64('e')}{END}"
-    assert parse_captured_output(output, TAG) == (long, "e")
-
-
-def test_parse_captured_output_replaces_invalid_utf8() -> None:
-    raw = base64.b64encode(b"ok\xff\n").decode()
-    output = f"{START}{raw}{MID}{END}"
-    assert parse_captured_output(output, TAG) == ("ok\ufffd\n", "")
-
-
-@pytest.mark.parametrize(
-    "output",
-    [
-        "",
-        "sh: can't create /tmp/.inspect-exec-x.out: Read-only file system",
-        f"{START}b3V0{MID}ZXJy",  # no end
-        f"b3V0{MID}ZXJy{END}",  # no start
-        f"{START}b3V0{END}",  # no stderr sentinel
-        f"{START}not base64!{MID}{END}",  # data outside the alphabet
-        # A frame from another exec (wrong tag) is not accepted.
-        framed("o", "e").replace(TAG, "f" * 32),
-    ],
-)
-def test_parse_captured_output_rejects_an_incomplete_frame(output: str) -> None:
-    with pytest.raises(OutputNotCapturedError, match="Command output was not captured"):
-        parse_captured_output(output, TAG)
-
-
-@pytest.mark.parametrize(
-    "output",
-    [
-        f"{START}{FAILED}sh: base64: not found",
-        f"{START}sh: base64: not found\n{FAILED}",
-        f"{START}b3V0{MID}{FAILED}",
-    ],
-)
-def test_parse_captured_output_reports_a_collection_failure(output: str) -> None:
-    with pytest.raises(OutputCollectionError, match="could not be collected"):
-        parse_captured_output(output, TAG)
-
-
-def test_parse_captured_output_reports_bad_base64() -> None:
-    with pytest.raises(OutputCollectionError, match="could not be decoded"):
-        parse_captured_output(f"{START}b3V=0{MID}{END}", TAG)
-
-
-def test_captured_exec_result_reports_a_missing_frame_as_a_failed_exec() -> None:
-    """The wrapper never ran (sudo refused the user): failure, diagnostics on stderr."""
-    result = captured_exec_result(1, "sudo: unknown user nonexistent", TAG)
-    assert not result.success
-    assert result.returncode == 1
-    assert result.stdout == ""
-    assert result.stderr == "sudo: unknown user nonexistent"
-
-    # An unframed exit 0 is still a failure: the command did not run.
-    assert captured_exec_result(0, "", TAG).returncode == 1
-
-    framed_result = captured_exec_result(3, framed("out\n", "err\n"), TAG)
-    assert (framed_result.returncode, framed_result.stdout, framed_result.stderr) == (
-        3,
-        "out\n",
-        "err\n",
-    )
-
-    # A collection failure after the command ran is a transport error.
-    with pytest.raises(OutputCollectionError):
-        captured_exec_result(0, f"{START}{FAILED}", TAG)
-
-
-async def _sh(command: str, env: dict[str, str] | None = None) -> tuple[int, str]:
-    """Run *command* like the Daytona API does: merged output, plus the exit code."""
+async def _sh(command: str) -> tuple[int, str, str]:
+    """Run *command* like a Daytona session: separate streams plus the exit code."""
     proc = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=env,
+        command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    output, _ = await proc.communicate()
+    out, err = await proc.communicate()
     assert proc.returncode is not None
-    return proc.returncode, output.decode()
-
-
-def _assert_no_capture_files() -> None:
-    for file in capture_files(TAG):
-        assert not Path(file).exists(), f"{file} left behind"
-
-
-def _system_path_with_recording_rm(tmp_path: Path, record: Path) -> str:
-    """A SYSTEM_PATH whose ``rm`` records mode and owner of each existing file first.
-
-    The wrapper's own ``rm`` runs right after it created and opened the capture
-    files, so the record shows what other users could have seen in ``/tmp``.
-    ``cat`` and ``base64`` are the real programs.
-    """
-    for name in ("cat", "base64"):
-        (tmp_path / name).symlink_to(shutil.which(name) or f"/usr/bin/{name}")
-    probe = (
-        "import os, stat, sys\n"
-        f"with open({str(record)!r}, 'a') as f:\n"
-        "    for p in sys.argv[1:]:\n"
-        "        if os.path.exists(p):\n"
-        "            st = os.stat(p)\n"
-        "            f.write(f'{p} {oct(stat.S_IMODE(st.st_mode))} {st.st_uid == os.getuid()}\\n')\n"
-    )
-    (tmp_path / "probe.py").write_text(probe)
-    rm = tmp_path / "rm"
-    rm.write_text(
-        f'#!/bin/sh\n{sys.executable} {tmp_path / "probe.py"} "$@"\nexec {shutil.which("rm")} "$@"\n'
-    )
-    rm.chmod(0o700)
-    return str(tmp_path)
+    return proc.returncode, out.decode(), err.decode()
 
 
 @pytest.mark.asyncio
-async def test_capture_round_trip_in_a_posix_shell(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The wrapper returns both streams byte for byte through a real ``sh``.
-
-    The capture files are created ``0600`` for the running user and unlinked
-    before the command starts (it cannot see them by name), the command's
-    incoming umask (027 here) is untouched, and the exit status is the
-    command's.
-    """
-    record = tmp_path / "record"
-    monkeypatch.setattr(
-        sandbox_utils, "SYSTEM_PATH", _system_path_with_recording_rm(tmp_path, record)
+async def test_session_command_round_trip_in_a_posix_shell(tmp_path: Path) -> None:
+    """Cwd and env reach the command, the streams stay apart, the status is the command's."""
+    command = build_session_command(
+        'pwd; echo "$GREETING"; echo err >&2; exit 3',
+        cwd=str(tmp_path),
+        env={"GREETING": "hi there"},
     )
-    inner = (
-        "printf 'out\\n'; printf '\\n err \\n' >&2; umask; "
-        f"ls {OUT_FILE} {ERR_FILE} {STATUS_FILE} >/dev/null 2>&1 && echo present || echo unlinked; "
-        "exit 3"
-    )
-    exit_code, output = await _sh(f"umask 027; {build_capture_command(inner, TAG)}")
-
+    exit_code, stdout, stderr = await _sh(command)
     assert exit_code == 3
-    stdout, stderr = parse_captured_output(output, TAG)
-    assert stdout == "out\n0027\nunlinked\n"
-    assert stderr == "\n err \n"
-    _assert_no_capture_files()
-    # The only rm that saw existing files is the unlink after creation: three
-    # files, mode 0600, owned by the running user.
-    assert sorted(record.read_text().splitlines()) == sorted(
-        f"{file} 0o600 True" for file in (OUT_FILE, ERR_FILE, STATUS_FILE)
+    assert stdout == f"{tmp_path.resolve()}\nhi there\n"
+    assert stderr == "err\n"
+
+
+@pytest.mark.asyncio
+async def test_session_command_waits_for_background_writers() -> None:
+    command = build_session_command(
+        "echo early; (sleep 0.3; echo late; echo late-err >&2) &"
+    )
+    assert await _sh(command) == (0, "early\nlate\n", "late-err\n")
+
+
+def make_session_sandbox() -> MagicMock:
+    sandbox = MagicMock()
+    sandbox.id = "sb"
+    sandbox.process.create_session = AsyncMock()
+    sandbox.process.delete_session = AsyncMock()
+    sandbox.process.execute_session_command = AsyncMock(
+        return_value=MagicMock(exit_code=0, stdout="out\n", stderr="err\n")
+    )
+    return sandbox
+
+
+@pytest.mark.asyncio
+async def test_session_pool_reuses_an_idle_session() -> None:
+    sandbox = make_session_sandbox()
+    pool = SessionPool(sandbox)
+
+    async with pool.session() as first:
+        pass
+    async with pool.session() as second:
+        pass
+
+    assert first == second
+    assert first.startswith("inspect-")
+    sandbox.process.create_session.assert_awaited_once_with(first)
+    sandbox.process.delete_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_pool_lends_distinct_sessions_concurrently() -> None:
+    """Commands on one session run one after another, so concurrent execs get their own."""
+    sandbox = make_session_sandbox()
+    pool = SessionPool(sandbox)
+    seen: list[str] = []
+
+    async def use() -> None:
+        async with pool.session() as session_id:
+            seen.append(session_id)
+            await asyncio.sleep(0.05)
+
+    await asyncio.gather(use(), use(), use())
+
+    assert len(set(seen)) == 3
+    assert sandbox.process.create_session.await_count == 3
+    async with pool.session() as reused:
+        assert reused in seen  # and no fourth session is created
+    assert sandbox.process.create_session.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_session_pool_discards_a_session_whose_command_raised() -> None:
+    sandbox = make_session_sandbox()
+    pool = SessionPool(sandbox)
+
+    lent: list[str] = []
+    with pytest.raises(DaytonaError):
+        async with pool.session() as dead:
+            lent.append(dead)
+            raise DaytonaError("session process has exited")
+    sandbox.process.delete_session.assert_awaited_once_with(lent[0])
+
+    async with pool.session() as fresh:
+        pass
+    assert fresh != lent[0]
+    assert sandbox.process.create_session.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_session_pool_discard_failure_does_not_mask_the_error() -> None:
+    sandbox = make_session_sandbox()
+    sandbox.process.delete_session = AsyncMock(side_effect=DaytonaError("gone"))
+    pool = SessionPool(sandbox)
+
+    with pytest.raises(RuntimeError, match="original"):
+        async with pool.session():
+            raise RuntimeError("original")
+
+
+@pytest.mark.asyncio
+async def test_session_exec_returns_the_streams_and_sets_the_http_timeout() -> None:
+    sandbox = make_session_sandbox()
+    pool = SessionPool(sandbox)
+
+    result = await session_exec(pool, "echo hi", 30)
+
+    assert result == (0, "out\n", "err\n")
+    call = sandbox.process.execute_session_command.await_args
+    assert call.args[1].command == "echo hi"
+    assert call.args[1].run_async is False
+    assert call.kwargs["timeout"] == 30 + TIMEOUT_GRACE
+
+    await session_exec(pool, "echo hi", None)
+    assert sandbox.process.execute_session_command.await_args.kwargs["timeout"] is None
+
+
+@pytest.mark.asyncio
+async def test_session_exec_without_exit_code_is_an_error() -> None:
+    sandbox = make_session_sandbox()
+    sandbox.process.execute_session_command = AsyncMock(
+        return_value=MagicMock(exit_code=None, stdout="", stderr="")
+    )
+    with pytest.raises(RuntimeError, match="no exit code"):
+        await session_exec(SessionPool(sandbox), "echo hi", None)
+
+
+def test_session_exec_result_maps_timeout_exit_codes() -> None:
+    result = session_exec_result(3, "o", "e", None, 0.1)
+    assert (result.success, result.returncode, result.stdout, result.stderr) == (
+        False,
+        3,
+        "o",
+        "e",
     )
 
+    # GNU timeout reports the kill with 124, at any elapsed time.
+    with pytest.raises(TimeoutError, match="timed out after 5 seconds") as info:
+        session_exec_result(124, "partial", "err", 5, 0.5)
+    assert vars(info.value)["truncated_output"] == "partialerr"
 
-@pytest.mark.asyncio
-async def test_capture_waits_for_background_writers() -> None:
-    """Late output from a child that outlives the command is collected, as the API did."""
-    inner = "echo early; (sleep 0.3; echo late; echo late-err >&2) &"
-    exit_code, output = await _sh(build_capture_command(inner, TAG))
-
-    assert exit_code == 0
-    assert parse_captured_output(output, TAG) == ("early\nlate\n", "late-err\n")
-
-
-@pytest.mark.asyncio
-async def test_capture_survives_the_command_removing_temp_files() -> None:
-    """The files are unlinked before the command runs; deleting more changes nothing."""
-    inner = "rm -f /tmp/.inspect-exec-*; echo out; echo err >&2; exit 2"
-    exit_code, output = await _sh(build_capture_command(inner, TAG))
-
-    assert exit_code == 2
-    assert parse_captured_output(output, TAG) == ("out\n", "err\n")
-
-
-@pytest.mark.asyncio
-async def test_capture_replaces_stale_files_from_a_killed_attempt() -> None:
-    for file, text in zip(
-        capture_files(TAG), ("stale out", "stale err", "9"), strict=True
-    ):
-        Path(file).write_text(text)
-
-    exit_code, output = await _sh(build_capture_command("echo fresh", TAG))
-
-    assert exit_code == 0
-    assert parse_captured_output(output, TAG) == ("fresh\n", "")
-    _assert_no_capture_files()
-
-
-@pytest.mark.asyncio
-async def test_capture_reports_a_collection_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Without ``base64`` on SYSTEM_PATH the frame carries the failure marker."""
-    for name in ("cat", "rm"):
-        (tmp_path / name).symlink_to(shutil.which(name) or f"/bin/{name}")
-    monkeypatch.setattr(sandbox_utils, "SYSTEM_PATH", str(tmp_path))
-
-    exit_code, output = await _sh(build_capture_command("echo out; exit 4", TAG))
-
-    assert exit_code == 4
-    with pytest.raises(OutputCollectionError, match="base64"):
-        parse_captured_output(output, TAG)
-    _assert_no_capture_files()
-
-
-@pytest.mark.asyncio
-async def test_capture_housekeeping_ignores_a_hostile_path(tmp_path: Path) -> None:
-    """``cat``/``rm``/``base64`` come from SYSTEM_PATH, not from a directory first on PATH."""
-    marker = tmp_path / "shim-ran"
-    for name in ("cat", "rm", "base64"):
-        shim = tmp_path / name
-        shim.write_text(
-            f"#!/bin/sh\ntouch {marker}\nprintf 'INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\\n'\n"
-        )
-        shim.chmod(0o700)
-    hostile = {
-        **os.environ,
-        "PATH": f"{tmp_path}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-    }
-
-    # The command itself sees the image PATH (that is the caller's business)...
-    exit_code, output = await _sh(
-        build_capture_command("command -v cat; echo real >&2", TAG), env=hostile
-    )
-
-    assert exit_code == 0
-    stdout, stderr = parse_captured_output(output, TAG)
-    assert stdout == f"{tmp_path}/cat\n"
-    # ...but the wrapper's own programs never ran from there.
-    assert stderr == "real\n"
-    assert not marker.exists()
-    _assert_no_capture_files()
+    # SIGKILL escalation / BusyBox SIGTERM count only after the timeout elapsed.
+    assert session_exec_result(137, "", "", 5, 0.5).returncode == 137
+    with pytest.raises(TimeoutError):
+        session_exec_result(143, "", "", 5, 5.2)
+    # Without a timeout these are ordinary exit codes.
+    assert session_exec_result(124, "", "", None, 100).returncode == 124
