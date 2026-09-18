@@ -8,7 +8,7 @@ import shlex
 import string
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from logging import getLogger
 
@@ -50,6 +50,93 @@ def build_stdin_command(cmd: list[str], stdin_file: str, cleanup: bool = True) -
     if cleanup:
         return f"{base}; _ec=$?; rm -f {quoted_file}; exit $_ec"
     return f"{base}; _ec=$?; exit $_ec"
+
+
+# Daytona's exec API returns one merged output stream, so a command's stderr is
+# captured to a private temp file in the sandbox and read back with a second
+# exec. The readback brackets the file contents with this sentinel because the
+# API strips the trailing newline from the output (as stdout shows today);
+# the sentinels keep that, or any wider trimming, away from the stderr bytes.
+STDERR_SENTINEL = "<<inspect-stderr>>"
+
+
+def build_stderr_capture_command(command: str, stderr_file: str) -> str:
+    """Wrap a shell *command* so its stderr goes to *stderr_file* instead of the output.
+
+    The file is created ``0600`` (``umask 077`` in a subshell, so the command's
+    own umask is untouched) before the command runs, so other users in the
+    sandbox cannot read a privileged command's stderr from ``/tmp``. Its
+    contents are read back with :func:`build_stderr_readback_command`.
+    """
+    quoted_file = shlex.quote(stderr_file)
+    return f"(umask 077 && : > {quoted_file}) && {{ {command}; }} 2>>{quoted_file}"
+
+
+def build_stderr_readback_command(
+    stderr_file: str, cleanup_files: Sequence[str] = ()
+) -> str:
+    """Build a shell command that prints *stderr_file* between sentinels and removes it.
+
+    Args:
+        stderr_file: The file :func:`build_stderr_capture_command` wrote.
+        cleanup_files: Other temp files to remove in the same round trip
+            (the stdin file, when the command ran as a different user).
+
+    The exit status is ``cat``'s, so a missing or unreadable file is reported
+    rather than read as empty stderr. Decode the output with
+    :func:`parse_stderr_readback`.
+    """
+    quoted_file = shlex.quote(stderr_file)
+    remove = " ".join(shlex.quote(f) for f in (stderr_file, *cleanup_files))
+    sentinel = shlex.quote(STDERR_SENTINEL)
+    return (
+        f"printf %s {sentinel}; cat {quoted_file}; _ec=$?; rm -f {remove}; "
+        f"printf %s {sentinel}; exit $_ec"
+    )
+
+
+def parse_stderr_readback(exit_code: int, output: str, stderr_file: str) -> str:
+    """Return the stderr contents from a :func:`build_stderr_readback_command` run.
+
+    Raises:
+        RuntimeError: The readback did not complete or ``cat`` failed; stderr
+            is not silently reported as empty.
+    """
+    n = len(STDERR_SENTINEL)
+    # Nothing of ours lies outside the sentinels, so whitespace there is the
+    # API's to strip or keep.
+    output = output.strip()
+    framed = (
+        len(output) >= 2 * n
+        and output.startswith(STDERR_SENTINEL)
+        and output.endswith(STDERR_SENTINEL)
+    )
+    if exit_code != 0 or not framed:
+        detail = output[n:-n] if framed else output
+        raise RuntimeError(
+            f"Failed to read the command's stderr from {stderr_file} "
+            f"(exit code {exit_code}): {detail.strip()}"
+        )
+    return output[n:-n]
+
+
+async def read_stderr_file(
+    run: Callable[[str], Awaitable[tuple[int, str]]],
+    stderr_file: str,
+    cleanup_files: Sequence[str] = (),
+) -> str:
+    """Read back and remove the stderr file a captured command wrote.
+
+    Args:
+        run: Executes a shell command in the sandbox (or on the DinD VM) and
+            returns ``(exit_code, output)``.
+        stderr_file: The file :func:`build_stderr_capture_command` wrote.
+        cleanup_files: Other temp files to remove in the same round trip.
+    """
+    exit_code, output = await run(
+        build_stderr_readback_command(stderr_file, cleanup_files)
+    )
+    return parse_stderr_readback(exit_code, output, stderr_file)
 
 
 async def verify_file_size(

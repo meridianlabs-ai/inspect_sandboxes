@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+import shlex
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,13 +12,27 @@ from inspect_ai.util import ComposeConfig, ComposeService
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._dind_env import DaytonaDinDServiceEnvironment
 from inspect_sandboxes.daytona._dind_project import DaytonaDinDProject
+from inspect_sandboxes.daytona._sandbox_utils import (
+    STDERR_SENTINEL,
+    build_stderr_capture_command,
+    build_stderr_readback_command,
+)
+
+# What the VM answers to the stderr readback exec() issues after every
+# command when the command wrote nothing to stderr.
+EMPTY_STDERR_READBACK = f"{STDERR_SENTINEL}{STDERR_SENTINEL}"
+
+STDERR_FILE_RE = re.compile(r"/tmp/\.inspect-stderr-[0-9a-f]{32}")
 
 
 def make_mock_sandbox(sandbox_id: str = "sb-dind-123") -> MagicMock:
     sandbox = MagicMock()
     sandbox.id = sandbox_id
     sandbox.process = MagicMock()
-    sandbox.process.exec = AsyncMock(return_value=MagicMock(exit_code=0, result=""))
+    # Every VM command succeeds; as the stderr readback this reads as "".
+    sandbox.process.exec = AsyncMock(
+        return_value=MagicMock(exit_code=0, result=EMPTY_STDERR_READBACK)
+    )
     sandbox.fs = MagicMock()
     sandbox.fs.upload_file = AsyncMock()
     sandbox.fs.download_file = AsyncMock(return_value=b"content")
@@ -167,14 +184,109 @@ async def test_exec_stdin_two_hop_upload() -> None:
         patch(
             "inspect_sandboxes.daytona._dind_env.vm_exec",
             new_callable=AsyncMock,
-            return_value=(0, ""),
-        ),
+            return_value=(0, EMPTY_STDERR_READBACK),
+        ) as mock_vm_exec,
     ):
         result = await env.exec(["cat"], input="hello")
 
     mock_upload.assert_called_once()
+    stdin_vm_file = mock_upload.call_args[0][1]
     assert mock_upload.call_args[0][2] == b"hello"
     assert result.stdout == "stdin data"
+    # The stderr readback removes the VM's stdin temp file in the same trip.
+    mock_vm_exec.assert_called_once()
+    readback = mock_vm_exec.call_args[0][1]
+    assert readback.startswith("printf")
+    assert (
+        f"rm -f {shlex.quote(readback_stderr_file(readback))} {stdin_vm_file};"
+        in readback
+    )
+
+
+def readback_stderr_file(command: str) -> str:
+    match = STDERR_FILE_RE.search(command)
+    assert match is not None, f"no stderr temp file in {command!r}"
+    return match.group(0)
+
+
+@pytest.mark.asyncio
+async def test_exec_captures_stderr_on_the_vm() -> None:
+    """The compose exec's stderr is captured to a VM file and read back separately."""
+    project = make_mock_project()
+    env = DaytonaDinDServiceEnvironment(project, "web", "/app")
+
+    commands: list[str] = []
+    outputs: list[tuple[int, str]] = [
+        (0, "out"),
+        (0, f"{STDERR_SENTINEL}err\n{STDERR_SENTINEL}"),
+    ]
+
+    async def fake_vm_exec(
+        sandbox: Any, command: str, timeout: int | None = 60
+    ) -> tuple[int, str]:
+        assert sandbox is project.sandbox
+        commands.append(command)
+        return outputs[len(commands) - 1]
+
+    with (
+        patch("inspect_sandboxes.daytona._dind_project.vm_exec", fake_vm_exec),
+        patch("inspect_sandboxes.daytona._dind_env.vm_exec", fake_vm_exec),
+    ):
+        result = await env.exec(["sh", "-c", "echo out; echo err >&2"])
+
+    assert result.success
+    assert result.stdout == "out"
+    assert result.stderr == "err\n"
+
+    assert len(commands) == 2
+    stderr_file = readback_stderr_file(commands[0])
+    compose_cmd = shlex.join(
+        [
+            "docker",
+            "compose",
+            "-p",
+            "inspect-test1234",
+            "--project-directory",
+            "/inspect/compose",
+            "-f",
+            "/inspect/compose/compose.yaml",
+            "exec",
+            "-T",
+            "-w",
+            "/app",
+            "web",
+            "sh",
+            "-c",
+            "echo out; echo err >&2",
+        ]
+    )
+    assert commands[0] == build_stderr_capture_command(compose_cmd, stderr_file)
+    assert commands[1] == build_stderr_readback_command(stderr_file)
+
+
+@pytest.mark.asyncio
+async def test_exec_removes_stderr_file_when_command_fails() -> None:
+    """A failed exec still removes the VM's stderr temp file, best effort."""
+    env = make_env()
+
+    with (
+        patch(
+            "inspect_sandboxes.daytona._dind_env.compose_exec",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ) as mock_exec,
+        patch(
+            "inspect_sandboxes.daytona._dind_env.vm_exec",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("vm down"),
+        ) as mock_vm_exec,
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            await env.exec(["true"])
+
+    stderr_file = mock_exec.call_args[1]["stderr_file"]
+    mock_vm_exec.assert_called_once()
+    assert mock_vm_exec.call_args[0][1] == f"rm -f {stderr_file}"
 
 
 @pytest.mark.asyncio

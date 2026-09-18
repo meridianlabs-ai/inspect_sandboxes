@@ -1,5 +1,8 @@
-"""Tests for Daytona sandbox create-retry and zombie-reap helpers."""
+"""Tests for Daytona sandbox create-retry, zombie-reap and exec stderr helpers."""
 
+import asyncio
+import stat
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
@@ -13,8 +16,13 @@ from daytona_sdk import (
 )
 from inspect_sandboxes.daytona._sandbox_utils import (
     CREATE_SANDBOX_ATTEMPTS,
+    STDERR_SENTINEL,
     _respin_create_params,
+    build_stderr_capture_command,
+    build_stderr_readback_command,
     create_sandbox,
+    parse_stderr_readback,
+    read_stderr_file,
     reap_zombie_sandboxes,
     reset_zombie_registry,
     zombie_registry,
@@ -248,3 +256,95 @@ async def test_zombie_registry_visible_across_child_task() -> None:
         tg.start_soon(sample_task)
 
     assert "zombie-from-child" in zombie_registry()
+
+
+# --- exec stderr capture -----------------------------------------------------
+
+
+def test_build_stderr_capture_command_redirects_into_a_private_file() -> None:
+    command = build_stderr_capture_command("echo 'a b' >&2", "/tmp/.inspect-stderr-1")
+    assert command == (
+        "(umask 077 && : > /tmp/.inspect-stderr-1) && "
+        "{ echo 'a b' >&2; } 2>>/tmp/.inspect-stderr-1"
+    )
+
+
+def test_build_stderr_readback_command_removes_extra_files() -> None:
+    command = build_stderr_readback_command("/tmp/err", ["/tmp/in put"])
+    assert command == (
+        f"printf %s '{STDERR_SENTINEL}'; cat /tmp/err; _ec=$?; "
+        f"rm -f /tmp/err '/tmp/in put'; printf %s '{STDERR_SENTINEL}'; exit $_ec"
+    )
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (f"{STDERR_SENTINEL}err\n{STDERR_SENTINEL}", "err\n"),
+        (f"{STDERR_SENTINEL}{STDERR_SENTINEL}", ""),
+        # The API trims the merged output; the sentinels keep that away from
+        # the stderr bytes, including a trailing newline or a leading blank.
+        (f"  {STDERR_SENTINEL}\n  x \n{STDERR_SENTINEL}\n", "\n  x \n"),
+        # Only one sentinel is stripped from each end.
+        (
+            f"{STDERR_SENTINEL}{STDERR_SENTINEL}!{STDERR_SENTINEL}",
+            f"{STDERR_SENTINEL}!",
+        ),
+    ],
+)
+def test_parse_stderr_readback_strips_sentinels(output: str, expected: str) -> None:
+    assert parse_stderr_readback(0, output, "/tmp/err") == expected
+
+
+def test_parse_stderr_readback_rejects_a_failed_cat() -> None:
+    output = f"{STDERR_SENTINEL}cat: /tmp/err: No such file{STDERR_SENTINEL}"
+    with pytest.raises(RuntimeError, match=r"/tmp/err \(exit code 1\): cat: /tmp/err"):
+        parse_stderr_readback(1, output, "/tmp/err")
+
+
+@pytest.mark.parametrize(
+    "output", ["", "err", f"{STDERR_SENTINEL}err", STDERR_SENTINEL]
+)
+def test_parse_stderr_readback_rejects_unframed_output(output: str) -> None:
+    with pytest.raises(RuntimeError, match="Failed to read the command's stderr"):
+        parse_stderr_readback(0, output, "/tmp/err")
+
+
+async def _sh(command: str) -> tuple[int, str]:
+    """Run *command* like the Daytona API does: merged output, trimmed."""
+    proc = await asyncio.create_subprocess_shell(
+        command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+    )
+    output, _ = await proc.communicate()
+    assert proc.returncode is not None
+    return proc.returncode, output.decode().strip()
+
+
+@pytest.mark.asyncio
+async def test_stderr_capture_round_trip_in_a_posix_shell(tmp_path: Path) -> None:
+    """Capture then readback through a real ``sh`` returns stderr byte for byte."""
+    stderr_file = str(tmp_path / "err")
+    (tmp_path / "keep").write_text("umask must not leak into the command")
+
+    exit_code, output = await _sh(
+        build_stderr_capture_command(
+            f"echo out; printf '\\n err \\n' >&2; umask > {tmp_path / 'umask'}; exit 3",
+            stderr_file,
+        )
+    )
+    assert (exit_code, output) == (3, "out")
+    # The file is private to the user running the command...
+    assert stat.S_IMODE(Path(stderr_file).stat().st_mode) == 0o600
+    # ...and the command itself ran with its own umask, not 077.
+    assert (tmp_path / "umask").read_text().strip() != "0077"
+
+    stderr = await read_stderr_file(_sh, stderr_file, [str(tmp_path / "keep")])
+    assert stderr == "\n err \n"
+    assert not Path(stderr_file).exists()
+    assert not (tmp_path / "keep").exists()
+
+
+@pytest.mark.asyncio
+async def test_read_stderr_file_reports_a_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="Failed to read the command's stderr"):
+        await read_stderr_file(_sh, str(tmp_path / "missing"))

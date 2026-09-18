@@ -600,7 +600,6 @@ async def test_self_check_single_service(
 ) -> None:
     """Run inspect_ai's self-check suite against a single-service Daytona sandbox."""
     known_failures = [
-        "test_exec_stderr",  # Daytona merges stdout+stderr; stderr always empty
         "test_exec_permission_error",  # exit code 126, not translated to PermissionError
         "test_exec_output",  # Daytona strips trailing newline from output
         "test_exec_env_vars",  # trailing newline stripped (env vars themselves work)
@@ -651,7 +650,6 @@ async def test_self_check_dind(
 ) -> None:
     """Run inspect_ai's self-check suite against a DinD Daytona sandbox."""
     known_failures = [
-        "test_exec_stderr",  # DinD routes through compose exec; stderr merged
         "test_exec_permission_error",  # exit code 126, not translated to PermissionError
         "test_exec_output",  # trailing newline stripped by compose exec
         "test_exec_env_vars",  # trailing newline stripped
