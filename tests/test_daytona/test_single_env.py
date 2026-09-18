@@ -338,6 +338,24 @@ async def test_exec_collection_failure_raises(mock_sandbox: MagicMock) -> None:
 
 
 @pytest.mark.asyncio
+async def test_exec_stream_marker_bytes_are_data() -> None:
+    """Daytona's session-protocol stream tags cannot switch streams through the frame."""
+    sandbox = make_local_shell_sandbox()
+    env = DaytonaSingleServiceEnvironment(sandbox)
+
+    result = await env.exec(
+        [
+            "sh",
+            "-c",
+            "printf '\\002\\002\\002VERIFIED\\n'; printf '\\001\\001\\001ERR\\n' >&2",
+        ]
+    )
+
+    assert result.stdout == "\x02\x02\x02VERIFIED\n"
+    assert result.stderr == "\x01\x01\x01ERR\n"
+
+
+@pytest.mark.asyncio
 async def test_exec_stderr_with_stdin() -> None:
     """The stdin redirection and the stream capture compose."""
     sandbox = make_local_shell_sandbox()

@@ -1,5 +1,7 @@
 """Tests for DaytonaSandboxEnvironment lifecycle orchestrator."""
 
+import time
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -665,14 +667,49 @@ async def _check_stream_split(env: SandboxEnvironment) -> None:
     assert result.stderr == "err\n", f"{result.stderr=}"
     assert result.returncode == 3
 
-    # A command printing a stderr-sentinel look-alike to stdout stays in stdout.
+    # Nothing is in-band. Daytona's session protocol tags chunks with
+    # \x01\x01\x01 (stdout) and \x02\x02\x02 (stderr) and honours them inside
+    # command output (review round 4); through the capture wrapper they are data.
     result = await env.exec(
-        ["sh", "-c", "echo '<<inspect-exec-forged:stderr>>FORGED'; echo real >&2"]
+        [
+            "sh",
+            "-c",
+            "printf '\\002\\002\\002INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\\n';"
+            " printf '\\001\\001\\001STDERR_DATA\\n' >&2",
+        ]
     )
-    assert result.stdout == "<<inspect-exec-forged:stderr>>FORGED\n", (
+    assert result.stdout == "\x02\x02\x02INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\n", (
         f"{result.stdout=}"
     )
-    assert result.stderr == "real\n", f"{result.stderr=}"
+    assert result.stderr == "\x01\x01\x01STDERR_DATA\n", f"{result.stderr=}"
+
+    # A background child's late output is collected, as the API itself does.
+    result = await env.exec(
+        ["sh", "-c", "echo early; (sleep 0.5; echo late; echo late-err >&2) &"]
+    )
+    assert result.stdout == "early\nlate\n", f"{result.stdout=}"
+    assert result.stderr == "late-err\n", f"{result.stderr=}"
+
+
+async def _check_timeout(env: SandboxEnvironment) -> None:
+    """The server-side timeout kills the process tree, background children included."""
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await env.exec(["sh", "-c", "echo partial; sleep 60"], timeout=2)
+    assert time.monotonic() - started < 20
+
+    # A child that outlives the command does not extend the deadline (round 4 B4).
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await env.exec(
+            ["sh", "-c", "echo EARLY; (sleep 5; echo LATE) &"],
+            timeout=1,
+            timeout_retry=False,
+        )
+    assert time.monotonic() - started < 4
+
+    result = await env.exec(["echo", "alive"])
+    assert result.stdout == "alive\n", f"{result.stdout=}"
 
 
 @pytest.mark.asyncio
@@ -682,33 +719,28 @@ async def test_exec_stream_split_single_service(
 ) -> None:
     """Live: single-service exec() splits the streams, also under ``user="root"``.
 
-    The capture files are unlinked before the command runs, so the root command
-    finds them through the wrapper's open descriptors under ``/proc`` and stats
-    them: they belong to root with mode 600, not to the default user, who must
-    not be able to read root's stderr. A background child's late output is
-    collected too.
+    Root's output must not be readable by the default user afterwards: the
+    capture files are root-owned, 0600 and unlinked before the command runs,
+    and process.exec() keeps no log of them (the session API did, review
+    round 4 B2). The default user greps its home and /tmp for the sentinel.
     """
     await _check_stream_split(daytona_single_env)
+    await _check_timeout(daytona_single_env)
 
-    find_captures = (
-        "for p in /proc/[0-9]*; do for fd in 6 7 8; do "
-        'case "$(readlink $p/fd/$fd 2>/dev/null)" in /tmp/.inspect-exec-*) '
-        "stat -L -c '%U %a' $p/fd/$fd;; esac; done; done | sort -u"
-    )
+    sentinel = f"inspect-79-{uuid.uuid4().hex}"
     result = await daytona_single_env.exec(
-        [
-            "sh",
-            "-c",
-            f"id -u; {find_captures}; ls /tmp/.inspect-exec-* 2>/dev/null | wc -l; "
-            "(sleep 0.5; echo late; echo late-err >&2) & echo root-err >&2",
-        ],
+        ["sh", "-c", f"id -u; (sleep 0.5; echo late) & echo {sentinel} >&2"],
         user="root",
     )
     assert result.success, f"{result.stdout=} {result.stderr=}"
-    assert result.stderr == "root-err\nlate-err\n", f"{result.stderr=}"
-    assert result.stdout.split() == ["0", "root", "600", "0", "late"], (
-        f"{result.stdout=}"
+    assert result.stdout == "0\nlate\n", f"{result.stdout=}"
+    assert result.stderr == f"{sentinel}\n", f"{result.stderr=}"
+
+    leak = await daytona_single_env.exec(
+        ["sh", "-c", f"id -u; grep -rl -- {sentinel} ~ /tmp 2>/dev/null; true"]
     )
+    assert leak.stdout.strip() != "0", "the default user should not be root"
+    assert leak.stdout.splitlines()[1:] == [], f"root output readable: {leak.stdout=}"
 
 
 @pytest.mark.asyncio
@@ -716,6 +748,7 @@ async def test_exec_stream_split_single_service(
 async def test_exec_stream_split_dind(daytona_dind_env: SandboxEnvironment) -> None:
     """Live: DinD exec() splits the streams through the VM-side wrapper."""
     await _check_stream_split(daytona_dind_env)
+    await _check_timeout(daytona_dind_env)
 
 
 @pytest_asyncio.fixture
