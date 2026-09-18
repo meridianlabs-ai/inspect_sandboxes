@@ -658,6 +658,54 @@ async def test_self_check_dind(
     _check_self_check_results(results, known_failures)
 
 
+async def _check_stream_split(env: SandboxEnvironment) -> None:
+    """exec() returns stdout and stderr separately and intact (#79)."""
+    result = await env.exec(["sh", "-c", "echo out; echo err >&2; exit 3"])
+    assert result.stdout == "out\n", f"{result.stdout=}"
+    assert result.stderr == "err\n", f"{result.stderr=}"
+    assert result.returncode == 3
+
+    # A command printing a stderr-sentinel look-alike to stdout stays in stdout.
+    result = await env.exec(
+        ["sh", "-c", "echo '<<inspect-exec-forged:stderr>>FORGED'; echo real >&2"]
+    )
+    assert result.stdout == "<<inspect-exec-forged:stderr>>FORGED\n", (
+        f"{result.stdout=}"
+    )
+    assert result.stderr == "real\n", f"{result.stderr=}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_exec_stream_split_single_service(
+    daytona_single_env: SandboxEnvironment,
+) -> None:
+    """Live: single-service exec() splits the streams, also under ``user="root"``.
+
+    The root command lists the capture files the wrapper created for it, so
+    the output shows they belong to root with mode 600 (not to the default
+    user, who must not be able to read root's stderr).
+    """
+    await _check_stream_split(daytona_single_env)
+
+    result = await daytona_single_env.exec(
+        ["sh", "-c", "id -u; stat -c '%U %a' /tmp/.inspect-exec-*; echo root-err >&2"],
+        user="root",
+    )
+    assert result.success, f"{result.stdout=} {result.stderr=}"
+    assert result.stderr == "root-err\n", f"{result.stderr=}"
+    lines = result.stdout.splitlines()
+    assert lines[0] == "0"
+    assert lines[1:] == ["root 600", "root 600"], f"{result.stdout=}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_exec_stream_split_dind(daytona_dind_env: SandboxEnvironment) -> None:
+    """Live: DinD exec() splits the streams through the VM-side wrapper."""
+    await _check_stream_split(daytona_dind_env)
+
+
 @pytest_asyncio.fixture
 async def daytona_ports_env() -> AsyncGenerator[SandboxEnvironment, None]:
     """Create a real single-service Daytona sandbox that declares a port."""

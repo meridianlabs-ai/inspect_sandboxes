@@ -21,7 +21,11 @@ from daytona_sdk import (
     DaytonaNotFoundError,
     ListSandboxesQuery,
 )
-from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
+from inspect_ai.util import (
+    ExecResult,
+    OutputLimitExceededError,
+    SandboxEnvironmentLimits,
+)
 
 from inspect_sandboxes._util.naming import _HEX_LEN
 
@@ -109,18 +113,25 @@ def build_capture_command(command: str, tag: str) -> str:
     )
 
 
+class OutputNotCapturedError(RuntimeError):
+    """The output of a :func:`build_capture_command` run carries no frame.
+
+    The wrapper prints the frame after the command has run, so a missing frame
+    means the command never ran: ``sudo`` refused the user, ``/tmp`` was not
+    writable, the shell was killed. The raw output is the diagnostics.
+    """
+
+
 def parse_captured_output(output: str, tag: str) -> tuple[str, str]:
     """Split the output of a :func:`build_capture_command` run into (stdout, stderr).
 
     The stderr sentinel is searched from the end: the wrapper prints it after
     the command has finished, so whatever the command wrote to stdout, even a
     copy of the sentinel, stays in stdout. Whitespace outside the outer
-    sentinels is the API's to strip (it drops the trailing newline).
+    sentinels is the API's to strip or keep.
 
     Raises:
-        RuntimeError: The frame is missing, so the wrapper did not run to
-            completion (for example ``/tmp`` was not writable); the raw output
-            carries the shell's error.
+        OutputNotCapturedError: The frame is missing or incomplete.
     """
     start, mid, end = _sentinels(tag)
     body = output.strip()
@@ -129,17 +140,41 @@ def parse_captured_output(output: str, tag: str) -> tuple[str, str]:
         and body.endswith(end)
         and len(body) >= len(start) + len(end)
     ):
-        raise RuntimeError(
+        raise OutputNotCapturedError(
             f"Command output was not captured (the exec wrapper did not complete): "
             f"{output.strip()}"
         )
     body = body[len(start) : len(body) - len(end)]
     split = body.rfind(mid)
     if split < 0:
-        raise RuntimeError(
+        raise OutputNotCapturedError(
             f"Command output was not captured (stderr sentinel missing): {output.strip()}"
         )
     return body[:split], body[split + len(mid) :]
+
+
+def captured_exec_result(exit_code: int, output: str, tag: str) -> ExecResult[str]:
+    """The :class:`ExecResult` of a :func:`build_capture_command` run.
+
+    Output without the frame means the wrapper never reached the command (for
+    example ``sudo: unknown user``, or ``/tmp`` not writable), so the result is
+    a failed exec with the diagnostics on stderr, as a provider with native
+    streams would report a failed user switch. The command cannot produce
+    this itself: it runs with both streams redirected to files, so it has no
+    way to write to the API stream, framed or not.
+    """
+    try:
+        stdout, stderr = parse_captured_output(output, tag)
+    except OutputNotCapturedError:
+        return ExecResult(
+            success=False,
+            returncode=exit_code if exit_code != 0 else 1,
+            stdout="",
+            stderr=output,
+        )
+    return ExecResult(
+        success=exit_code == 0, returncode=exit_code, stdout=stdout, stderr=stderr
+    )
 
 
 def build_remove_command(files: Sequence[str]) -> str:

@@ -344,7 +344,7 @@ async def test_exec_reruns_command_when_the_vm_response_is_lost() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exec_unframed_vm_output_raises() -> None:
+async def test_exec_unframed_vm_output_is_a_failed_exec() -> None:
     env = make_env()
 
     with patch(
@@ -352,8 +352,11 @@ async def test_exec_unframed_vm_output_raises() -> None:
         new_callable=AsyncMock,
         return_value=(1, "sh: can't create /tmp/.inspect-exec-x.out: No space left"),
     ):
-        with pytest.raises(RuntimeError, match="No space left"):
-            await env.exec(["true"])
+        result = await env.exec(["true"])
+
+    assert not result.success
+    assert result.stdout == ""
+    assert "No space left" in result.stderr
 
 
 @pytest.mark.asyncio

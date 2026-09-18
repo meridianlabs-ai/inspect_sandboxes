@@ -43,10 +43,10 @@ from ._sandbox_utils import (
     build_capture_command,
     build_remove_command,
     build_stdin_command,
+    captured_exec_result,
     decode_file_content,
     delete_sandbox,
     new_capture_tag,
-    parse_captured_output,
     sdk_download,
     sdk_upload,
     verify_file_size,
@@ -266,13 +266,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             exit_code, output = await vm_exec(
                 self.project.sandbox, vm_command, timeout=t
             )
-            stdout, stderr = parse_captured_output(output, tag)
-            return ExecResult(
-                success=exit_code == 0,
-                returncode=exit_code,
-                stdout=stdout,
-                stderr=stderr,
-            )
+            return captured_exec_result(exit_code, output, tag)
 
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)

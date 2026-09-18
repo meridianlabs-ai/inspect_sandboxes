@@ -29,10 +29,10 @@ from ._sandbox_utils import (
     build_capture_command,
     build_remove_command,
     build_stdin_command,
+    captured_exec_result,
     decode_file_content,
     delete_sandbox,
     new_capture_tag,
-    parse_captured_output,
     verify_file_size,
 )
 
@@ -144,13 +144,7 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
                 env=env,
                 timeout=t,
             )
-            stdout, stderr = parse_captured_output(response.result, tag)
-            return ExecResult(
-                success=response.exit_code == 0,
-                returncode=response.exit_code,
-                stdout=stdout,
-                stderr=stderr,
-            )
+            return captured_exec_result(response.exit_code, response.result, tag)
 
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)

@@ -364,18 +364,19 @@ async def test_exec_reruns_command_when_the_response_is_lost() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exec_unframed_output_raises(mock_sandbox: MagicMock) -> None:
-    """Output without the frame (the wrapper could not run) is an error, not stdout."""
+async def test_exec_unframed_output_is_a_failed_exec(mock_sandbox: MagicMock) -> None:
+    """Output without the frame (the wrapper never ran) fails with it on stderr, not stdout."""
     mock_sandbox.process.exec = AsyncMock(
-        return_value=exec_response(
-            1, "sh: can't create /tmp/.inspect-exec-x.out: Read-only file system"
-        )
+        return_value=exec_response(1, "sudo: unknown user nonexistent")
     )
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
 
-    with pytest.raises(RuntimeError, match="Read-only file system"):
-        await env.exec(["echo", "out"])
+    result = await env.exec(["whoami"], user="nonexistent")
 
+    assert not result.success
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "sudo: unknown user nonexistent"
     assert mock_sandbox.process.exec.call_count == 1
 
 

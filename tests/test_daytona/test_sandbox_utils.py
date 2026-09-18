@@ -17,10 +17,12 @@ from daytona_sdk import (
 from inspect_sandboxes.daytona._sandbox_utils import (
     CREATE_SANDBOX_ATTEMPTS,
     SYSTEM_PATH,
+    OutputNotCapturedError,
     _respin_create_params,
     build_capture_command,
     build_remove_command,
     capture_files,
+    captured_exec_result,
     create_sandbox,
     parse_captured_output,
     reap_zombie_sandboxes,
@@ -326,8 +328,27 @@ def test_parse_captured_output_splits_on_the_last_sentinel(
     ],
 )
 def test_parse_captured_output_rejects_an_incomplete_frame(output: str) -> None:
-    with pytest.raises(RuntimeError, match="Command output was not captured"):
+    with pytest.raises(OutputNotCapturedError, match="Command output was not captured"):
         parse_captured_output(output, TAG)
+
+
+def test_captured_exec_result_reports_a_missing_frame_as_a_failed_exec() -> None:
+    """The wrapper never ran (sudo refused the user): failure, diagnostics on stderr."""
+    result = captured_exec_result(1, "sudo: unknown user nonexistent", TAG)
+    assert not result.success
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "sudo: unknown user nonexistent"
+
+    # An unframed exit 0 is still a failure: the command did not run.
+    assert captured_exec_result(0, "", TAG).returncode == 1
+
+    framed_result = captured_exec_result(3, framed("out\n", "err\n"), TAG)
+    assert (framed_result.returncode, framed_result.stdout, framed_result.stderr) == (
+        3,
+        "out\n",
+        "err\n",
+    )
 
 
 async def _sh(command: str, env: dict[str, str] | None = None) -> tuple[int, str]:
