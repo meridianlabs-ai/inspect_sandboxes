@@ -769,6 +769,55 @@ def test_convert_compose_command(
     assert result.command == expected_command
 
 
+@pytest.mark.parametrize(
+    ("entrypoint", "command", "expected_command"),
+    [
+        (["/bin/sh", "-c"], ["echo", "hello"], ["/bin/sh", "-c", "echo", "hello"]),
+        ("/bin/sh -c 'echo hello'", None, ["/bin/sh", "-c", "echo hello"]),
+        (["sleep", "infinity"], None, ["sleep", "infinity"]),
+        ([], ["echo", "hello"], ["echo", "hello"]),
+        ("", None, []),
+    ],
+)
+def test_convert_compose_entrypoint(
+    entrypoint: str | list[str],
+    command: str | list[str] | None,
+    expected_command: list[str],
+) -> None:
+    """Compose entrypoint replaces the image entrypoint and prefixes command."""
+    service = ComposeService(
+        image="python:3.12", entrypoint=entrypoint, command=command
+    )
+    config = ComposeConfig(services={"default": service})
+    image = MagicMock()
+    image_without_entrypoint = MagicMock()
+    image_without_defaults = MagicMock()
+    image.entrypoint.return_value = image_without_entrypoint
+    image_without_entrypoint.cmd.return_value = image_without_defaults
+
+    with patch(
+        "inspect_sandboxes.modal._compose.modal.Image.from_registry",
+        return_value=image,
+    ):
+        result = convert_compose_to_modal_params(config, None)
+
+    image.entrypoint.assert_called_once_with([])
+    image_without_entrypoint.cmd.assert_called_once_with([])
+    assert result.kwargs["image"] is image_without_defaults
+    assert result.command == expected_command
+
+
+def test_convert_compose_entrypoint_with_default_image() -> None:
+    """An entrypoint can launch against Modal's implicit default image."""
+    service = ComposeService(entrypoint=["sleep", "infinity"])
+    config = ComposeConfig(services={"default": service})
+
+    result = convert_compose_to_modal_params(config, None)
+
+    assert "image" not in result.kwargs
+    assert result.command == ["sleep", "infinity"]
+
+
 class TestImageRegistrySecret:
     """A private registry needs credentials at image-PULL time.
 
