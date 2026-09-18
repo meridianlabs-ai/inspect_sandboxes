@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, overload
 
 import yaml
-from daytona_sdk import AsyncDaytona, Resources
+from daytona import AsyncDaytona, Resources
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,

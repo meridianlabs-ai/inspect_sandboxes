@@ -670,6 +670,37 @@ wheels = [
 ]
 
 [[package]]
+name = "daytona"
+version = "0.182.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiofiles" },
+    { name = "aiohttp" },
+    { name = "daytona-api-client" },
+    { name = "daytona-api-client-async" },
+    { name = "daytona-toolbox-api-client" },
+    { name = "daytona-toolbox-api-client-async" },
+    { name = "deprecated" },
+    { name = "httpx" },
+    { name = "httpx-ws" },
+    { name = "obstore" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-instrumentation-aiohttp-client" },
+    { name = "opentelemetry-sdk" },
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "python-multipart" },
+    { name = "toml" },
+    { name = "urllib3" },
+    { name = "wsproto" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f5/03/fd86e47c9b425020a27e69f51bca9137f1a671abeb56a3801cf94d7dd6d4/daytona-0.182.0.tar.gz", hash = "sha256:b666e9d98abc6774dea14a71b526c55a3d27595beb36fb03790fb61cf982de98", size = 141485, upload-time = "2026-05-26T14:06:47.425Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8f/b9/893daea1fb4f4e590bbe0ed2589a174118b929a29d202688b13f18278bd8/daytona-0.182.0-py3-none-any.whl", hash = "sha256:02d7fbb707c55ee26d25449e0a10205751546b7735da7aab807b6731ba20f98e", size = 172026, upload-time = "2026-05-26T14:06:45.646Z" },
+]
+
+[[package]]
 name = "daytona-api-client"
 version = "0.182.0"
 source = { registry = "https://pypi.org/simple" }
@@ -698,37 +729,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/15/f9/b8212e75866a5ee876d054eff3ed48af4da380895b3427eef1c3b6d02aad/daytona_api_client_async-0.182.0.tar.gz", hash = "sha256:65691777e095185c39eafbec259f2d9eaf9e4812396bcdbb95e20618f5ddb636", size = 145691, upload-time = "2026-05-26T14:06:12.076Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/21/ed/b40cc14e7d2d954d5510f27f8294777679c75c534ca5ecfbd780f22c37f7/daytona_api_client_async-0.182.0-py3-none-any.whl", hash = "sha256:b2489bd5ae41a1f40c2b760bbd7977099e89c4b87e3608ffa39b22bef077f46f", size = 405528, upload-time = "2026-05-26T14:06:10.342Z" },
-]
-
-[[package]]
-name = "daytona-sdk"
-version = "0.182.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiofiles" },
-    { name = "aiohttp" },
-    { name = "daytona-api-client" },
-    { name = "daytona-api-client-async" },
-    { name = "daytona-toolbox-api-client" },
-    { name = "daytona-toolbox-api-client-async" },
-    { name = "deprecated" },
-    { name = "httpx" },
-    { name = "httpx-ws" },
-    { name = "obstore" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-instrumentation-aiohttp-client" },
-    { name = "opentelemetry-sdk" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "python-multipart" },
-    { name = "toml" },
-    { name = "urllib3" },
-    { name = "wsproto" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4c/1d/9a1073c320cf06b669808858b2279a32e329edae440c36a6ac532c4947a0/daytona_sdk-0.182.0.tar.gz", hash = "sha256:1403c4aead73a598248cb46e709a1ba644992a7e7701247ec1f914411557736a", size = 141519, upload-time = "2026-05-26T14:06:51.285Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ad/66/b089ff25ad9bd70ec96d9c2c86168c262a7a5b024415f039dc140df6ef57/daytona_sdk-0.182.0-py3-none-any.whl", hash = "sha256:b0da2bb741c659e64e9ed2c4a4e585d315c093d973cf62594baa5d41f6c2d639", size = 172573, upload-time = "2026-05-26T14:06:49.321Z" },
 ]
 
 [[package]]
@@ -1292,7 +1292,7 @@ wheels = [
 name = "inspect-sandboxes"
 source = { editable = "." }
 dependencies = [
-    { name = "daytona-sdk" },
+    { name = "daytona" },
     { name = "e2b" },
     { name = "inspect-ai" },
     { name = "modal" },
@@ -1329,7 +1329,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "daytona-sdk", specifier = ">=0.180.0" },
+    { name = "daytona", specifier = ">=0.180.0" },
     { name = "e2b", specifier = ">=2.20" },
     { name = "inspect-ai", specifier = ">=0.3.211" },
     { name = "modal", specifier = ">=1.5.0" },

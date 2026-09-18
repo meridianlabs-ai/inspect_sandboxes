@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from daytona_sdk import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
+from daytona import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
 from inspect_ai.util import ComposeConfig, ComposeService, SandboxEnvironment
 from inspect_ai.util._sandbox.self_check import self_check
 from inspect_sandboxes.daytona._daytona import (

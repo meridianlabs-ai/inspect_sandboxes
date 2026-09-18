@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from logging import getLogger
 
-from daytona_sdk import (
+from daytona import (
     AsyncDaytona,
     AsyncSandbox,
     CreateSandboxFromImageParams,

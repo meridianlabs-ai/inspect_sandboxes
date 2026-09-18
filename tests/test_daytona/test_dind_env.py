@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from daytona_sdk import DaytonaError
+from daytona import DaytonaError
 from inspect_ai.util import ComposeConfig, ComposeService
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._dind_env import DaytonaDinDServiceEnvironment

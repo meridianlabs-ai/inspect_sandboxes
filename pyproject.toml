@@ -11,7 +11,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT License" }
 dependencies = [
-    "daytona-sdk>=0.180.0",
+    "daytona>=0.180.0",
     "e2b>=2.20",
     "inspect-ai>=0.3.211",
     "modal>=1.5.0",
@@ -91,7 +91,7 @@ module = "modal.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "daytona_sdk.*"
+module = "daytona.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

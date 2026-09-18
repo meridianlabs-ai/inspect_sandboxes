@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 from typing import Literal, overload
 from urllib.parse import urlsplit
 
-from daytona_sdk import AsyncSandbox, DaytonaError, DaytonaNotFoundError
+from daytona import AsyncSandbox, DaytonaError, DaytonaNotFoundError
 from inspect_ai.util import (
     ExecResult,
     SandboxEnvironment,

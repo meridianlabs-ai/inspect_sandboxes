@@ -10,7 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from daytona_sdk import DaytonaError, DaytonaNotFoundError, DaytonaTimeoutError
+from daytona import DaytonaError, DaytonaNotFoundError, DaytonaTimeoutError
 from inspect_ai.util import (
     ExecResult,
     OutputLimitExceededError,

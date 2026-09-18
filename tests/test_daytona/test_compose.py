@@ -5,7 +5,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from daytona_sdk import (
+from daytona import (
     CreateSandboxFromImageParams,
     CreateSandboxFromSnapshotParams,
     Image,
