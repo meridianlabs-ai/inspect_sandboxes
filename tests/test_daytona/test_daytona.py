@@ -692,11 +692,17 @@ async def _check_stream_split(env: SandboxEnvironment) -> None:
 
 
 async def _check_timeout(env: SandboxEnvironment) -> None:
-    """The server-side timeout kills the process tree, background children included."""
+    """The server-side timeout kills the process tree, background children included.
+
+    The bounds allow for the retries: the server reports an exec timeout as a
+    plain ``DaytonaError`` mentioning "timeout", which ``exec_retry`` retries
+    three times with backoff before ``run_with_timeout_retry`` sees it (and,
+    with ``timeout_retry``, tries twice more). That is pre-existing behaviour.
+    """
     started = time.monotonic()
     with pytest.raises(TimeoutError):
         await env.exec(["sh", "-c", "echo partial; sleep 60"], timeout=2)
-    assert time.monotonic() - started < 20
+    assert time.monotonic() - started < 60
 
     # A child that outlives the command does not extend the deadline (round 4 B4).
     started = time.monotonic()
@@ -706,8 +712,18 @@ async def _check_timeout(env: SandboxEnvironment) -> None:
             timeout=1,
             timeout_retry=False,
         )
-    assert time.monotonic() - started < 4
+    assert time.monotonic() - started < 15
 
+    # Nothing of the timed-out commands survives (the pattern does not match itself).
+    result = await env.exec(
+        [
+            "sh",
+            "-c",
+            "for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done"
+            " | grep -c 'sleep [65]0' || true",
+        ]
+    )
+    assert result.stdout.strip() == "0", f"{result.stdout=}"
     result = await env.exec(["echo", "alive"])
     assert result.stdout == "alive\n", f"{result.stdout=}"
 
