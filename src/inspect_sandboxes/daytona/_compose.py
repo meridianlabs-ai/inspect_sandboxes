@@ -3,7 +3,7 @@ from logging import getLogger
 from pathlib import Path
 from typing import Any
 
-from daytona_sdk import (
+from daytona import (
     CreateSandboxFromImageParams,
     CreateSandboxFromSnapshotParams,
     Image,

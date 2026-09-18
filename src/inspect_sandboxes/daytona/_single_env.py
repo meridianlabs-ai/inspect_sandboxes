@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 from typing import Literal, overload
 from urllib.parse import urlsplit
 
-from daytona_sdk import AsyncSandbox, DaytonaError, DaytonaNotFoundError
+from daytona import AsyncSandbox, DaytonaError, DaytonaNotFoundError
 from inspect_ai.util import (
     ExecResult,
     SandboxEnvironment,
@@ -26,9 +26,13 @@ from typing_extensions import override
 
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
 from ._sandbox_utils import (
+    build_capture_command,
+    build_remove_command,
     build_stdin_command,
+    captured_exec_result,
     decode_file_content,
     delete_sandbox,
+    new_capture_tag,
     verify_file_size,
 )
 
@@ -96,9 +100,12 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
     ) -> ExecResult[str]:
         """Execute a command in the sandbox.
 
-        Note:
-            stderr is always empty. The Daytona API returns a single combined
-            output field; stdout and stderr are not distinguished.
+        Streams: The Daytona API returns a single merged output field with its
+            trailing newline stripped, so the command runs with stdout and
+            stderr redirected to two private temp files under ``/tmp`` (created
+            as the requested ``user``) and the same shell prints both framed by
+            per-call sentinels; see ``build_capture_command``. One API round
+            trip; requires a writable ``/tmp``.
 
         Timeout: The Daytona server enforces timeouts server-side, killing
             the process tree. No in-container ``timeout`` wrapping needed
@@ -114,6 +121,12 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             command = build_stdin_command(cmd, stdin_file, cleanup=user is None)
         else:
             command = shlex.join(cmd)
+
+        # Capture stdout and stderr separately. The wrapper goes inside the
+        # user switch below so the temp files are created, read and removed
+        # with the requested user's authority, not the default user's.
+        tag = new_capture_tag()
+        command = build_capture_command(command, tag)
 
         # Daytona's process.exec() has no user param — use sudo -u to switch.
         if user is not None:
@@ -131,12 +144,7 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
                 env=env,
                 timeout=t,
             )
-            return ExecResult(
-                success=response.exit_code == 0,
-                returncode=response.exit_code,
-                stdout=response.result,
-                stderr="",
-            )
+            return captured_exec_result(response.exit_code, response.result, tag)
 
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)
@@ -144,9 +152,18 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             # When running as a different user, the su'd process can't delete
             # root-owned temp files in sticky /tmp. Clean up as the default user.
             if stdin_file is not None and user is not None:
-                await self.sandbox.process.exec(
-                    f"rm -f {shlex.quote(stdin_file)}", timeout=10
-                )
+                await self._remove_files([stdin_file])
+
+    async def _remove_files(self, files: list[str]) -> None:
+        """Best-effort removal of temp files as the default user."""
+        try:
+            await self.sandbox.process.exec(build_remove_command(files), timeout=10)
+        except Exception as e:
+            trace_message(
+                logger,
+                "daytona",
+                f"Could not remove temp files {files} from sandbox {self.sandbox.id}: {e}",
+            )
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:

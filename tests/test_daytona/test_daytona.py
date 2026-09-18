@@ -1,12 +1,14 @@
 """Tests for DaytonaSandboxEnvironment lifecycle orchestrator."""
 
+import time
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from daytona_sdk import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
+from daytona import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
 from inspect_ai.util import ComposeConfig, ComposeService, SandboxEnvironment
 from inspect_ai.util._sandbox.self_check import self_check
 from inspect_sandboxes.daytona._daytona import (
@@ -600,10 +602,7 @@ async def test_self_check_single_service(
 ) -> None:
     """Run inspect_ai's self-check suite against a single-service Daytona sandbox."""
     known_failures = [
-        "test_exec_stderr",  # Daytona merges stdout+stderr; stderr always empty
         "test_exec_permission_error",  # exit code 126, not translated to PermissionError
-        "test_exec_output",  # Daytona strips trailing newline from output
-        "test_exec_env_vars",  # trailing newline stripped (env vars themselves work)
         "test_write_text_file_without_permissions",  # Daytona returns 400, not 403 for write permission errors
         "test_write_binary_file_without_permissions",  # same
         "test_exec_as_user",  # adduser/useradd may not be available in default snapshot
@@ -651,10 +650,7 @@ async def test_self_check_dind(
 ) -> None:
     """Run inspect_ai's self-check suite against a DinD Daytona sandbox."""
     known_failures = [
-        "test_exec_stderr",  # DinD routes through compose exec; stderr merged
         "test_exec_permission_error",  # exit code 126, not translated to PermissionError
-        "test_exec_output",  # trailing newline stripped by compose exec
-        "test_exec_env_vars",  # trailing newline stripped
         "test_write_text_file_without_permissions",  # root user in container
         "test_write_binary_file_without_permissions",  # same
         "test_read_file_not_allowed",  # root user
@@ -662,6 +658,125 @@ async def test_self_check_dind(
     ]
     results = await self_check(daytona_dind_env)
     _check_self_check_results(results, known_failures)
+
+
+async def _check_stream_split(env: SandboxEnvironment) -> None:
+    """exec() returns stdout and stderr separately and intact (#79)."""
+    result = await env.exec(["sh", "-c", "echo out; echo err >&2; exit 3"])
+    assert result.stdout == "out\n", f"{result.stdout=}"
+    assert result.stderr == "err\n", f"{result.stderr=}"
+    assert result.returncode == 3
+
+    # Nothing is in-band. Daytona's session protocol tags chunks with
+    # \x01\x01\x01 (stdout) and \x02\x02\x02 (stderr) and honours them inside
+    # command output (review round 4); through the capture wrapper they are data.
+    result = await env.exec(
+        [
+            "sh",
+            "-c",
+            "printf '\\002\\002\\002INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\\n';"
+            " printf '\\001\\001\\001STDERR_DATA\\n' >&2",
+        ]
+    )
+    assert result.stdout == "\x02\x02\x02INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\n", (
+        f"{result.stdout=}"
+    )
+    assert result.stderr == "\x01\x01\x01STDERR_DATA\n", f"{result.stderr=}"
+
+    # A background child's late output is collected, as the API itself does.
+    result = await env.exec(
+        ["sh", "-c", "echo early; (sleep 0.5; echo late; echo late-err >&2) &"]
+    )
+    assert result.stdout == "early\nlate\n", f"{result.stdout=}"
+    assert result.stderr == "late-err\n", f"{result.stderr=}"
+
+
+async def _check_timeout(env: SandboxEnvironment) -> None:
+    """The server-side timeout kills the process tree, background children included.
+
+    The bounds allow for the retries: the server reports an exec timeout as a
+    plain ``DaytonaError`` mentioning "timeout", which ``exec_retry`` retries
+    three times with backoff before ``run_with_timeout_retry`` sees it (and,
+    with ``timeout_retry``, tries twice more). That is pre-existing behaviour.
+    """
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await env.exec(["sh", "-c", "echo partial; sleep 60"], timeout=2)
+    assert time.monotonic() - started < 60
+
+    # A child that outlives the command does not extend the deadline (round 4 B4).
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await env.exec(
+            ["sh", "-c", "echo EARLY; (sleep 5; echo LATE) &"],
+            timeout=1,
+            timeout_retry=False,
+        )
+    assert time.monotonic() - started < 15
+
+    result = await env.exec(["echo", "alive"])
+    assert result.stdout == "alive\n", f"{result.stdout=}"
+
+
+async def _count_timed_out_survivors(env: SandboxEnvironment) -> int:
+    """Processes of ``_check_timeout``'s commands still alive (the pattern does not match itself)."""
+    result = await env.exec(
+        [
+            "sh",
+            "-c",
+            "for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done"
+            " | grep -c 'sleep [65]0' || true",
+        ]
+    )
+    return int(result.stdout.strip())
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_exec_stream_split_single_service(
+    daytona_single_env: SandboxEnvironment,
+) -> None:
+    """Live: single-service exec() splits the streams, also under ``user="root"``.
+
+    Root's output must not be readable by the default user afterwards: the
+    capture files are root-owned, 0600 and unlinked before the command runs,
+    and process.exec() keeps no log of them (the session API did, review
+    round 4 B2). The default user greps its home and /tmp for the sentinel.
+    """
+    await _check_stream_split(daytona_single_env)
+    await _check_timeout(daytona_single_env)
+    # The server kills the whole process tree at the deadline.
+    assert await _count_timed_out_survivors(daytona_single_env) == 0
+
+    sentinel = f"inspect-79-{uuid.uuid4().hex}"
+    result = await daytona_single_env.exec(
+        ["sh", "-c", f"id -u; (sleep 0.5; echo late) & echo {sentinel} >&2"],
+        user="root",
+    )
+    assert result.success, f"{result.stdout=} {result.stderr=}"
+    assert result.stdout == "0\nlate\n", f"{result.stdout=}"
+    assert result.stderr == f"{sentinel}\n", f"{result.stderr=}"
+
+    leak = await daytona_single_env.exec(
+        ["sh", "-c", f"id -u; grep -rl -- {sentinel} ~ /tmp 2>/dev/null; true"]
+    )
+    assert leak.stdout.strip() != "0", "the default user should not be root"
+    assert leak.stdout.splitlines()[1:] == [], f"root output readable: {leak.stdout=}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_exec_stream_split_dind(daytona_dind_env: SandboxEnvironment) -> None:
+    """Live: DinD exec() splits the streams through the VM-side wrapper.
+
+    The timeout still raises, but the processes inside the service container
+    survive it: the server kills the VM-side ``docker compose exec`` and
+    ``docker exec`` detaches on signal (pre-existing; the Docker sandbox wraps
+    the container command in ``/usr/bin/timeout`` for this reason).
+    """
+    await _check_stream_split(daytona_dind_env)
+    await _check_timeout(daytona_dind_env)
+    assert await _count_timed_out_survivors(daytona_dind_env) > 0, "limitation lifted?"
 
 
 @pytest_asyncio.fixture

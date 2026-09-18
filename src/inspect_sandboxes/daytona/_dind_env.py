@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, overload
 
 import yaml
-from daytona_sdk import AsyncDaytona, Resources
+from daytona import AsyncDaytona, Resources
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
@@ -31,6 +31,7 @@ from ._compose import (
 )
 from ._dind_project import (
     DaytonaDinDProject,
+    compose_command,
     compose_exec,
     create_dind_project,
     destroy_dind_project,
@@ -39,9 +40,13 @@ from ._dind_project import (
 )
 from ._retry import run_with_timeout_retry
 from ._sandbox_utils import (
+    build_capture_command,
+    build_remove_command,
     build_stdin_command,
+    captured_exec_result,
     decode_file_content,
     delete_sandbox,
+    new_capture_tag,
     sdk_download,
     sdk_upload,
     verify_file_size,
@@ -213,8 +218,10 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         concurrency: bool = True,
     ) -> ExecResult[str]:
         # Timeout: The Daytona server kills the VM-level process tree on
-        # timeout, which tears down the docker compose exec session and its
-        # in-container processes. No in-container ``timeout`` wrapping needed.
+        # timeout, which ends the docker compose exec session. The processes
+        # inside the container survive it (docker exec detaches on signal);
+        # the Docker sandbox wraps the container command in /usr/bin/timeout
+        # for that reason, this provider does not yet.
 
         # Resolve working directory
         workdir = cwd if cwd is not None else self._working_dir
@@ -251,14 +258,17 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         else:
             exec_cmd.extend([self.service, *cmd])
 
+        # Daytona merges stdout and stderr into one output field, so run the
+        # compose exec on the VM inside the capture wrapper, which returns the
+        # two streams framed in one round trip (see build_capture_command).
+        tag = new_capture_tag()
+        vm_command = build_capture_command(compose_command(self.project, exec_cmd), tag)
+
         async def _run(t: int | None) -> ExecResult[str]:
-            exit_code, output = await compose_exec(self.project, exec_cmd, timeout=t)
-            return ExecResult(
-                success=exit_code == 0,
-                returncode=exit_code,
-                stdout=output,
-                stderr="",
+            exit_code, output = await vm_exec(
+                self.project.sandbox, vm_command, timeout=t
             )
+            return captured_exec_result(exit_code, output, tag)
 
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)
@@ -266,7 +276,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             if stdin_vm_file is not None:
                 await vm_exec(
                     self.project.sandbox,
-                    f"rm -f {shlex.quote(stdin_vm_file)}",
+                    build_remove_command([stdin_vm_file]),
                     timeout=10,
                 )
 

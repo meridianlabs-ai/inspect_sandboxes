@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from daytona_sdk import Resources
+from daytona import Resources
 from inspect_ai.util import ComposeConfig, ComposeService
 from inspect_sandboxes.daytona._dind_project import (
     DaytonaDinDProject,
