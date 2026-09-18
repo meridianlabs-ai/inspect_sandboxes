@@ -3,7 +3,7 @@
 import shlex
 import subprocess
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import modal
@@ -58,9 +58,11 @@ def mock_modal_sandbox() -> MagicMock:
 
     sandbox.exec = MagicMock()
     sandbox.exec.aio = mock_exec
-    sandbox.open = MagicMock()
-    sandbox.mkdir = MagicMock()
-    sandbox.mkdir.aio = AsyncMock()
+    sandbox.filesystem = MagicMock()
+    sandbox.filesystem.write_text.aio = AsyncMock()
+    sandbox.filesystem.write_bytes.aio = AsyncMock()
+    sandbox.filesystem.read_bytes.aio = AsyncMock()
+    sandbox.filesystem.stat.aio = AsyncMock()
     sandbox.terminate = MagicMock()
     sandbox.terminate.aio = AsyncMock()
     sandbox.set_tags = MagicMock()
@@ -73,6 +75,11 @@ def mock_modal_sandbox() -> MagicMock:
 def sandbox_env(mock_modal_sandbox: MagicMock) -> ModalSandboxEnvironment:
     """Create a ModalSandboxEnvironment instance."""
     return ModalSandboxEnvironment(mock_modal_sandbox)
+
+
+def _mock_filesystem(sandbox_env: ModalSandboxEnvironment) -> Any:
+    """Return the fixture's dynamically mocked filesystem namespace."""
+    return cast(Any, sandbox_env.sandbox.filesystem)
 
 
 def test_modal_volume_supports_read_only_mount_options() -> None:
@@ -1144,100 +1151,102 @@ async def test_exec_relative_cwd_converted_to_absolute(
 @pytest.mark.asyncio
 async def test_write_file_text(sandbox_env: ModalSandboxEnvironment) -> None:
     """Test write_file with text content."""
-    mock_file = AsyncMock()
-    mock_context = AsyncMock()
-    mock_context.__aenter__ = AsyncMock(return_value=mock_file)
-    mock_context.__aexit__ = AsyncMock(return_value=None)
-
-    sandbox_env.sandbox.open = MagicMock()
-    sandbox_env.sandbox.open.aio = AsyncMock(return_value=mock_context)
-    sandbox_env.sandbox.mkdir = MagicMock()
-    sandbox_env.sandbox.mkdir.aio = AsyncMock()
+    filesystem = _mock_filesystem(sandbox_env)
 
     await sandbox_env.write_file("/test.txt", "text content")
 
-    sandbox_env.sandbox.open.aio.assert_called_once_with("/test.txt", "w")
-    mock_file.write.aio.assert_called_once_with("text content")
+    filesystem.write_text.aio.assert_awaited_once_with("text content", "/test.txt")
 
 
 @pytest.mark.asyncio
 async def test_write_file_binary(sandbox_env: ModalSandboxEnvironment) -> None:
     """Test write_file with binary content."""
-    mock_file = AsyncMock()
-    mock_context = AsyncMock()
-    mock_context.__aenter__ = AsyncMock(return_value=mock_file)
-    mock_context.__aexit__ = AsyncMock(return_value=None)
-
-    sandbox_env.sandbox.open = MagicMock()
-    sandbox_env.sandbox.open.aio = AsyncMock(return_value=mock_context)
-    sandbox_env.sandbox.mkdir = MagicMock()
-    sandbox_env.sandbox.mkdir.aio = AsyncMock()
+    filesystem = _mock_filesystem(sandbox_env)
 
     await sandbox_env.write_file("/test.bin", b"binary content")
 
-    sandbox_env.sandbox.open.aio.assert_called_once_with("/test.bin", "wb")
-    mock_file.write.aio.assert_called_once_with(b"binary content")
+    filesystem.write_bytes.aio.assert_awaited_once_with(b"binary content", "/test.bin")
 
 
 @pytest.mark.asyncio
 async def test_read_file_text(sandbox_env: ModalSandboxEnvironment) -> None:
     """Test read_file in text mode."""
-    mock_file = AsyncMock()
-    mock_file.read.aio = AsyncMock(return_value=b"test content")
-    mock_context = AsyncMock()
-    mock_context.__aenter__ = AsyncMock(return_value=mock_file)
-    mock_context.__aexit__ = AsyncMock(return_value=None)
+    filesystem = _mock_filesystem(sandbox_env)
+    info = MagicMock()
+    info.is_dir.return_value = False
+    info.size = 100
+    filesystem.stat.aio.return_value = info
+    filesystem.read_bytes.aio.return_value = b"test content"
 
-    with (
-        patch.object(
-            sandbox_env, "_is_directory", new_callable=AsyncMock, return_value=False
-        ),
-        patch.object(sandbox_env, "_get_file_size", return_value=100),
-        patch.object(sandbox_env.sandbox, "open") as mock_open,
-    ):
-        mock_open.aio = AsyncMock(return_value=mock_context)
-        result = await sandbox_env.read_file("/test.txt", text=True)
-        assert isinstance(result, str)
-        assert result == "test content"
+    result = await sandbox_env.read_file("/test.txt", text=True)
+
+    assert isinstance(result, str)
+    assert result == "test content"
+    filesystem.stat.aio.assert_awaited_once_with("/test.txt")
+    filesystem.read_bytes.aio.assert_awaited_once_with("/test.txt")
 
 
 @pytest.mark.asyncio
 async def test_read_file_binary(sandbox_env: ModalSandboxEnvironment) -> None:
     """Test read_file in binary mode."""
-    mock_file = AsyncMock()
-    mock_file.read.aio = AsyncMock(return_value=b"test content")
-    mock_context = AsyncMock()
-    mock_context.__aenter__ = AsyncMock(return_value=mock_file)
-    mock_context.__aexit__ = AsyncMock(return_value=None)
+    filesystem = _mock_filesystem(sandbox_env)
+    info = MagicMock()
+    info.is_dir.return_value = False
+    info.size = 100
+    filesystem.stat.aio.return_value = info
+    filesystem.read_bytes.aio.return_value = b"test content"
 
-    with (
-        patch.object(
-            sandbox_env, "_is_directory", new_callable=AsyncMock, return_value=False
-        ),
-        patch.object(sandbox_env, "_get_file_size", return_value=100),
-        patch.object(sandbox_env.sandbox, "open") as mock_open,
-    ):
-        mock_open.aio = AsyncMock(return_value=mock_context)
-        result = await sandbox_env.read_file("/test.bin", text=False)
-        assert isinstance(result, bytes)
-        assert result == b"test content"
+    result = await sandbox_env.read_file("/test.bin", text=False)
+
+    assert isinstance(result, bytes)
+    assert result == b"test content"
 
 
 @pytest.mark.asyncio
 async def test_read_file_size_limit(sandbox_env: ModalSandboxEnvironment) -> None:
     """Test read_file with file exceeding size limit."""
-    with (
-        patch.object(
-            sandbox_env, "_is_directory", new_callable=AsyncMock, return_value=False
-        ),
-        patch.object(
-            sandbox_env,
-            "_get_file_size",
-            return_value=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE + 1,
-        ),
-    ):
-        with pytest.raises(OutputLimitExceededError):
-            await sandbox_env.read_file("/large.txt")
+    filesystem = _mock_filesystem(sandbox_env)
+    info = MagicMock()
+    info.is_dir.return_value = False
+    info.size = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE + 1
+    filesystem.stat.aio.return_value = info
+
+    with pytest.raises(OutputLimitExceededError):
+        await sandbox_env.read_file("/large.txt")
+
+    filesystem.read_bytes.aio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_relative_file_path_uses_sandbox_working_directory(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Resolve relative paths without changing symlink-plus-dot-dot semantics."""
+    filesystem = _mock_filesystem(sandbox_env)
+    sandbox_env._working_dir = "/workspace"
+
+    await sandbox_env.write_file("link/../result.txt", "result")
+
+    filesystem.write_text.aio.assert_awaited_once_with(
+        "result", "/workspace/link/../result.txt"
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_file_translates_modal_error_without_retry(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Expose Inspect's built-in error contract and avoid retrying permanent errors."""
+    filesystem = _mock_filesystem(sandbox_env)
+    filesystem.stat.aio.side_effect = modal.exception.SandboxFilesystemNotFoundError(
+        "missing"
+    )
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        await sandbox_env.read_file("/missing.txt")
+
+    assert exc_info.value.filename == "/missing.txt"
+    filesystem.stat.aio.assert_awaited_once_with("/missing.txt")
 
 
 @pytest.mark.parametrize(
@@ -1458,32 +1467,20 @@ async def test_read_file_retries_transient_error(
     sandbox_env: ModalSandboxEnvironment,
 ) -> None:
     """Test that read_file retries on transient errors via _read_file_content."""
-    call_count = 0
+    filesystem = _mock_filesystem(sandbox_env)
+    info = MagicMock()
+    info.is_dir.return_value = False
+    info.size = 7
+    filesystem.stat.aio.return_value = info
+    filesystem.read_bytes.aio.side_effect = [
+        modal.exception.InternalError("transient"),
+        b"content",
+    ]
 
-    async def flaky_open(path: str, mode: str) -> AsyncMock:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise modal.exception.InternalError("transient")
-        mock_file = AsyncMock()
-        mock_file.read.aio = AsyncMock(return_value=b"content")
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_file)
-        ctx.__aexit__ = AsyncMock(return_value=None)
-        return ctx
+    result = await sandbox_env.read_file("/test.txt")
 
-    with (
-        patch.object(
-            sandbox_env, "_is_directory", new_callable=AsyncMock, return_value=False
-        ),
-        patch.object(sandbox_env, "_get_file_size", return_value=7),
-    ):
-        sandbox_env.sandbox.open = MagicMock()
-        sandbox_env.sandbox.open.aio = AsyncMock(side_effect=flaky_open)
-
-        result = await sandbox_env.read_file("/test.txt")
-        assert result == "content"
-        assert call_count == 2
+    assert result == "content"
+    assert filesystem.read_bytes.aio.await_count == 2
 
 
 @pytest_asyncio.fixture

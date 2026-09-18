@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import posixpath
 import shlex
 import sys
 from contextvars import ContextVar
 from logging import getLogger
 from pathlib import PurePosixPath
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, Never, cast, overload
 
 import modal
 import modal.exception
@@ -31,6 +32,7 @@ from inspect_ai.util._sandbox.environment import (
     PortMapping,
     SandboxConnection,
 )
+from modal.types import FileInfo
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
@@ -75,7 +77,9 @@ def running_sandboxes() -> list[str]:
 _standard_retry = retry(
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_not_exception_type(modal.exception.RemoteError),
+    retry=retry_if_not_exception_type(
+        (modal.exception.RemoteError, modal.exception.SandboxFilesystemError)
+    ),
     reraise=True,
 )
 
@@ -211,9 +215,15 @@ def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
 
 @sandboxenv(name="modal")
 class ModalSandboxEnvironment(SandboxEnvironment):
-    def __init__(self, sandbox: modal.Sandbox, has_tunnels: bool = False) -> None:
+    def __init__(
+        self,
+        sandbox: modal.Sandbox,
+        has_tunnels: bool = False,
+        working_dir: str | None = None,
+    ) -> None:
         super().__init__()
         self.sandbox = sandbox
+        self._working_dir = working_dir
         # Whether any tunnels were declared at creation (from service.ports or
         # x-modal.*_ports). When none were, connection() must NOT call
         # tunnels(): with no declared tunnels that RPC blocks for ~50s before
@@ -305,7 +315,13 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         running_sandboxes().append(sandbox.object_id)
 
         has_tunnels = any(sandbox_kwargs.get(key) for key in _MODAL_PORT_KEYS)
-        return {"default": cls(sandbox, has_tunnels=has_tunnels)}
+        return {
+            "default": cls(
+                sandbox,
+                has_tunnels=has_tunnels,
+                working_dir=sandbox_kwargs.get("workdir"),
+            )
+        }
 
     @override
     @classmethod
@@ -538,14 +554,11 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
-        parent = str(PurePosixPath(file).parent)
-        if parent and parent not in ("/", "."):
-            await self._create_parent_folder(parent)
-
+        file = await self._resolve_file_path(file)
         try:
             await self._write_file_content(file, contents)
-        except IsADirectoryError as e:
-            raise IsADirectoryError(errno.EISDIR, "Is a directory", file) from e
+        except modal.exception.SandboxFilesystemError as e:
+            self._raise_filesystem_error(file, e)
 
     @overload
     async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
@@ -563,16 +576,19 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
-        await self._verify_read_file_size(file)
-
+        file = await self._resolve_file_path(file)
         try:
+            info = await self._get_file_info(file)
+            if info.is_dir():
+                raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
+            if info.size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
+                raise OutputLimitExceededError(
+                    limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
+                    truncated_output=None,
+                )
             contents_bytes = await self._read_file_content(file)
-        except modal.exception.FilesystemExecutionError as e:
-            if await self._is_directory(file):
-                raise IsADirectoryError(errno.EISDIR, "Is a directory", file) from e
-            raise FileNotFoundError(
-                errno.ENOENT, "No such file or directory", file
-            ) from e
+        except modal.exception.SandboxFilesystemError as e:
+            self._raise_filesystem_error(file, e)
 
         if text:
             try:
@@ -669,56 +685,55 @@ class ModalSandboxEnvironment(SandboxEnvironment):
     @_standard_retry
     async def _write_file_content(self, file: str, contents: str | bytes) -> None:
         if isinstance(contents, str):
-            async with await self.sandbox.open.aio(file, "w") as f:
-                await f.write.aio(contents)
+            await self.sandbox.filesystem.write_text.aio(contents, file)
         else:
-            async with await self.sandbox.open.aio(file, "wb") as f:
-                await f.write.aio(contents)
+            await self.sandbox.filesystem.write_bytes.aio(contents, file)
 
     @_standard_retry
     async def _read_file_content(self, file: str) -> bytes:
-        async with await self.sandbox.open.aio(file, "rb") as f:
-            return await f.read.aio()
+        return await self.sandbox.filesystem.read_bytes.aio(file)
+
+    async def _resolve_file_path(self, file: str) -> str:
+        """Resolve relative paths against the sandbox's working directory."""
+        if posixpath.isabs(file):
+            return file
+
+        if self._working_dir is None:
+            result = await self.exec(["pwd"])
+            if not result.success:
+                raise RuntimeError(
+                    "Failed to resolve the Modal sandbox working directory: "
+                    f"{result.stderr}"
+                )
+            working_dir = result.stdout.strip()
+            if not posixpath.isabs(working_dir):
+                raise RuntimeError(
+                    "Modal sandbox returned a non-absolute working directory: "
+                    f"{working_dir!r}"
+                )
+            self._working_dir = working_dir
+
+        # Preserve `..` for the sandbox kernel to resolve. Lexically normalizing it
+        # here would change POSIX semantics when an earlier component is a symlink.
+        return posixpath.join(self._working_dir, file)
 
     @_standard_retry
-    async def _create_parent_folder(self, path: str) -> None:
-        try:
-            await self.sandbox.mkdir.aio(path, parents=True)
-        except FileExistsError:
-            pass
+    async def _get_file_info(self, file: str) -> FileInfo:
+        return await self.sandbox.filesystem.stat.aio(file)
 
-    @_standard_retry
-    async def _is_directory(self, file: str) -> bool:
-        process = await self.sandbox.exec.aio("test", "-d", file)
-        await process.wait.aio()
-        return process.returncode == 0
-
-    @_standard_retry
-    async def _get_file_size(self, file: str) -> int:
-        process = await self.sandbox.exec.aio("stat", "-c", "%s", file)
-        stdout = await process.stdout.read.aio()
-        await process.wait.aio()
-
-        if process.returncode != 0:
-            if process.returncode == 1:
-                raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
-            stderr = await process.stderr.read.aio()
-            raise RuntimeError(
-                f"stat command failed with code {process.returncode}: {stderr}"
-            )
-
-        try:
-            return int(stdout.strip())
-        except ValueError as e:
-            raise RuntimeError(f"Failed to parse file size for {file}") from e
-
-    async def _verify_read_file_size(self, file: str) -> None:
-        if await self._is_directory(file):
-            raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
-
-        file_size = await self._get_file_size(file)
-        if file_size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
-            raise OutputLimitExceededError(
-                limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
-                truncated_output=None,
-            )
+    @staticmethod
+    def _raise_filesystem_error(
+        file: str, error: modal.exception.SandboxFilesystemError
+    ) -> Never:
+        """Translate Modal filesystem errors into Inspect's sandbox contract."""
+        if isinstance(error, modal.exception.SandboxFilesystemNotFoundError):
+            raise FileNotFoundError(
+                errno.ENOENT, "No such file or directory", file
+            ) from error
+        if isinstance(error, modal.exception.SandboxFilesystemIsADirectoryError):
+            raise IsADirectoryError(errno.EISDIR, "Is a directory", file) from error
+        if isinstance(error, modal.exception.SandboxFilesystemNotADirectoryError):
+            raise NotADirectoryError(errno.ENOTDIR, "Not a directory", file) from error
+        if isinstance(error, modal.exception.SandboxFilesystemPermissionError):
+            raise PermissionError(errno.EACCES, "Permission denied", file) from error
+        raise error
