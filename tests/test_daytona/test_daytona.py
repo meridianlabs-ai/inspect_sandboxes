@@ -682,21 +682,33 @@ async def test_exec_stream_split_single_service(
 ) -> None:
     """Live: single-service exec() splits the streams, also under ``user="root"``.
 
-    The root command lists the capture files the wrapper created for it, so
-    the output shows they belong to root with mode 600 (not to the default
-    user, who must not be able to read root's stderr).
+    The capture files are unlinked before the command runs, so the root command
+    finds them through the wrapper's open descriptors under ``/proc`` and stats
+    them: they belong to root with mode 600, not to the default user, who must
+    not be able to read root's stderr. A background child's late output is
+    collected too.
     """
     await _check_stream_split(daytona_single_env)
 
+    find_captures = (
+        "for p in /proc/[0-9]*; do for fd in 6 7 8; do "
+        'case "$(readlink $p/fd/$fd 2>/dev/null)" in /tmp/.inspect-exec-*) '
+        "stat -L -c '%U %a' $p/fd/$fd;; esac; done; done | sort -u"
+    )
     result = await daytona_single_env.exec(
-        ["sh", "-c", "id -u; stat -c '%U %a' /tmp/.inspect-exec-*; echo root-err >&2"],
+        [
+            "sh",
+            "-c",
+            f"id -u; {find_captures}; ls /tmp/.inspect-exec-* 2>/dev/null | wc -l; "
+            "(sleep 0.5; echo late; echo late-err >&2) & echo root-err >&2",
+        ],
         user="root",
     )
     assert result.success, f"{result.stdout=} {result.stderr=}"
-    assert result.stderr == "root-err\n", f"{result.stderr=}"
-    lines = result.stdout.splitlines()
-    assert lines[0] == "0"
-    assert lines[1:] == ["root 600", "root 600"], f"{result.stdout=}"
+    assert result.stderr == "root-err\nlate-err\n", f"{result.stderr=}"
+    assert result.stdout.split() == ["0", "root", "600", "0", "late"], (
+        f"{result.stdout=}"
+    )
 
 
 @pytest.mark.asyncio

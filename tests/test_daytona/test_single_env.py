@@ -1,6 +1,7 @@
 """Tests for DaytonaSingleServiceEnvironment."""
 
 import asyncio
+import base64
 import os
 import re
 import shlex
@@ -18,6 +19,7 @@ from inspect_ai.util import (
 )
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._sandbox_utils import (
+    OutputCollectionError,
     build_capture_command,
     build_remove_command,
     capture_files,
@@ -37,9 +39,11 @@ def tag_of(command: str) -> str:
 def framed(command: str, stdout: str = "", stderr: str = "") -> str:
     """What the capture wrapper of *command* prints for the given streams."""
     tag = tag_of(command)
+    out = base64.b64encode(stdout.encode()).decode()
+    err = base64.b64encode(stderr.encode()).decode()
     return (
-        f"<<inspect-exec-{tag}:stdout>>{stdout}<<inspect-exec-{tag}:stderr>>"
-        f"{stderr}<<inspect-exec-{tag}:end>>"
+        f"<<inspect-exec-{tag}:stdout>>{out}<<inspect-exec-{tag}:stderr>>"
+        f"{err}<<inspect-exec-{tag}:end>>"
     )
 
 
@@ -258,23 +262,79 @@ async def test_exec_stderr_keeps_exit_code_and_empty_stdout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exec_stdout_cannot_forge_stderr() -> None:
-    """A command printing the stderr sentinel to stdout does not reach stderr."""
+async def test_exec_sentinels_in_the_streams_are_data() -> None:
+    """The real sentinels printed by the command stay in their stream, byte for byte."""
     sandbox = make_local_shell_sandbox()
     env = DaytonaSingleServiceEnvironment(sandbox)
 
-    # The tag is on the command line, so the command can even read the real
-    # sentinel; a background child keeps writing after the command returns.
+    # The tag is on the wrapper's command line (the command's parent shell), so
+    # the command can read the real sentinels; it prints them to both streams.
     script = (
-        "tag=$(ps -o command= -p $PPID | sed -n 's/.*inspect-exec-\\([0-9a-f]*\\).*/\\1/p');"
-        ' printf "<<inspect-exec-$tag:stderr>>FORGED\\n";'
-        ' (sleep 0.2; printf "LATE\\n") & echo real >&2'
+        "tag=$( { if [ -r /proc/$PPID/cmdline ]; then tr '\\0' ' ' < /proc/$PPID/cmdline;"
+        " else ps -o command= -p $PPID; fi; }"
+        " | sed -n 's/.*inspect-exec-\\([0-9a-f]\\{32\\}\\).*/\\1/p' | head -n 1);"
+        ' printf "<<inspect-exec-$tag:stderr>>OUT\\n"; printf "before\\n<<inspect-exec-$tag:stderr>>after\\n" >&2;'
+        ' printf "<<inspect-exec-$tag:end>>\\n"'
     )
     result = await env.exec(["sh", "-c", script])
 
-    assert result.stderr == "real\n"
-    assert "FORGED" in result.stdout
-    assert "FORGED" not in result.stderr and "LATE" not in result.stderr
+    tag = tag_of(exec_commands(sandbox)[0])
+    assert (
+        result.stdout
+        == f"<<inspect-exec-{tag}:stderr>>OUT\n<<inspect-exec-{tag}:end>>\n"
+    )
+    assert result.stderr == f"before\n<<inspect-exec-{tag}:stderr>>after\n"
+
+
+@pytest.mark.asyncio
+async def test_exec_waits_for_background_writers() -> None:
+    """Output of a child that outlives the command is collected, as the API did."""
+    sandbox = make_local_shell_sandbox()
+    env = DaytonaSingleServiceEnvironment(sandbox)
+
+    result = await env.exec(
+        ["sh", "-c", "echo early; (sleep 0.3; echo late; echo late-err >&2) &"]
+    )
+
+    assert result.stdout == "early\nlate\n"
+    assert result.stderr == "late-err\n"
+
+
+@pytest.mark.asyncio
+async def test_exec_survives_the_command_removing_temp_files() -> None:
+    """The capture files are unlinked before the command runs."""
+    sandbox = make_local_shell_sandbox()
+    env = DaytonaSingleServiceEnvironment(sandbox)
+
+    result = await env.exec(
+        [
+            "sh",
+            "-c",
+            "ls /tmp/.inspect-exec-* 2>/dev/null | wc -l; rm -f /tmp/.inspect-exec-*; echo err >&2",
+        ]
+    )
+
+    assert result.stdout.strip() == "0"
+    assert result.stderr == "err\n"
+    assert result.success
+
+
+@pytest.mark.asyncio
+async def test_exec_collection_failure_raises(mock_sandbox: MagicMock) -> None:
+    """A frame with the failure marker (the command ran, its output is lost) raises."""
+
+    async def run(command: str, **kwargs: Any) -> MagicMock:
+        tag = tag_of(command)
+        return exec_response(
+            0,
+            f"<<inspect-exec-{tag}:stdout>><<inspect-exec-{tag}:failed>>sh: base64: not found",
+        )
+
+    mock_sandbox.process.exec = AsyncMock(side_effect=run)
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+
+    with pytest.raises(OutputCollectionError, match="base64"):
+        await env.exec(["echo", "out"])
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 import shlex
 from pathlib import Path
@@ -16,6 +17,7 @@ from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._dind_env import DaytonaDinDServiceEnvironment
 from inspect_sandboxes.daytona._dind_project import DaytonaDinDProject, compose_command
 from inspect_sandboxes.daytona._sandbox_utils import (
+    OutputCollectionError,
     build_capture_command,
     build_remove_command,
     capture_files,
@@ -33,9 +35,11 @@ def tag_of(command: str) -> str:
 def framed(command: str, stdout: str = "", stderr: str = "") -> str:
     """What the capture wrapper in *command* prints for the given streams."""
     tag = tag_of(command)
+    out = base64.b64encode(stdout.encode()).decode()
+    err = base64.b64encode(stderr.encode()).decode()
     return (
-        f"<<inspect-exec-{tag}:stdout>>{stdout}<<inspect-exec-{tag}:stderr>>"
-        f"{stderr}<<inspect-exec-{tag}:end>>"
+        f"<<inspect-exec-{tag}:stdout>>{out}<<inspect-exec-{tag}:stderr>>"
+        f"{err}<<inspect-exec-{tag}:end>>"
     )
 
 
@@ -341,6 +345,36 @@ async def test_exec_reruns_command_when_the_vm_response_is_lost() -> None:
 
     assert (result.stdout, result.stderr) == ("out\n", "err\n")
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_exec_waits_for_background_writers_on_the_vm() -> None:
+    sandbox = make_local_shell_sandbox()
+    env = DaytonaDinDServiceEnvironment(make_mock_project(sandbox), "web", "/app")
+
+    result = await env.exec(
+        ["sh", "-c", "echo early; (sleep 0.3; echo late; echo late-err >&2) &"]
+    )
+
+    assert (result.stdout, result.stderr) == ("early\nlate\n", "late-err\n")
+
+
+@pytest.mark.asyncio
+async def test_exec_vm_collection_failure_raises() -> None:
+    env = make_env()
+
+    async def run(
+        sandbox: Any, command: str, timeout: int | None = 60
+    ) -> tuple[int, str]:
+        tag = tag_of(command)
+        return (
+            0,
+            f"<<inspect-exec-{tag}:stdout>><<inspect-exec-{tag}:failed>>sh: base64: not found",
+        )
+
+    with patch("inspect_sandboxes.daytona._dind_env.vm_exec", run):
+        with pytest.raises(OutputCollectionError, match="base64"):
+            await env.exec(["true"])
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,10 @@
 """Tests for Daytona sandbox create-retry, zombie-reap and exec capture helpers."""
 
 import asyncio
+import base64
 import os
+import shutil
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,9 +17,11 @@ from daytona_sdk import (
     DaytonaNotFoundError,
     DaytonaTimeoutError,
 )
+from inspect_sandboxes.daytona import _sandbox_utils as sandbox_utils
 from inspect_sandboxes.daytona._sandbox_utils import (
     CREATE_SANDBOX_ATTEMPTS,
     SYSTEM_PATH,
+    OutputCollectionError,
     OutputNotCapturedError,
     _respin_create_params,
     build_capture_command,
@@ -263,25 +268,37 @@ async def test_zombie_registry_visible_across_child_task() -> None:
 # --- exec stream capture ------------------------------------------------------
 
 TAG = "0123456789abcdef0123456789abcdef"
-OUT_FILE, ERR_FILE = capture_files(TAG)
+OUT_FILE, ERR_FILE, STATUS_FILE = capture_files(TAG)
 START = f"<<inspect-exec-{TAG}:stdout>>"
 MID = f"<<inspect-exec-{TAG}:stderr>>"
 END = f"<<inspect-exec-{TAG}:end>>"
+FAILED = f"<<inspect-exec-{TAG}:failed>>"
+
+
+def b64(text: str) -> str:
+    return base64.b64encode(text.encode()).decode()
 
 
 def framed(stdout: str, stderr: str) -> str:
-    return f"{START}{stdout}{MID}{stderr}{END}"
+    return f"{START}{b64(stdout)}{MID}{b64(stderr)}{END}"
 
 
 def test_build_capture_command_shape() -> None:
     command = build_capture_command("echo 'a b' >&2", TAG)
     pin = f"PATH={SYSTEM_PATH}; export PATH"
+    files = f"{OUT_FILE} {ERR_FILE} {STATUS_FILE}"
     assert command == (
-        f"({pin}; umask 077; set -C; rm -f {OUT_FILE} {ERR_FILE}"
-        f" && : > {OUT_FILE} && : > {ERR_FILE})"
-        f" && (echo 'a b' >&2) >>{OUT_FILE} 2>>{ERR_FILE}; _ec=$?; "
-        f"({pin}; printf %s '{START}'; cat {OUT_FILE}; printf %s '{MID}'; cat {ERR_FILE};"
-        f" rm -f {OUT_FILE} {ERR_FILE}; printf %s '{END}'); exit $_ec"
+        f"if ({pin}; umask 077; set -C; rm -f {files}"
+        f" && : > {OUT_FILE} && : > {ERR_FILE} && : > {STATUS_FILE})"
+        f" && exec 3>>{OUT_FILE} 4>>{ERR_FILE} 9>>{STATUS_FILE}"
+        f" 6<{OUT_FILE} 7<{ERR_FILE} 8<{STATUS_FILE}"
+        f" && ({pin}; rm -f {files}); then "
+        "{ { ( (echo 'a b' >&2) 3>&- 4>&- 5>&- 6<&- 7<&- 8<&- 9>&-; echo $? >&9; )"
+        f" 2>&5 | ({pin}; exec cat >&3); }} 5>&1 | ({pin}; exec cat >&4); }}; "
+        "read -r _ec <&8; "
+        f"({pin}; printf %s '{START}' && base64 <&6 && printf %s '{MID}'"
+        f" && base64 <&7 && printf %s '{END}') || printf %s '{FAILED}'; "
+        "exit ${_ec:-1}; fi; exit 1"
     )
 
 
@@ -292,27 +309,38 @@ def test_build_remove_command_pins_path() -> None:
 
 
 @pytest.mark.parametrize(
-    ("output", "expected"),
+    ("stdout", "stderr"),
     [
-        (framed("out\n", "err\n"), ("out\n", "err\n")),
-        (framed("", ""), ("", "")),
-        # The API strips the trailing newline (or more); the frame keeps that
-        # away from the streams, including stdout's own trailing newline.
-        (
-            f"  {framed('out' + chr(10), chr(10) + ' e ' + chr(10))}\n",
-            ("out\n", "\n e \n"),
-        ),
-        # A command that prints the stderr sentinel to stdout stays in stdout:
-        # the real sentinel is the last one, printed after the command finished.
-        (framed(f"x{MID}FORGED\n", "real\n"), (f"x{MID}FORGED\n", "real\n")),
-        # Printing it to stderr can only shrink the command's own stderr.
-        (framed("out\n", f"{MID}late\n"), (f"out\n{MID}", "late\n")),
+        ("out\n", "err\n"),
+        ("", ""),
+        ("\n  x \n", "\n e \n"),
+        # The sentinels are data like anything else, in either stream.
+        (f"x{MID}FORGED\n", "real\n"),
+        ("out\n", f"before\n{MID}after\n"),
+        (f"{START}{END}{FAILED}", f"{FAILED}{MID}"),
+        # Non-ASCII survives.
+        ("héllo ✓\n", "ünïcode\n"),
     ],
 )
-def test_parse_captured_output_splits_on_the_last_sentinel(
-    output: str, expected: tuple[str, str]
+def test_parse_captured_output_round_trips_both_streams(
+    stdout: str, stderr: str
 ) -> None:
-    assert parse_captured_output(output, TAG) == expected
+    # The API may strip whitespace around the output, and base64 may be wrapped.
+    output = f"  {framed(stdout, stderr)}\n"
+    assert parse_captured_output(output, TAG) == (stdout, stderr)
+
+
+def test_parse_captured_output_accepts_wrapped_base64() -> None:
+    long = "x" * 200 + "\n"
+    wrapped = "\n".join(b64(long)[i : i + 76] for i in range(0, len(b64(long)), 76))
+    output = f"{START}{wrapped}\n{MID}{b64('e')}{END}"
+    assert parse_captured_output(output, TAG) == (long, "e")
+
+
+def test_parse_captured_output_replaces_invalid_utf8() -> None:
+    raw = base64.b64encode(b"ok\xff\n").decode()
+    output = f"{START}{raw}{MID}{END}"
+    assert parse_captured_output(output, TAG) == ("ok\ufffd\n", "")
 
 
 @pytest.mark.parametrize(
@@ -320,9 +348,10 @@ def test_parse_captured_output_splits_on_the_last_sentinel(
     [
         "",
         "sh: can't create /tmp/.inspect-exec-x.out: Read-only file system",
-        f"{START}out{MID}err",  # no end
-        f"out{MID}err{END}",  # no start
-        f"{START}out{END}",  # no stderr sentinel
+        f"{START}b3V0{MID}ZXJy",  # no end
+        f"b3V0{MID}ZXJy{END}",  # no start
+        f"{START}b3V0{END}",  # no stderr sentinel
+        f"{START}not base64!{MID}{END}",  # data outside the alphabet
         # A frame from another exec (wrong tag) is not accepted.
         framed("o", "e").replace(TAG, "f" * 32),
     ],
@@ -330,6 +359,24 @@ def test_parse_captured_output_splits_on_the_last_sentinel(
 def test_parse_captured_output_rejects_an_incomplete_frame(output: str) -> None:
     with pytest.raises(OutputNotCapturedError, match="Command output was not captured"):
         parse_captured_output(output, TAG)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        f"{START}{FAILED}sh: base64: not found",
+        f"{START}sh: base64: not found\n{FAILED}",
+        f"{START}b3V0{MID}{FAILED}",
+    ],
+)
+def test_parse_captured_output_reports_a_collection_failure(output: str) -> None:
+    with pytest.raises(OutputCollectionError, match="could not be collected"):
+        parse_captured_output(output, TAG)
+
+
+def test_parse_captured_output_reports_bad_base64() -> None:
+    with pytest.raises(OutputCollectionError, match="could not be decoded"):
+        parse_captured_output(f"{START}b3V=0{MID}{END}", TAG)
 
 
 def test_captured_exec_result_reports_a_missing_frame_as_a_failed_exec() -> None:
@@ -350,9 +397,13 @@ def test_captured_exec_result_reports_a_missing_frame_as_a_failed_exec() -> None
         "err\n",
     )
 
+    # A collection failure after the command ran is a transport error.
+    with pytest.raises(OutputCollectionError):
+        captured_exec_result(0, f"{START}{FAILED}", TAG)
+
 
 async def _sh(command: str, env: dict[str, str] | None = None) -> tuple[int, str]:
-    """Run *command* like the Daytona API does: merged output, trimmed."""
+    """Run *command* like the Daytona API does: merged output, plus the exit code."""
     proc = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
@@ -361,49 +412,130 @@ async def _sh(command: str, env: dict[str, str] | None = None) -> tuple[int, str
     )
     output, _ = await proc.communicate()
     assert proc.returncode is not None
-    return proc.returncode, output.decode().strip()
+    return proc.returncode, output.decode()
+
+
+def _assert_no_capture_files() -> None:
+    for file in capture_files(TAG):
+        assert not Path(file).exists(), f"{file} left behind"
+
+
+def _system_path_with_recording_rm(tmp_path: Path, record: Path) -> str:
+    """A SYSTEM_PATH whose ``rm`` records mode and owner of each existing file first.
+
+    The wrapper's own ``rm`` runs right after it created and opened the capture
+    files, so the record shows what other users could have seen in ``/tmp``.
+    ``cat`` and ``base64`` are the real programs.
+    """
+    for name in ("cat", "base64"):
+        (tmp_path / name).symlink_to(shutil.which(name) or f"/usr/bin/{name}")
+    probe = (
+        "import os, stat, sys\n"
+        f"with open({str(record)!r}, 'a') as f:\n"
+        "    for p in sys.argv[1:]:\n"
+        "        if os.path.exists(p):\n"
+        "            st = os.stat(p)\n"
+        "            f.write(f'{p} {oct(stat.S_IMODE(st.st_mode))} {st.st_uid == os.getuid()}\\n')\n"
+    )
+    (tmp_path / "probe.py").write_text(probe)
+    rm = tmp_path / "rm"
+    rm.write_text(
+        f'#!/bin/sh\n{sys.executable} {tmp_path / "probe.py"} "$@"\nexec {shutil.which("rm")} "$@"\n'
+    )
+    rm.chmod(0o700)
+    return str(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_capture_round_trip_in_a_posix_shell(tmp_path: Path) -> None:
+async def test_capture_round_trip_in_a_posix_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The wrapper returns both streams byte for byte through a real ``sh``.
 
-    The command stats its own capture files and prints its umask, so the
-    output shows the files are private and the command's umask is untouched.
+    The capture files are created ``0600`` for the running user and unlinked
+    before the command starts (it cannot see them by name), the command's
+    incoming umask (027 here) is untouched, and the exit status is the
+    command's.
     """
-    out_file, err_file = capture_files(TAG)
+    record = tmp_path / "record"
+    monkeypatch.setattr(
+        sandbox_utils, "SYSTEM_PATH", _system_path_with_recording_rm(tmp_path, record)
+    )
     inner = (
         "printf 'out\\n'; printf '\\n err \\n' >&2; umask; "
-        f"stat -f '%Lp' {out_file} {err_file} 2>/dev/null || stat -c '%a' {out_file} {err_file}; "
+        f"ls {OUT_FILE} {ERR_FILE} {STATUS_FILE} >/dev/null 2>&1 && echo present || echo unlinked; "
         "exit 3"
     )
-    exit_code, output = await _sh(build_capture_command(inner, TAG))
+    exit_code, output = await _sh(f"umask 027; {build_capture_command(inner, TAG)}")
 
     assert exit_code == 3
     stdout, stderr = parse_captured_output(output, TAG)
-    assert stdout == "out\n0022\n600\n600\n"
+    assert stdout == "out\n0027\nunlinked\n"
     assert stderr == "\n err \n"
-    assert not Path(out_file).exists() and not Path(err_file).exists()
+    _assert_no_capture_files()
+    # The only rm that saw existing files is the unlink after creation: three
+    # files, mode 0600, owned by the running user.
+    assert sorted(record.read_text().splitlines()) == sorted(
+        f"{file} 0o600 True" for file in (OUT_FILE, ERR_FILE, STATUS_FILE)
+    )
+
+
+@pytest.mark.asyncio
+async def test_capture_waits_for_background_writers() -> None:
+    """Late output from a child that outlives the command is collected, as the API did."""
+    inner = "echo early; (sleep 0.3; echo late; echo late-err >&2) &"
+    exit_code, output = await _sh(build_capture_command(inner, TAG))
+
+    assert exit_code == 0
+    assert parse_captured_output(output, TAG) == ("early\nlate\n", "late-err\n")
+
+
+@pytest.mark.asyncio
+async def test_capture_survives_the_command_removing_temp_files() -> None:
+    """The files are unlinked before the command runs; deleting more changes nothing."""
+    inner = "rm -f /tmp/.inspect-exec-*; echo out; echo err >&2; exit 2"
+    exit_code, output = await _sh(build_capture_command(inner, TAG))
+
+    assert exit_code == 2
+    assert parse_captured_output(output, TAG) == ("out\n", "err\n")
 
 
 @pytest.mark.asyncio
 async def test_capture_replaces_stale_files_from_a_killed_attempt() -> None:
-    out_file, err_file = capture_files(TAG)
-    Path(out_file).write_text("stale stdout")
-    Path(err_file).write_text("stale stderr")
+    for file, text in zip(
+        capture_files(TAG), ("stale out", "stale err", "9"), strict=True
+    ):
+        Path(file).write_text(text)
 
     exit_code, output = await _sh(build_capture_command("echo fresh", TAG))
 
     assert exit_code == 0
     assert parse_captured_output(output, TAG) == ("fresh\n", "")
-    assert not Path(out_file).exists() and not Path(err_file).exists()
+    _assert_no_capture_files()
+
+
+@pytest.mark.asyncio
+async def test_capture_reports_a_collection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``base64`` on SYSTEM_PATH the frame carries the failure marker."""
+    for name in ("cat", "rm"):
+        (tmp_path / name).symlink_to(shutil.which(name) or f"/bin/{name}")
+    monkeypatch.setattr(sandbox_utils, "SYSTEM_PATH", str(tmp_path))
+
+    exit_code, output = await _sh(build_capture_command("echo out; exit 4", TAG))
+
+    assert exit_code == 4
+    with pytest.raises(OutputCollectionError, match="base64"):
+        parse_captured_output(output, TAG)
+    _assert_no_capture_files()
 
 
 @pytest.mark.asyncio
 async def test_capture_housekeeping_ignores_a_hostile_path(tmp_path: Path) -> None:
-    """``cat``/``rm`` come from SYSTEM_PATH, not from a directory the user put first on PATH."""
+    """``cat``/``rm``/``base64`` come from SYSTEM_PATH, not from a directory first on PATH."""
     marker = tmp_path / "shim-ran"
-    for name in ("cat", "rm"):
+    for name in ("cat", "rm", "base64"):
         shim = tmp_path / name
         shim.write_text(
             f"#!/bin/sh\ntouch {marker}\nprintf 'INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\\n'\n"
@@ -422,8 +554,7 @@ async def test_capture_housekeeping_ignores_a_hostile_path(tmp_path: Path) -> No
     assert exit_code == 0
     stdout, stderr = parse_captured_output(output, TAG)
     assert stdout == f"{tmp_path}/cat\n"
-    # ...but the wrapper's own cat and rm never ran from there.
+    # ...but the wrapper's own programs never ran from there.
     assert stderr == "real\n"
     assert not marker.exists()
-    out_file, err_file = capture_files(TAG)
-    assert not Path(out_file).exists() and not Path(err_file).exists()
+    _assert_no_capture_files()
