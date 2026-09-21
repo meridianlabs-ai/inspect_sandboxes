@@ -38,7 +38,8 @@ SANDBOX_CONFIGS = [
         xfails={
             "test_exec_input_large": XFail(
                 "exec() writes stdin in one shot; Modal's stdin buffer overflows "
-                "with BufferError for large input"
+                "with BufferError "
+                "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/81)"
             ),
             "test_exec_large_command": XFail(
                 "Modal caps CMD at 64 KiB (ARG_MAX); raw InvalidError "
