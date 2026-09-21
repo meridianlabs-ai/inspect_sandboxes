@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 from inspect_ai.util import ComposeConfig, ComposeService, SandboxEnvironment
-from inspect_ai.util._sandbox.self_check import self_check
 from inspect_sandboxes.e2b._e2b import (
     E2BSandboxEnvironment,
     _run_id,
@@ -403,101 +402,6 @@ async def test_cli_cleanup_bulk_partial_failure(mock_sandbox: MagicMock) -> None
             await E2BSandboxEnvironment.cli_cleanup(None)
 
     assert exc_info.value.code == 1
-
-
-def _check_self_check_results(
-    results: dict[str, bool | str], known_failures: list[str]
-) -> None:
-    failed = [
-        (name, err)
-        for name, err in results.items()
-        if err is not True and name not in known_failures
-    ]
-    if failed:
-        details = "\n".join(f"  {name}: {err}" for name, err in failed)
-        raise AssertionError(f"{len(failed)} unexpected test(s) failed:\n{details}")
-
-
-@pytest_asyncio.fixture
-async def e2b_single_env() -> AsyncGenerator[SandboxEnvironment, None]:
-    """Create a real single-service E2B sandbox (default `base` template)."""
-    await E2BSandboxEnvironment.task_init("test_self_check", None)
-    envs = await E2BSandboxEnvironment.sample_init("test_self_check", None, {})
-    yield envs["default"]
-    try:
-        await E2BSandboxEnvironment.sample_cleanup("test_self_check", None, envs, False)
-        await E2BSandboxEnvironment.task_cleanup("test_self_check", None, cleanup=True)
-    except Exception as e:
-        print(f"Cleanup error: {e}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_self_check_single_service(
-    e2b_single_env: SandboxEnvironment,
-) -> None:
-    """Run inspect_ai's self-check suite against a single-service E2B sandbox."""
-    known_failures = [
-        "test_read_file_not_allowed",  # files.read doesn't translate permission denials to PermissionError
-        "test_write_text_file_without_permissions",  # files.write returns HTTP 400 for permission errors, not translated
-        "test_write_binary_file_without_permissions",  # same
-        "test_exec_permission_error",  # exit code 126 from shell, not translated to PermissionError
-        "test_exec_timeout_not_raised_on_fast_signal_death",  # E2B reports exit -1 for self-SIGTERM, not 143
-        "test_exec_as_nonexistent_user",  # E2B raises AuthenticationException, not the inspect_ai-expected error
-        "test_exec_as_user",  # default `base` template doesn't have useradd preinstalled
-        "test_exec_timeout",  # flaky: httpx.ReadTimeout escapes outside the wrapped path (any of these 3 rotates)
-        "test_exec_timeout_kills_process",  # same
-        "test_exec_timeout_kills_child_processes",  # same
-    ]
-    results = await self_check(e2b_single_env)
-    _check_self_check_results(results, known_failures)
-
-
-@pytest_asyncio.fixture
-async def e2b_dind_env() -> AsyncGenerator[SandboxEnvironment, None]:
-    """Create a real DinD E2B sandbox (two-service compose, routes to DinD)."""
-    config = ComposeConfig(
-        services={
-            "default": ComposeService(
-                image="python:3.12-slim", command="sleep infinity"
-            ),
-            "helper": ComposeService(
-                image="python:3.12-slim", command="sleep infinity"
-            ),
-        }
-    )
-    await E2BSandboxEnvironment.task_init("test_self_check_dind", None)
-    envs = await E2BSandboxEnvironment.sample_init("test_self_check_dind", config, {})
-    yield envs["default"]
-    try:
-        await E2BSandboxEnvironment.sample_cleanup(
-            "test_self_check_dind", config, envs, False
-        )
-        await E2BSandboxEnvironment.task_cleanup(
-            "test_self_check_dind", None, cleanup=True
-        )
-    except Exception as e:
-        print(f"Cleanup error: {e}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_self_check_dind(
-    e2b_dind_env: SandboxEnvironment,
-) -> None:
-    """Run inspect_ai's self-check suite against a DinD E2B sandbox."""
-    known_failures = [
-        "test_exec_permission_error",  # docker compose exec routes through sh; permission edges differ
-        "test_write_text_file_without_permissions",  # same
-        "test_write_binary_file_without_permissions",  # same
-        "test_read_file_not_allowed",  # same
-        "test_exec_as_user",  # docker compose exec; user creation edge
-        "test_exec_timeout",  # flaky: httpx.ReadTimeout escapes outside the wrapped path (any of these 3 rotates)
-        "test_exec_timeout_kills_process",  # same
-        "test_exec_timeout_kills_child_processes",  # same
-    ]
-    results = await self_check(e2b_dind_env)
-    _check_self_check_results(results, known_failures)
 
 
 @pytest_asyncio.fixture

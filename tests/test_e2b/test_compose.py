@@ -153,7 +153,7 @@ def test_build_resolves_dockerfile(tmp_path: Path) -> None:
 def test_x_e2b_template_skips_build() -> None:
     config = ComposeConfig(
         services={"default": ComposeService(image="alpine")},
-        **{"x-e2b": {"template": "my-prebuilt-template"}},  # type: ignore[arg-type]
+        **{"x-e2b": {"template": "my-prebuilt-template"}},
     )
     result = resolve_single_service_params(config, None)
     assert result.template == "my-prebuilt-template"
@@ -178,7 +178,7 @@ def test_environment_and_user_passthrough() -> None:
 def test_x_e2b_envs_extend_environment() -> None:
     config = ComposeConfig(
         services={"default": ComposeService(image="alpine", environment=["FOO=bar"])},
-        **{"x-e2b": {"envs": {"EXTRA": "value"}}},  # type: ignore[arg-type]
+        **{"x-e2b": {"envs": {"EXTRA": "value"}}},
     )
     result = resolve_single_service_params(config, None)
     assert result.envs == {"FOO": "bar", "EXTRA": "value"}
@@ -187,7 +187,7 @@ def test_x_e2b_envs_extend_environment() -> None:
 def test_x_e2b_user_overrides_service_user() -> None:
     config = ComposeConfig(
         services={"default": ComposeService(image="alpine", user="nobody")},
-        **{"x-e2b": {"user": "root"}},  # type: ignore[arg-type]
+        **{"x-e2b": {"user": "root"}},
     )
     result = resolve_single_service_params(config, None)
     assert result.user == "root"
@@ -196,7 +196,7 @@ def test_x_e2b_user_overrides_service_user() -> None:
 def test_x_e2b_metadata() -> None:
     config = ComposeConfig(
         services={"default": ComposeService(image="alpine")},
-        **{"x-e2b": {"metadata": {"project": "alpha", "owner": "jj"}}},  # type: ignore[arg-type]
+        **{"x-e2b": {"metadata": {"project": "alpha", "owner": "jj"}}},
     )
     result = resolve_single_service_params(config, None)
     assert result.metadata == {"project": "alpha", "owner": "jj"}
@@ -266,7 +266,7 @@ def test_x_e2b_resources_take_precedence() -> None:
                 },
             )
         },
-        **{"x-e2b": {"cpu_count": 8, "memory_mb": 4096}},  # type: ignore[arg-type]
+        **{"x-e2b": {"cpu_count": 8, "memory_mb": 4096}},
     )
     result = resolve_single_service_params(config, None)
     assert result.cpu_count == 8

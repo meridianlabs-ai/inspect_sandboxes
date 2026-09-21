@@ -35,6 +35,8 @@ inspect_sandboxes = "inspect_sandboxes._registry"
 
 [dependency-groups]
 dev = [
+    # The conformance suites consume inspect_ai's pytest-collected checks
+    "inspect-ai>=0.3.261",
     "mypy>=1.19.1",
     "pre-commit",
     "pyright",
