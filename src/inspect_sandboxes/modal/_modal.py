@@ -6,6 +6,7 @@ import os
 import posixpath
 import shlex
 import sys
+import uuid
 from contextvars import ContextVar
 from logging import getLogger
 from pathlib import PurePosixPath
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, Never, cast, overload
 
 import modal
 import modal.exception
+import modal.sandbox
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
@@ -56,6 +58,14 @@ logger = getLogger(__name__)
 
 MODAL_APP_NAME = "inspect_modal_sandbox"
 INSPECT_SANDBOX_TAG = {"created_by": "inspect-ai"}
+
+# Modal's Sandbox.exec() validates the total argv length client-side and raises
+# InvalidError beyond ARG_MAX_BYTES (64 KiB: a quarter of the usual Linux
+# ARG_MAX, leaving room for its own `runsc exec ...` prefix). exec() stages
+# anything larger as a script inside the sandbox and runs that instead.
+# A direct reference so a rename in Modal fails loudly at import time; Modal's
+# .pyi stubs don't declare the constant, hence the pyright ignore.
+_EXEC_ARG_MAX_BYTES: int = modal.sandbox.ARG_MAX_BYTES  # pyright: ignore[reportAttributeAccessIssue]
 
 _running_sandboxes: ContextVar[list[str]] = ContextVar("modal_running_sandboxes")
 
@@ -484,6 +494,25 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         # parameter of its own.
         exec_cmd = _build_exec_cmd(cmd, user)
 
+        # Modal's own check counts characters; counting UTF-8 bytes diverts a
+        # superset of what it rejects and also keeps every argv element under
+        # the kernel's per-element MAX_ARG_STRLEN, which is a byte limit. The
+        # script `exec`s the command so the process tree matches the inline
+        # path (the shell is replaced rather than left as a parent); unlike the
+        # inline path this needs /bin/sh in the image, as the `user=` wrapper
+        # already does. The upload happens before the timeout budget starts,
+        # like the stdin upload on the other providers.
+        script_file: str | None = None
+        if sum(len(arg.encode("utf-8")) for arg in exec_cmd) > _EXEC_ARG_MAX_BYTES:
+            script_file = f"/tmp/.inspect-cmd-{uuid.uuid4().hex}"
+            try:
+                await self._write_file_content(
+                    script_file, "exec " + shlex.join(cmd) + "\n"
+                )
+            except modal.exception.SandboxFilesystemError as e:
+                self._raise_filesystem_error(script_file, e)
+            exec_cmd = _build_exec_cmd(["/bin/sh", script_file], user)
+
         # Modal requires absolute paths for workdir
         workdir = cwd
         if workdir is not None and not PurePosixPath(workdir).is_absolute():
@@ -552,19 +581,30 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             attempt_timeouts = [timeout]
 
         last_timeout_exc: asyncio.TimeoutError | None = None
-        for t in attempt_timeouts:
-            try:
-                if t is not None:
-                    return await asyncio.wait_for(_run(), timeout=t)
-                else:
-                    return await _run()
-            except asyncio.TimeoutError as e:
-                last_timeout_exc = e
+        try:
+            for t in attempt_timeouts:
+                try:
+                    if t is not None:
+                        return await asyncio.wait_for(_run(), timeout=t)
+                    else:
+                        return await _run()
+                except asyncio.TimeoutError as e:
+                    last_timeout_exc = e
 
-        assert last_timeout_exc is not None
-        raise TimeoutError(
-            f"Command timed out after {timeout} seconds"
-        ) from last_timeout_exc
+            assert last_timeout_exc is not None
+            raise TimeoutError(
+                f"Command timed out after {timeout} seconds"
+            ) from last_timeout_exc
+        finally:
+            if script_file is not None:
+                try:
+                    await self._remove_file(script_file)
+                except Exception as e:
+                    trace_message(
+                        logger,
+                        "modal",
+                        f"Could not remove exec script {script_file}: {e}",
+                    )
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
@@ -707,6 +747,12 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             await self.sandbox.filesystem.write_text.aio(contents, file)
         else:
             await self.sandbox.filesystem.write_bytes.aio(contents, file)
+
+    async def _remove_file(self, file: str) -> None:
+        # Best-effort, single attempt: this runs in exec()'s finally block, so
+        # retry backoff here would stall every exit path (including timeouts
+        # and cancellation) over a file nobody will read again.
+        await self.sandbox.filesystem.remove.aio(file)
 
     @_standard_retry
     async def _read_file_content(self, file: str) -> bytes:
