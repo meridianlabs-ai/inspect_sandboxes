@@ -1,57 +1,32 @@
 """Conformance runs of inspect_ai's portable sandbox checks against Daytona.
 
-Kept separate from test_daytona.py so the `import *` of check functions
-doesn't pollute the unit-test module. See the self_check module docstring
-for the consumption contract (sandbox_env fixture + per-check xfails).
+Kept separate from test_daytona.py so the `import *` of check functions doesn't
+pollute the unit-test module. See the self_check module docstring for the
+consumption contract (sandbox_env fixture + per-check xfails).
 """
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
-from typing import NamedTuple
 
 import pytest
 import pytest_asyncio
-from inspect_ai.util import ComposeConfig, ComposeService, SandboxEnvironment
+from inspect_ai.util import SandboxEnvironment
 
 # Pull the portable check functions into this module so pytest collects them
 # as tests, each driven by the `sandbox_env` fixture below.
-from inspect_ai.util._sandbox.self_check import *  # noqa: F401, F403
+from inspect_ai.util._sandbox.self_check import *  # noqa: F401, F403  # pyright: ignore[reportWildcardImportFromLibrary]
 from inspect_sandboxes.daytona._daytona import DaytonaSandboxEnvironment
+
+from tests.self_check_support import (
+    ConfigAndEnv,
+    SandboxConfig,
+    XFail,
+    apply_xfail,
+    dind_config,
+)
 
 # All checks share one sandbox per config (module-scoped loop + env): a
 # fresh Daytona sandbox per check would multiply runtime and API cost ~60x.
 pytestmark = [pytest.mark.asyncio(loop_scope="module"), pytest.mark.integration]
-
-
-@dataclass(frozen=True)
-class XFail:
-    """An expected-failure marker: reason plus strictness."""
-
-    reason: str
-    strict: bool = True
-
-
-@dataclass(frozen=True)
-class SandboxConfig:
-    """A sandbox configuration to run the check suite against."""
-
-    id: str
-    config: ComposeConfig | None
-    xfails: dict[str, XFail] = field(default_factory=dict)
-
-
-def _dind_config() -> ComposeConfig:
-    """Two-service ComposeConfig so the dispatcher routes to DinD."""
-    return ComposeConfig(
-        services={
-            "default": ComposeService(
-                image="python:3.12-slim", command="sleep infinity"
-            ),
-            "helper": ComposeService(
-                image="python:3.12-slim", command="sleep infinity"
-            ),
-        }
-    )
 
 
 SANDBOX_CONFIGS = [
@@ -82,7 +57,7 @@ SANDBOX_CONFIGS = [
     ),
     SandboxConfig(
         id="dind",
-        config=_dind_config(),
+        config=dind_config(),
         xfails={
             "test_exec_stderr": XFail(
                 "DinD routes through compose exec; stderr merged"
@@ -101,13 +76,6 @@ SANDBOX_CONFIGS = [
         },
     ),
 ]
-
-
-class ConfigAndEnv(NamedTuple):
-    """A sandbox config paired with its initialized environment."""
-
-    cfg: SandboxConfig
-    env: SandboxEnvironment
 
 
 # Module-scoped: one sandbox per config, shared by all checks (like the old
@@ -142,9 +110,5 @@ async def _config_and_env(
 def sandbox_env(
     request: pytest.FixtureRequest, _config_and_env: ConfigAndEnv
 ) -> SandboxEnvironment:
-    xfail = _config_and_env.cfg.xfails.get(request.node.originalname)
-    if xfail is not None:
-        request.node.add_marker(
-            pytest.mark.xfail(reason=xfail.reason, strict=xfail.strict)
-        )
+    apply_xfail(request, _config_and_env.cfg.xfails)
     return _config_and_env.env
