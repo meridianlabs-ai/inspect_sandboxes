@@ -13,7 +13,7 @@ from inspect_ai.util import SandboxEnvironment
 
 # Pull the portable check functions into this module so pytest collects them
 # as tests, each driven by the `sandbox_env` fixture below.
-from inspect_ai.util._sandbox.self_check import *  # noqa: F401, F403  # pyright: ignore[reportWildcardImportFromLibrary]
+from inspect_ai.util._sandbox.self_check import *  # noqa: F403  # pyright: ignore[reportWildcardImportFromLibrary]
 from inspect_sandboxes.daytona._daytona import DaytonaSandboxEnvironment
 
 from tests.self_check_support import (
@@ -24,8 +24,8 @@ from tests.self_check_support import (
     dind_config,
 )
 
-# All checks share one sandbox per config (module-scoped loop + env): a
-# fresh Daytona sandbox per check would multiply runtime and API cost ~60x.
+# All checks share one sandbox per config (module-scoped loop + env); a fresh
+# Daytona sandbox per check would multiply runtime and API cost by the check count.
 pytestmark = [pytest.mark.asyncio(loop_scope="module"), pytest.mark.integration]
 
 
@@ -35,6 +35,9 @@ SANDBOX_CONFIGS = [
         config=None,
         xfails={
             "test_exec_stderr": XFail(
+                "Daytona merges stdout+stderr; stderr always empty"
+            ),
+            "test_exec_stderr_utf": XFail(
                 "Daytona merges stdout+stderr; stderr always empty"
             ),
             "test_exec_permission_error": XFail(
@@ -62,6 +65,9 @@ SANDBOX_CONFIGS = [
             "test_exec_stderr": XFail(
                 "DinD routes through compose exec; stderr merged"
             ),
+            "test_exec_stderr_utf": XFail(
+                "DinD routes through compose exec; stderr merged"
+            ),
             "test_exec_permission_error": XFail(
                 "exit code 126, not translated to PermissionError"
             ),
@@ -78,8 +84,8 @@ SANDBOX_CONFIGS = [
 ]
 
 
-# Module-scoped: one sandbox per config, shared by all checks (like the old
-# self_check() runner). Checks clean up after themselves.
+# Module-scoped: one sandbox per config, shared by all checks, which clean up
+# after themselves.
 @pytest_asyncio.fixture(
     scope="module",
     loop_scope="module",

@@ -13,11 +13,8 @@ from inspect_ai.util import SandboxEnvironment
 
 # Pull the portable check functions into this module so pytest collects them
 # as tests, each driven by the `sandbox_env` fixture below.
-from inspect_ai.util._sandbox.self_check import *  # noqa: F401, F403  # pyright: ignore[reportWildcardImportFromLibrary]
-from inspect_sandboxes.modal._modal import (
-    ModalSandboxEnvironment,
-    sandbox_cleanup_startup,
-)
+from inspect_ai.util._sandbox.self_check import *  # noqa: F403  # pyright: ignore[reportWildcardImportFromLibrary]
+from inspect_sandboxes.modal._modal import ModalSandboxEnvironment
 
 from tests.self_check_support import (
     ConfigAndEnv,
@@ -26,8 +23,8 @@ from tests.self_check_support import (
     apply_xfail,
 )
 
-# All checks share one sandbox per config (module-scoped loop + env): a
-# fresh Modal sandbox per check would multiply runtime and API cost ~60x.
+# All checks share one sandbox per config (module-scoped loop + env); a fresh
+# Modal sandbox per check would multiply runtime and API cost by the check count.
 pytestmark = [pytest.mark.asyncio(loop_scope="module"), pytest.mark.integration]
 
 
@@ -54,8 +51,8 @@ SANDBOX_CONFIGS = [
 ]
 
 
-# Module-scoped: one sandbox per config, shared by all checks (like the old
-# self_check() runner). Checks clean up after themselves.
+# Module-scoped: one sandbox per config, shared by all checks, which clean up
+# after themselves.
 @pytest_asyncio.fixture(
     scope="module",
     loop_scope="module",
@@ -67,7 +64,7 @@ async def _config_and_env(
 ) -> AsyncIterator[ConfigAndEnv]:
     cfg: SandboxConfig = request.param
     task_name = f"test_self_check_{cfg.id}"
-    sandbox_cleanup_startup()
+    await ModalSandboxEnvironment.task_init(task_name, None)
     envs = await ModalSandboxEnvironment.sample_init(task_name, cfg.config, {})
     try:
         yield ConfigAndEnv(cfg=cfg, env=envs["default"])
