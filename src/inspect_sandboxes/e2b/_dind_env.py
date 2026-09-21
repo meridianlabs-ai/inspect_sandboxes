@@ -186,8 +186,9 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
             )
             if cp_exit != 0:
                 raise RuntimeError(f"Failed to copy stdin to {self.service}: {cp_err}")
-            stdin_cmd = self._build_stdin_command(cmd, stdin_container_file)
-            exec_cmd.extend([self.service, "sh", "-c", stdin_cmd])
+            exec_cmd.extend(
+                [self.service, *self._build_stdin_command(cmd, stdin_container_file)]
+            )
         else:
             exec_cmd.extend([self.service, *cmd])
 
@@ -308,9 +309,22 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         return data_bytes
 
     @staticmethod
-    def _build_stdin_command(cmd: list[str], stdin_file: str) -> str:
+    def _build_stdin_command(cmd: list[str], stdin_file: str) -> list[str]:
+        """Container argv that runs *cmd* with *stdin_file* on stdin, then removes it.
+
+        The user's argv is passed as positional parameters (``"$@"``) rather
+        than joined into the ``-c`` string, so each element stays its own argv
+        entry inside the container and a ~1 MiB command does not hit the
+        kernel's 128 KiB per-argument cap.
+        """
         quoted = shlex.quote(stdin_file)
-        return f"{shlex.join(cmd)} < {quoted}; _ec=$?; rm -f {quoted}; exit $_ec"
+        return [
+            "sh",
+            "-c",
+            f'"$@" < {quoted}; _ec=$?; rm -f {quoted}; exit $_ec',
+            "sh",
+            *cmd,
+        ]
 
     def _container_file(self, file: str) -> str:
         """Resolve relative path against working directory."""
