@@ -1802,3 +1802,107 @@ async def test_exec_large_command_remove_failure_does_not_mask_result(
 
     assert result.success
     fs.remove.aio.assert_awaited_once()
+
+
+def _fake_stdin(events: list[str], received: bytearray) -> MagicMock:
+    """A stdin double with the real writer's contract.
+
+    Mirrors modal.io_streams: write() buffers and raises BufferError past the
+    router cap; drain() flushes the buffer (and the EOF flag) to the process.
+    """
+    from modal.io_streams import TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE
+
+    buffer = bytearray()
+    stdin = MagicMock()
+
+    def write(data: bytes) -> None:
+        if len(buffer) + len(data) > TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE:
+            raise BufferError(
+                "Buffer size exceed limit. Call drain to flush the buffer."
+            )
+        buffer.extend(data)
+        events.append(f"write:{len(data)}")
+
+    async def drain() -> None:
+        received.extend(buffer)
+        buffer.clear()
+        events.append("drain")
+
+    stdin.write = write
+    stdin.write_eof = lambda: events.append("eof")
+    stdin.drain = MagicMock()
+    stdin.drain.aio = AsyncMock(side_effect=drain)
+    return stdin
+
+
+def _exec_with_fake_stdin(
+    sandbox_env: ModalSandboxEnvironment, events: list[str], received: bytearray
+) -> None:
+    async def mock_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout.read = AsyncMock(return_value="")
+        process.stderr.read = AsyncMock(return_value="")
+        process.stdin = _fake_stdin(events, received)
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = mock_exec
+
+
+@pytest.mark.asyncio
+async def test_exec_large_stdin_round_trips_through_the_buffered_writer(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Input larger than Modal's stdin buffer cap must arrive intact and in order.
+
+    The fake stdin enforces the real cap, so a single oversized write() (the
+    bug in #81) raises BufferError here just as it does against Modal.
+    """
+    from modal.io_streams import TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE
+
+    events: list[str] = []
+    received = bytearray()
+    _exec_with_fake_stdin(sandbox_env, events, received)
+    payload = bytes(range(256)) * (TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE // 256 + 1)
+
+    result = await sandbox_env.exec(["wc", "-c"], input=payload)
+
+    assert result.success
+    assert bytes(received) == payload
+    # Every write is flushed before the next one is buffered.
+    for index, event in enumerate(events):
+        if event.startswith("write:"):
+            assert events[index + 1] in ("drain", "eof")
+    assert events[-2:] == ["eof", "drain"]
+    assert events.count("eof") == 1
+
+
+@pytest.mark.asyncio
+async def test_exec_small_stdin_costs_a_single_drain(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """EOF rides along with the only chunk: one stdin RPC, as before the fix."""
+    events: list[str] = []
+    received = bytearray()
+    _exec_with_fake_stdin(sandbox_env, events, received)
+
+    await sandbox_env.exec(["cat"], input="hi")
+
+    assert bytes(received) == b"hi"
+    assert events == ["write:2", "eof", "drain"]
+
+
+@pytest.mark.asyncio
+async def test_exec_empty_stdin_sends_eof_only(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    events: list[str] = []
+    received = bytearray()
+    _exec_with_fake_stdin(sandbox_env, events, received)
+
+    await sandbox_env.exec(["cat"], input="")
+
+    assert bytes(received) == b""
+    assert events == ["eof", "drain"]

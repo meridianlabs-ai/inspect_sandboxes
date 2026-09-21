@@ -67,6 +67,14 @@ INSPECT_SANDBOX_TAG = {"created_by": "inspect-ai"}
 # .pyi stubs don't declare the constant, hence the pyright ignore.
 _EXEC_ARG_MAX_BYTES: int = modal.sandbox.ARG_MAX_BYTES  # pyright: ignore[reportAttributeAccessIssue]
 
+# Sandbox.exec()'s stdin writer buffers write() calls and raises BufferError as
+# soon as a single write() would push the buffer past its cap
+# (modal.io_streams.TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE, 16 MiB), so exec()
+# streams `input` in chunks and drains between them. 1 MiB is deliberately far
+# below the cap: it keeps each gRPC message small and is the size validated
+# against real sandboxes (50 MiB round-trips in the conformance suite).
+_STDIN_CHUNK_BYTES = 1024 * 1024
+
 _running_sandboxes: ContextVar[list[str]] = ContextVar("modal_running_sandboxes")
 
 
@@ -522,6 +530,16 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             )
             workdir = f"/{workdir}"
 
+        # Encode once, outside the retried/timed region: a large str input
+        # would otherwise be re-encoded on every attempt.
+        stdin_data: bytes | None
+        if input is None:
+            stdin_data = None
+        elif isinstance(input, str):
+            stdin_data = input.encode("utf-8")
+        else:
+            stdin_data = input
+
         @_exec_retry
         async def _run() -> ExecResult[str]:
             modal_env = cast(dict[str, str | None] | None, env)
@@ -532,21 +550,32 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 env=modal_env,
             )
 
-            if input is not None:
+            if stdin_data is not None:
+                # Chunk under Modal's stdin buffer cap and drain between
+                # chunks; EOF rides along with the last chunk's drain so a
+                # small input still costs a single stdin RPC.
+                eof_sent = False
                 try:
-                    data = input.encode("utf-8") if isinstance(input, str) else input
-                    process.stdin.write(data)
+                    for offset in range(0, len(stdin_data), _STDIN_CHUNK_BYTES):
+                        end = offset + _STDIN_CHUNK_BYTES
+                        process.stdin.write(stdin_data[offset:end])
+                        if end >= len(stdin_data):
+                            process.stdin.write_eof()
+                            eof_sent = True
+                        await process.stdin.drain.aio()
                 except modal.exception.InternalError as e:
                     logger.warning(f"Modal InternalError while writing stdin: {e}.")
                     raise
                 finally:
-                    # No kill() on Modal's ContainerProcess
-                    # Close stdin to unblock the process
-                    try:
-                        process.stdin.write_eof()
-                        await process.stdin.drain.aio()
-                    except Exception:
-                        pass
+                    # No kill() on Modal's ContainerProcess; close stdin to
+                    # unblock the process when the input was empty or the
+                    # upload failed part-way.
+                    if not eof_sent:
+                        try:
+                            process.stdin.write_eof()
+                            await process.stdin.drain.aio()
+                        except Exception:
+                            pass
 
             try:
                 stdout = await process.stdout.read.aio()
