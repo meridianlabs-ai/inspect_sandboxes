@@ -3,6 +3,7 @@
 import shlex
 import subprocess
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -1576,6 +1577,41 @@ async def test_self_check(modal_sandbox_environment: ModalSandboxEnvironment) ->
 
     results = await self_check(modal_sandbox_environment)
     check_results_of_self_check(results, known_failures)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_compose_entrypoint_overrides_image_entrypoint(tmp_path: Path) -> None:
+    """A Compose entrypoint replaces an inherited image entrypoint on Modal."""
+    (tmp_path / "Dockerfile").write_text(
+        'FROM busybox:1.36\nENTRYPOINT ["false"]\nCMD ["unused"]\n'
+    )
+    config = ComposeConfig(
+        services={
+            "default": ComposeService(
+                build=str(tmp_path), entrypoint=["sleep", "infinity"]
+            )
+        }
+    )
+    sandbox_cleanup_startup()
+    envs: dict[str, SandboxEnvironment] = {}
+
+    try:
+        envs = await ModalSandboxEnvironment.sample_init(
+            "test_compose_entrypoint", config, {}
+        )
+        result = await envs["default"].exec(["echo", "entrypoint-overridden"])
+
+        assert result.success
+        assert result.stdout.strip() == "entrypoint-overridden"
+    finally:
+        if envs:
+            await ModalSandboxEnvironment.sample_cleanup(
+                "test_compose_entrypoint", config, envs, False
+            )
+        await ModalSandboxEnvironment.task_cleanup(
+            "test_compose_entrypoint", None, cleanup=True
+        )
 
 
 @pytest_asyncio.fixture

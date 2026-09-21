@@ -166,6 +166,7 @@ inspect sandbox cleanup modal <sandbox-id>      # terminate one
 ## Notes
 
 - **Network mode**: Docker Compose `network_mode` is automatically translated to Modal's `block_network`. `network_mode: none` blocks all network access; any other value (e.g. `bridge`) allows it. `x-modal.block_network` takes precedence if set.
+- **Entrypoint**: Docker Compose `entrypoint` replaces the image's `ENTRYPOINT`, suppresses its `CMD`, and is prepended to `command`. `[]` or `''` clears the image entrypoint so `command` runs directly; at least one of the two must be non-empty.
 
 ## Limitations {#modal-limitations}
 

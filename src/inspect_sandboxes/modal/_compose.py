@@ -112,6 +112,24 @@ def convert_compose_to_modal_params(
             else shlex.split(service.command)
         )
 
+    if service.entrypoint is not None:
+        entrypoint = (
+            service.entrypoint
+            if isinstance(service.entrypoint, list)
+            else shlex.split(service.entrypoint)
+        )
+        command = [*entrypoint, *command]
+        if not command:
+            raise ValueError(
+                "Compose entrypoint is empty and no command is set, so the Modal "
+                "sandbox would exit immediately. Set entrypoint or command."
+            )
+        # Modal prepends the image ENTRYPOINT to the Sandbox.create() args, so
+        # clear ENTRYPOINT and CMD for the Compose entrypoint to run verbatim.
+        image = params.get("image")
+        if image is not None:
+            params["image"] = image.entrypoint([]).cmd([])
+
     if service.working_dir:
         params["workdir"] = service.working_dir
 

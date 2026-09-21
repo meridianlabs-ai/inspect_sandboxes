@@ -782,6 +782,106 @@ def test_convert_compose_command(
     assert result.command == expected_command
 
 
+@pytest.mark.parametrize(
+    ("entrypoint", "command", "expected_command"),
+    [
+        (["/bin/sh", "-c"], ["echo", "hello"], ["/bin/sh", "-c", "echo", "hello"]),
+        ("/bin/sh -c 'echo hello'", None, ["/bin/sh", "-c", "echo hello"]),
+        (["sleep", "infinity"], None, ["sleep", "infinity"]),
+        ([], ["echo", "hello"], ["echo", "hello"]),
+    ],
+)
+def test_convert_compose_entrypoint(
+    entrypoint: str | list[str],
+    command: str | list[str] | None,
+    expected_command: list[str],
+) -> None:
+    """Compose entrypoint replaces the image entrypoint and prefixes command."""
+    service = ComposeService(
+        image="python:3.12", entrypoint=entrypoint, command=command
+    )
+    config = ComposeConfig(services={"default": service})
+    image = MagicMock()
+    image_without_entrypoint = MagicMock()
+    image_without_defaults = MagicMock()
+    image.entrypoint.return_value = image_without_entrypoint
+    image_without_entrypoint.cmd.return_value = image_without_defaults
+
+    with patch(
+        "inspect_sandboxes.modal._compose.modal.Image.from_registry",
+        return_value=image,
+    ):
+        result = convert_compose_to_modal_params(config, None)
+
+    image.entrypoint.assert_called_once_with([])
+    image_without_entrypoint.cmd.assert_called_once_with([])
+    assert result.kwargs["image"] is image_without_defaults
+    assert result.command == expected_command
+
+
+@pytest.mark.parametrize("entrypoint", ["", []])
+def test_convert_compose_empty_entrypoint_without_command_rejected(
+    entrypoint: str | list[str],
+) -> None:
+    """An empty entrypoint with no command leaves nothing to run."""
+    service = ComposeService(image="python:3.12", entrypoint=entrypoint)
+    config = ComposeConfig(services={"default": service})
+
+    with (
+        patch("inspect_sandboxes.modal._compose.modal.Image.from_registry"),
+        pytest.raises(ValueError, match="entrypoint is empty"),
+    ):
+        convert_compose_to_modal_params(config, None)
+
+
+def test_convert_compose_command_without_entrypoint_keeps_image_defaults() -> None:
+    """Without a Compose entrypoint the image ENTRYPOINT and CMD are untouched."""
+    service = ComposeService(image="python:3.12", command=["echo", "hello"])
+    config = ComposeConfig(services={"default": service})
+    image = MagicMock()
+
+    with patch(
+        "inspect_sandboxes.modal._compose.modal.Image.from_registry",
+        return_value=image,
+    ):
+        result = convert_compose_to_modal_params(config, None)
+
+    image.entrypoint.assert_not_called()
+    image.cmd.assert_not_called()
+    assert result.kwargs["image"] is image
+    assert result.command == ["echo", "hello"]
+
+
+def test_convert_compose_entrypoint_with_build(tmp_path: Path) -> None:
+    """A Dockerfile-built image also has its ENTRYPOINT and CMD cleared."""
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
+    service = ComposeService(build=".", entrypoint=["sleep", "infinity"])
+    config = ComposeConfig(services={"default": service})
+    image = MagicMock()
+    image.entrypoint.return_value.cmd.return_value = "cleared"
+
+    with patch(
+        "inspect_sandboxes.modal._compose.modal.Image.from_dockerfile",
+        return_value=image,
+    ):
+        result = convert_compose_to_modal_params(config, str(tmp_path / "compose.yaml"))
+
+    image.entrypoint.assert_called_once_with([])
+    assert result.kwargs["image"] == "cleared"
+    assert result.command == ["sleep", "infinity"]
+
+
+def test_convert_compose_entrypoint_with_default_image() -> None:
+    """An entrypoint can launch against Modal's implicit default image."""
+    service = ComposeService(entrypoint=["sleep", "infinity"])
+    config = ComposeConfig(services={"default": service})
+
+    result = convert_compose_to_modal_params(config, None)
+
+    assert "image" not in result.kwargs
+    assert result.command == ["sleep", "infinity"]
+
+
 class TestImageRegistrySecret:
     """A private registry needs credentials at image-PULL time.
 
