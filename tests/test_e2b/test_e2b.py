@@ -511,3 +511,31 @@ async def test_task_init_rejects_unsupported_single_service_fields(
     )
     with pytest.raises(ValueError, match=r"services\.default\.volumes"):
         await E2BSandboxEnvironment.task_init("test_task", str(compose))
+
+
+@pytest.mark.asyncio
+async def test_single_service_compose_user_is_the_default_exec_user(
+    mock_sandbox: MagicMock,
+    tmp_path: Any,
+) -> None:
+    """Compose `user` reaches the environment: commands run as that user by default."""
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        "services:\n  default:\n    image: python:3.12\n    user: agent\n"
+    )
+    mock_sandbox.commands.run = AsyncMock(
+        return_value=MagicMock(stdout="agent\n", stderr="", exit_code=0)
+    )
+    mock_cls = make_mock_async_sandbox_cls(mock_sandbox)
+    with (
+        patch("inspect_sandboxes.e2b._e2b.AsyncSandbox", new=mock_cls),
+        patch("inspect_sandboxes.e2b._e2b.build_template_for_image") as build,
+    ):
+        build.return_value = "inspect-image-hash"
+        await E2BSandboxEnvironment.task_init("test_task", str(compose))
+        envs = await E2BSandboxEnvironment.sample_init("test_task", str(compose), {})
+
+    env = envs["default"]
+    assert isinstance(env, E2BSingleServiceEnvironment)
+    await env.exec(["whoami"])
+    assert mock_sandbox.commands.run.call_args[1]["user"] == "agent"

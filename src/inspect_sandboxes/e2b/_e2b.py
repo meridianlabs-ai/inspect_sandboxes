@@ -213,7 +213,13 @@ class E2BSandboxEnvironment(SandboxEnvironment):
             _, default_service = find_default_service(compose_config)
             connection_ports = service_connection_ports(default_service)
 
-        return {"default": E2BSingleServiceEnvironment(sandbox, connection_ports)}
+        return {
+            "default": E2BSingleServiceEnvironment(
+                sandbox,
+                connection_ports,
+                default_user=params.user if params is not None else None,
+            )
+        }
 
     @classmethod
     async def _dind_sample_init(

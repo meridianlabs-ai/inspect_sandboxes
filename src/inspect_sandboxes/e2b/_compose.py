@@ -61,8 +61,8 @@ E2B_COMPOSE_SUPPORT = ComposeSupport(
         "env_file": ignored(
             "Files are not read; put the variables under `environment` or `x-e2b.envs`."
         ),
-        "user": rejected(
-            "Compose `user` is not applied on E2B yet (issue #85), so commands would run as root; pass `user=` to `exec()` instead."
+        "user": partial(
+            "Default OS user for `exec()`; `x-e2b.user` overrides, and file operations still run as root. Must be a username that exists in the image: E2B does not accept numeric uids, and a `user:group` value is used for its user part only."
         ),
         "healthcheck": ignored("The sandbox is ready once creation returns."),
         "ports": partial(
@@ -162,9 +162,8 @@ def resolve_single_service_params(
 
     Raises:
         ValueError: If the config uses a Compose field E2B cannot honor (see
-            ``E2B_COMPOSE_SUPPORT``), ``network_mode: none`` (issue #86) or
-            ``x-e2b.user`` (issue #85), neither of which this provider applies
-            yet.
+            ``E2B_COMPOSE_SUPPORT``) or ``network_mode: none``, which this
+            provider does not apply yet (issue #86).
     """
     validate_compose_support(config, E2B_COMPOSE_SUPPORT)
     _, service = find_default_service(config)
@@ -198,6 +197,15 @@ def resolve_single_service_params(
         envs.update({str(k): str(v) for k, v in ext_envs.items()})
 
     user = extensions.get("user") or service.user
+    if user is not None:
+        # envd authenticates commands by username; a uid fails at the first
+        # exec() with an opaque AuthenticationException, so fail here instead.
+        name = user.split(":", 1)[0]
+        if name.isdigit():
+            raise ValueError(
+                f"E2B needs a username for `user`, not a uid (got {user!r}); "
+                "use the account name that exists in the image."
+            )
 
     timeout = extract_e2b_timeout(config.extensions)
 
@@ -224,10 +232,9 @@ def _reject_unapplied_settings(
 ) -> None:
     """Fail on settings this provider documents but does not apply yet.
 
-    Both change identity or isolation, so silently continuing is worse than
-    an error: ``network_mode: none`` would run with E2B's default internet
-    access (issue #86) and ``x-e2b.user`` would run commands as root
-    (issue #85). Service-level ``user`` is rejected by the declaration.
+    ``network_mode: none`` changes isolation, so silently continuing is worse
+    than an error: the sandbox would run with E2B's default internet access
+    (issue #86).
     """
     problems: list[str] = []
     if service.network_mode == "none":
@@ -235,12 +242,6 @@ def _reject_unapplied_settings(
             "network_mode: none is not applied yet "
             "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/86); "
             "the sandbox would keep E2B's default internet access"
-        )
-    if extensions.get("user") is not None:
-        problems.append(
-            "x-e2b.user is not applied yet "
-            "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/85); "
-            "commands would run as root. Pass user= to exec() instead"
         )
     if problems:
         details = "\n".join(f"  - {problem}" for problem in problems)
