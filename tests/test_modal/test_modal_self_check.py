@@ -38,10 +38,6 @@ SANDBOX_CONFIGS = [
                 "with BufferError "
                 "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/81)"
             ),
-            "test_exec_large_command": XFail(
-                "Modal caps CMD at 64 KiB (ARG_MAX); raw InvalidError "
-                "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/65)"
-            ),
             "test_read_file_not_allowed": XFail("user is root"),
             "test_write_text_file_without_permissions": XFail("user is root"),
             "test_write_binary_file_without_permissions": XFail("user is root"),
