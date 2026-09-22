@@ -42,10 +42,16 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
     """Single-service sandbox using the E2B SDK directly."""
 
     def __init__(
-        self, sandbox: AsyncSandbox, connection_ports: list[int] | None = None
+        self,
+        sandbox: AsyncSandbox,
+        connection_ports: list[int] | None = None,
+        default_user: str | None = None,
     ) -> None:
         super().__init__()
         self.sandbox = sandbox
+        # The Compose service's `user` (or x-e2b.user): the identity exec()
+        # uses when the caller passes no user=. None means E2B's root.
+        self._default_user = default_user
         # Container ports declared via Compose `ports`, surfaced through
         # connection() as get_host URLs.
         self._connection_ports = connection_ports or []
@@ -93,7 +99,11 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         E2B's commands.run() doesn't expose stdin in foreground mode, so we
         write *input* to a temp file inside the sandbox and pipe it via shell
         redirection — same approach Daytona uses.
+
+        Without an explicit *user*, commands run as the Compose service's
+        ``user`` (or ``x-e2b.user``) when one was declared, else as root.
         """
+        user = user or self._default_user
         stdin_file: str | None = None
         if input is not None:
             data = input.encode("utf-8") if isinstance(input, str) else input
@@ -134,12 +144,14 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)
         finally:
-            # When running as a non-default user, shell redirection runs in
-            # that user's context and may not be able to delete the temp file.
+            # When running as a non-root user, the inline `rm -f` would run in
+            # that user's context and cannot delete the root-owned temp file
+            # in sticky /tmp, so remove it here as root (the SDK's own default
+            # user is the unprivileged `user`).
             if stdin_file is not None and user is not None:
                 try:
                     await self.sandbox.commands.run(
-                        f"rm -f {shlex.quote(stdin_file)}", timeout=10
+                        f"rm -f {shlex.quote(stdin_file)}", user="root", timeout=10
                     )
                 except SandboxException:
                     pass

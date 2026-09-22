@@ -416,3 +416,41 @@ async def test_connection_without_ports_is_empty(mock_sandbox: MagicMock) -> Non
     assert conn.type == "e2b"
     assert conn.ports is None
     assert conn.container == "sb-test-123"
+
+
+@pytest.mark.asyncio
+async def test_exec_runs_as_the_compose_default_user(mock_sandbox: MagicMock) -> None:
+    """The service's `user` (or x-e2b.user) is the default identity for exec()."""
+    env = E2BSingleServiceEnvironment(mock_sandbox, default_user="agent")
+
+    await env.exec(["whoami"])
+
+    assert mock_sandbox.commands.run.call_args[1]["user"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_exec_explicit_user_overrides_the_compose_default(
+    mock_sandbox: MagicMock,
+) -> None:
+    env = E2BSingleServiceEnvironment(mock_sandbox, default_user="agent")
+
+    await env.exec(["whoami"], user="other")
+
+    assert mock_sandbox.commands.run.call_args[1]["user"] == "other"
+
+
+@pytest.mark.asyncio
+async def test_exec_with_stdin_as_default_user_cleans_up_as_root(
+    mock_sandbox: MagicMock,
+) -> None:
+    """The stdin temp file is root-owned, so the deferred `rm -f` must run as root."""
+    env = E2BSingleServiceEnvironment(mock_sandbox, default_user="agent")
+
+    await env.exec(["cat"], input="hello")
+
+    calls = mock_sandbox.commands.run.call_args_list
+    assert len(calls) == 2
+    assert calls[0][1]["user"] == "agent"
+    assert "rm -f" not in calls[0][0][0]
+    assert calls[1][0][0].startswith("rm -f ")
+    assert calls[1][1]["user"] == "root"

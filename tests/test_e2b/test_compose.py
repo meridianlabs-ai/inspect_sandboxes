@@ -172,13 +172,13 @@ def test_environment_passthrough() -> None:
     assert result.envs == {"FOO": "bar", "BAZ": "qux"}
 
 
-def test_service_user_is_rejected_until_applied() -> None:
-    """Compose `user` is never applied on E2B (issue #85); dropping it silently ran as root."""
+def test_service_user_passthrough() -> None:
+    """Compose `user` becomes the default exec identity (see E2BSingleServiceEnvironment)."""
     config = ComposeConfig(
         services={"default": ComposeService(image="alpine", user="nobody")}
     )
-    with pytest.raises(ValueError, match=r"services\.default\.user"):
-        resolve_single_service_params(config, None)
+    result = resolve_single_service_params(config, None)
+    assert result.user == "nobody"
 
 
 def test_x_e2b_envs_extend_environment() -> None:
@@ -190,14 +190,14 @@ def test_x_e2b_envs_extend_environment() -> None:
     assert result.envs == {"FOO": "bar", "EXTRA": "value"}
 
 
-def test_x_e2b_user_is_rejected_until_applied() -> None:
-    """x-e2b.user is documented but never applied (issue #85)."""
+def test_x_e2b_user_overrides_service_user() -> None:
+    """The provider extension wins over the portable service field."""
     config = ComposeConfig(
-        services={"default": ComposeService(image="alpine")},
+        services={"default": ComposeService(image="alpine", user="nobody")},
         **{"x-e2b": {"user": "root"}},
     )
-    with pytest.raises(ValueError, match="x-e2b.user"):
-        resolve_single_service_params(config, None)
+    result = resolve_single_service_params(config, None)
+    assert result.user == "root"
 
 
 def test_x_e2b_metadata() -> None:
@@ -420,3 +420,13 @@ def test_non_gpu_device_reservation_does_not_warn_about_gpus(
     with caplog.at_level("WARNING"):
         resolve_single_service_params(config, None)
     assert not any("GPU" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("user", ["1000", "1000:1000", "0"])
+def test_numeric_user_is_rejected_with_a_clear_error(user: str) -> None:
+    """E2B authenticates commands by username; a uid would fail at the first exec()."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="alpine", user=user)}
+    )
+    with pytest.raises(ValueError, match="username"):
+        resolve_single_service_params(config, None)

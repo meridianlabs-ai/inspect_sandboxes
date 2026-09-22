@@ -130,7 +130,7 @@ The top-level `x-e2b` key on a compose file passes settings to the E2B sandbox.
 | `memory_mb` | int | `1024` (single-service) / `4096` (DinD) | Memory in MiB. Takes precedence over compose `deploy.resources` and service-level `mem_limit`. |
 | `timeout` | float (seconds) | `3600` | Sandbox lifetime. E2B caps this at 3600 (Hobby) or 86400 (Pro). |
 | `envs` | dict | `{}` | Extra env vars. Single-service: merged with service `environment` (x-e2b wins). DinD: passed to the Devbox VM. |
-| `user` | str | `None` | OS user for commands. Not applied yet ([#85](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/85)): setting it raises a `ValueError` until then; pass `user=` to `exec()` instead. |
+| `user` | str | `None` | Default OS user for `exec()`; overrides the service-level `user` field. Must be a username that exists in the image (E2B does not accept numeric uids). |
 | `metadata` | dict | `{}` | Custom metadata, merged with the run's tracking metadata (which takes precedence for `created_by`, `inspect_run_id`, `task`, `name`). |
 :::
 
@@ -170,7 +170,7 @@ A populated field missing from these tables (for example one added by a newer `i
 | `working_dir` | ignored | Commands start in the sandbox user's home; pass `cwd=` to `exec()`. |
 | `environment` | supported | Set on the sandbox at creation; `x-e2b.envs` adds to (and overrides) these. |
 | `env_file` | ignored | Files are not read; put the variables under `environment` or `x-e2b.envs`. |
-| `user` | rejected | Compose `user` is not applied on E2B yet (issue #85), so commands would run as root; pass `user=` to `exec()` instead. |
+| `user` | partial | Default OS user for `exec()`; `x-e2b.user` overrides, and file operations still run as root. Must be a username that exists in the image: E2B does not accept numeric uids, and a `user:group` value is used for its user part only. |
 | `healthcheck` | ignored | The sandbox is ready once creation returns. |
 | `ports` | partial | Container ports are surfaced as E2B host URLs through `connection()`. Host bindings are dropped; UDP entries and port ranges are dropped with a warning. |
 | `expose` | ignored | `expose` ports are host-private and have no E2B equivalent; use `ports` to get a host URL. |
