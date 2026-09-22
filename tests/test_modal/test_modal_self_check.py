@@ -33,11 +33,6 @@ SANDBOX_CONFIGS = [
         id="default",
         config=None,
         xfails={
-            "test_exec_input_large": XFail(
-                "exec() writes stdin in one shot; Modal's stdin buffer overflows "
-                "with BufferError "
-                "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/81)"
-            ),
             "test_read_file_not_allowed": XFail("user is root"),
             "test_write_text_file_without_permissions": XFail("user is root"),
             "test_write_binary_file_without_permissions": XFail("user is root"),
