@@ -346,6 +346,36 @@ def test_shared_severities_are_consistent_across_providers(
         assert support.service[name].level is Support.REJECTED, name
 
 
+def _load_docs_generator() -> Any:
+    """Import docs/compose_support.py (outside the package) by path."""
+    import importlib.util
+
+    path = REPO_ROOT / "docs" / "compose_support.py"
+    spec = importlib.util.spec_from_file_location("compose_support_docs", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(("support", "doc"), PROVIDERS)
+def test_docs_support_section_is_generated_from_declaration(
+    support: ComposeSupport, doc: str
+) -> None:
+    """The committed docs section must equal what the generator renders now.
+
+    Levels, notes and prose all come from the declarations via
+    docs/compose_support.py; a stale copy fails here with the command to run.
+    """
+    generator = _load_docs_generator()
+    key = doc.removesuffix(".qmd")
+    assert generator.PROVIDERS[key] is support
+    text = (REPO_ROOT / "docs" / doc).read_text()
+    assert generator.current_section(text) == generator.render_section(key), (
+        f"docs/{doc} is out of date; run `uv run python docs/compose_support.py`"
+    )
+
+
 def _docs_matrix(doc: str, heading: str) -> dict[str, tuple[str, str]]:
     """Parse ``| `field` | level | note |`` rows under a ### heading of the docs."""
     text = (REPO_ROOT / "docs" / doc).read_text()
@@ -356,17 +386,16 @@ def _docs_matrix(doc: str, heading: str) -> dict[str, tuple[str, str]]:
 
 
 @pytest.mark.parametrize(("support", "doc"), PROVIDERS)
-def test_docs_support_matrix_matches_declaration(
+def test_docs_support_matrix_lists_every_declared_field(
     support: ComposeSupport, doc: str
 ) -> None:
-    """The provider docs tables (levels and notes) are kept in lockstep."""
+    """The rendered tables are parseable and carry one row per declared field."""
     documented = _docs_matrix(doc, "Service fields")
     declared = {
         name.replace("x_default", "x-default"): (field.level.value, field.note)
         for name, field in support.service.items()
     }
     assert documented == declared
-
     documented_top = _docs_matrix(doc, "Top-level fields")
     declared_top = {
         name: (field.level.value, field.note)
