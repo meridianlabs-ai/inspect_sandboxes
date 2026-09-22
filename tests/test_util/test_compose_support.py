@@ -344,6 +344,9 @@ def test_shared_severities_are_consistent_across_providers(
     assert support.service["x_default"].level is Support.SUPPORTED
     for name in ("volumes", "cap_drop", "security_opt"):
         assert support.service[name].level is Support.REJECTED, name
+    # `none` blocks network access on every provider; other values allow it.
+    assert support.service["network_mode"].level is Support.PARTIAL
+    assert "`none`" in support.service["network_mode"].note
 
 
 def _load_docs_generator() -> Any:

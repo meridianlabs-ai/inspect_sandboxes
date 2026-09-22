@@ -317,3 +317,54 @@ async def test_destroy_dind_project_swallows_errors() -> None:
     ):
         # Should not raise.
         await destroy_dind_project(project)
+
+
+@pytest.mark.asyncio
+async def test_create_dind_project_keeps_vm_network_despite_service_network_mode() -> (
+    None
+):
+    """The DinD VM needs network for image pulls; `network_mode: none` is Compose's job there."""
+    config = ComposeConfig(
+        services={
+            "web": ComposeService(image="python:3.12", network_mode="none"),
+            "helper": ComposeService(image="alpine"),
+        }
+    )
+    sandbox = make_mock_sandbox()
+
+    with (
+        patch(
+            "inspect_sandboxes.e2b._dind_project._ensure_dind_template",
+            new_callable=AsyncMock,
+            return_value="inspect-dind-abc",
+        ),
+        patch(
+            "inspect_sandboxes.e2b._dind_project.AsyncSandbox.create",
+            new_callable=AsyncMock,
+            return_value=sandbox,
+        ) as create,
+        patch(
+            "inspect_sandboxes.e2b._dind_project._wait_for_docker_daemon",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "inspect_sandboxes.e2b._dind_project._upload_build_contexts",
+            new_callable=AsyncMock,
+            return_value="/inspect/compose/compose.yaml",
+        ),
+        patch(
+            "inspect_sandboxes.e2b._dind_project.compose_exec",
+            new_callable=AsyncMock,
+            return_value=(0, '{"Service":"web"}\n{"Service":"helper"}\n', ""),
+        ),
+        patch(
+            "inspect_sandboxes.e2b._dind_project._wait_for_services",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await create_dind_project(
+            config, "/local/compose.yaml", metadata={"created_by": "test"}
+        )
+
+    assert create.await_args is not None
+    assert create.await_args.kwargs.get("allow_internet_access", True) is True

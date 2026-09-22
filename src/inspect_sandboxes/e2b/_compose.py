@@ -30,7 +30,16 @@ DEFAULT_MEMORY_MB = 1024
 
 # Every x-e2b key this provider reads (see extract_x_e2b).
 _E2B_EXTENSION_KEYS = frozenset(
-    {"template", "timeout", "cpu_count", "memory_mb", "envs", "user", "metadata"}
+    {
+        "template",
+        "timeout",
+        "cpu_count",
+        "memory_mb",
+        "envs",
+        "user",
+        "metadata",
+        "allow_internet_access",
+    }
 )
 
 _NOT_EXECUTED = (
@@ -77,7 +86,7 @@ E2B_COMPOSE_SUPPORT = ComposeSupport(
         "devices": ignored("Host devices cannot be mapped into a E2B sandbox."),
         "networks": ignored("Single service; there is no network to join."),
         "network_mode": partial(
-            "Values other than `none` match E2B's default (network allowed). `none` is rejected: this provider does not block internet access yet (issue #86), so the service would run unisolated."
+            "`none` creates the sandbox with `allow_internet_access=False`, denying all outbound traffic; unlike Docker, the sandbox's public URLs (used by `connection()`) stay reachable. Every other value keeps E2B's default internet access. `x-e2b.allow_internet_access` overrides."
         ),
         "hostname": ignored("The hostname is assigned by E2B."),
         "runtime": ignored("The runtime is chosen by E2B; there are no GPUs."),
@@ -136,6 +145,9 @@ class E2BSingleServiceParams(NamedTuple):
     - ``image``: build a template from this base image.
 
     The orchestrator decides which build helper to call.
+
+    ``allow_internet_access`` is False when the service sets
+    ``network_mode: none`` (or ``x-e2b.allow_internet_access: false``).
     """
 
     template: str | None
@@ -147,6 +159,7 @@ class E2BSingleServiceParams(NamedTuple):
     user: str | None
     timeout: float | None
     metadata: dict[str, str]
+    allow_internet_access: bool
 
 
 def resolve_single_service_params(
@@ -162,13 +175,11 @@ def resolve_single_service_params(
 
     Raises:
         ValueError: If the config uses a Compose field E2B cannot honor (see
-            ``E2B_COMPOSE_SUPPORT``) or ``network_mode: none``, which this
-            provider does not apply yet (issue #86).
+            ``E2B_COMPOSE_SUPPORT``).
     """
     validate_compose_support(config, E2B_COMPOSE_SUPPORT)
     _, service = find_default_service(config)
     extensions = extract_x_e2b(config.extensions)
-    _reject_unapplied_settings(service, extensions)
     compose_dir = Path(compose_path).parent if compose_path else Path.cwd()
 
     template: str | None = extensions.get("template")
@@ -209,6 +220,14 @@ def resolve_single_service_params(
 
     timeout = extract_e2b_timeout(config.extensions)
 
+    # Docker's `network_mode: none` is E2B's allow_internet_access=False
+    # (deny all outbound traffic); every other mode keeps E2B's default.
+    # x-e2b.allow_internet_access overrides either way, like Modal's
+    # x-modal.block_network and Daytona's x-daytona.network_block_all.
+    allow_internet_access = service.network_mode != "none"
+    if extensions.get("allow_internet_access") is not None:
+        allow_internet_access = bool(extensions["allow_internet_access"])
+
     metadata_raw = extensions.get("metadata")
     metadata: dict[str, str] = {}
     if isinstance(metadata_raw, dict):
@@ -224,30 +243,8 @@ def resolve_single_service_params(
         user=user,
         timeout=timeout,
         metadata=metadata,
+        allow_internet_access=allow_internet_access,
     )
-
-
-def _reject_unapplied_settings(
-    service: ComposeService, extensions: dict[str, Any]
-) -> None:
-    """Fail on settings this provider documents but does not apply yet.
-
-    ``network_mode: none`` changes isolation, so silently continuing is worse
-    than an error: the sandbox would run with E2B's default internet access
-    (issue #86).
-    """
-    problems: list[str] = []
-    if service.network_mode == "none":
-        problems.append(
-            "network_mode: none is not applied yet "
-            "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/86); "
-            "the sandbox would keep E2B's default internet access"
-        )
-    if problems:
-        details = "\n".join(f"  - {problem}" for problem in problems)
-        raise ValueError(
-            f"E2B cannot honor the following Compose settings yet:\n{details}"
-        )
 
 
 def service_connection_ports(service: ComposeService) -> list[int]:
@@ -299,6 +296,8 @@ def extract_x_e2b(extensions: dict[str, Any] | None) -> dict[str, Any]:
       ``cpus`` / ``mem_limit``.
     - ``envs`` (dict): Extra env vars; merged with ``service.environment`` (these win).
     - ``user`` (str): OS user; overrides ``service.user``.
+    - ``allow_internet_access`` (bool): Overrides the network access derived
+      from ``network_mode`` (``none`` blocks outbound traffic).
     - ``metadata`` (dict): Custom metadata; merged with the run's tracking
       labels (run-level wins for keys it owns: ``created_by``, ``inspect_run_id``,
       ``task``, ``name``).

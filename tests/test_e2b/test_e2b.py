@@ -539,3 +539,62 @@ async def test_single_service_compose_user_is_the_default_exec_user(
     assert isinstance(env, E2BSingleServiceEnvironment)
     await env.exec(["whoami"])
     assert mock_sandbox.commands.run.call_args[1]["user"] == "agent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("network_mode_line", "expected"),
+    [("    network_mode: none\n", False), ("", True)],
+)
+async def test_single_service_compose_network_mode_sets_internet_access(
+    mock_sandbox: MagicMock,
+    tmp_path: Any,
+    network_mode_line: str,
+    expected: bool,
+) -> None:
+    """`network_mode: none` reaches AsyncSandbox.create as allow_internet_access=False."""
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        "services:\n  default:\n    image: python:3.12\n" + network_mode_line
+    )
+    mock_cls = make_mock_async_sandbox_cls(mock_sandbox)
+    with (
+        patch("inspect_sandboxes.e2b._e2b.AsyncSandbox", new=mock_cls),
+        patch("inspect_sandboxes.e2b._e2b.build_template_for_image") as build,
+    ):
+        build.return_value = "inspect-image-hash"
+        await E2BSandboxEnvironment.task_init("test_task", str(compose))
+        await E2BSandboxEnvironment.sample_init("test_task", str(compose), {})
+
+    create_kwargs = mock_cls.create.await_args.kwargs
+    assert create_kwargs["allow_internet_access"] is expected
+
+
+@pytest.mark.asyncio
+async def test_sample_init_without_compose_allows_internet_access(
+    mock_sandbox: MagicMock,
+) -> None:
+    mock_cls = make_mock_async_sandbox_cls(mock_sandbox)
+    with patch("inspect_sandboxes.e2b._e2b.AsyncSandbox", new=mock_cls):
+        await E2BSandboxEnvironment.task_init("test_task", None)
+        await E2BSandboxEnvironment.sample_init("test_task", None, {})
+
+    assert mock_cls.create.await_args.kwargs["allow_internet_access"] is True
+
+
+@pytest.mark.asyncio
+async def test_dockerfile_config_allows_internet_access(
+    mock_sandbox: MagicMock, tmp_path: Any
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12\n")
+    mock_cls = make_mock_async_sandbox_cls(mock_sandbox)
+    with (
+        patch("inspect_sandboxes.e2b._e2b.AsyncSandbox", new=mock_cls),
+        patch("inspect_sandboxes.e2b._e2b.build_template_for_dockerfile") as build,
+    ):
+        build.return_value = "inspect-dockerfile-hash"
+        await E2BSandboxEnvironment.task_init("test_task", str(dockerfile))
+        await E2BSandboxEnvironment.sample_init("test_task", str(dockerfile), {})
+
+    assert mock_cls.create.await_args.kwargs["allow_internet_access"] is True

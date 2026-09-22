@@ -132,6 +132,7 @@ The top-level `x-e2b` key on a compose file passes settings to the E2B sandbox.
 | `envs` | dict | `{}` | Extra env vars. Single-service: merged with service `environment` (x-e2b wins). DinD: passed to the Devbox VM. |
 | `user` | str | `None` | Default OS user for `exec()`; overrides the service-level `user` field. Must be a username that exists in the image (E2B does not accept numeric uids). |
 | `metadata` | dict | `{}` | Custom metadata, merged with the run's tracking metadata (which takes precedence for `created_by`, `inspect_run_id`, `task`, `name`). |
+| `allow_internet_access` | bool | derived from `network_mode` | Whether the sandbox may reach the internet. Overrides compose `network_mode` (`none` blocks outbound traffic). Single-service only. |
 :::
 
 Example:
@@ -177,7 +178,7 @@ A populated field missing from these tables (for example one added by a newer `i
 | `volumes` | rejected | Bind mounts and named volumes cannot be attached; ship files with `Sample.files` / `write_file()`. |
 | `devices` | ignored | Host devices cannot be mapped into a E2B sandbox. |
 | `networks` | ignored | Single service; there is no network to join. |
-| `network_mode` | partial | Values other than `none` match E2B's default (network allowed). `none` is rejected: this provider does not block internet access yet (issue #86), so the service would run unisolated. |
+| `network_mode` | partial | `none` creates the sandbox with `allow_internet_access=False`, denying all outbound traffic; unlike Docker, the sandbox's public URLs (used by `connection()`) stay reachable. Every other value keeps E2B's default internet access. `x-e2b.allow_internet_access` overrides. |
 | `hostname` | ignored | The hostname is assigned by E2B. |
 | `runtime` | ignored | The runtime is chosen by E2B; there are no GPUs. |
 | `init` | ignored | E2B has no init-process option. |
@@ -240,3 +241,4 @@ inspect sandbox cleanup e2b <sandbox-id>    # delete one
 
 - **Per-sample resource overrides**: CPU and memory are baked into the template at build time; changing them produces a new cached template. Each unique resource profile maps to its own template.
 - **GPU**: E2B does not expose GPU allocation, so compose `deploy.resources.reservations.devices` is ignored.
+- **Network**: Compose `network_mode: none` (or `x-e2b.allow_internet_access: false`) creates the sandbox with `allow_internet_access=False`, which denies all outbound traffic; the sandbox's public URLs stay reachable, unlike Docker. Finer allow/deny lists are not exposed. DinD VMs always have network access (needed for image pulls); service isolation there is Compose's own `network_mode`.

@@ -200,6 +200,9 @@ class E2BSandboxEnvironment(SandboxEnvironment):
             timeout=int(sandbox_timeout),
             metadata=run_metadata,
             envs=envs,
+            allow_internet_access=(
+                params.allow_internet_access if params is not None else True
+            ),
         )
         _running_sandboxes.get().append(sandbox.sandbox_id)
         trace_message(
