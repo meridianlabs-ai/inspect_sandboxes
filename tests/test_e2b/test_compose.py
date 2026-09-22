@@ -358,21 +358,24 @@ def test_unknown_x_e2b_key_warns(caplog: pytest.LogCaptureFixture) -> None:
     assert "x-e2b.cpu_count" not in messages
 
 
-def test_network_mode_none_is_rejected() -> None:
-    """E2B sandboxes always have internet access; silently ignoring `none` is unsafe."""
+def test_network_mode_none_blocks_internet_access() -> None:
     config = ComposeConfig(
         services={"default": ComposeService(image="x", network_mode="none")}
     )
-    with pytest.raises(ValueError, match="network_mode"):
-        resolve_single_service_params(config, None)
+    params = resolve_single_service_params(config, None)
+    assert params.allow_internet_access is False
 
 
-def test_network_mode_bridge_is_accepted(caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize("network_mode", [None, "bridge", "host"])
+def test_other_network_modes_allow_internet_access(
+    network_mode: str | None, caplog: pytest.LogCaptureFixture
+) -> None:
     config = ComposeConfig(
-        services={"default": ComposeService(image="x", network_mode="bridge")}
+        services={"default": ComposeService(image="x", network_mode=network_mode)}
     )
     with caplog.at_level("WARNING"):
-        resolve_single_service_params(config, None)
+        params = resolve_single_service_params(config, None)
+    assert params.allow_internet_access is True
     assert not any("network_mode" in r.message for r in caplog.records)
 
 
@@ -430,3 +433,18 @@ def test_numeric_user_is_rejected_with_a_clear_error(user: str) -> None:
     )
     with pytest.raises(ValueError, match="username"):
         resolve_single_service_params(config, None)
+
+
+@pytest.mark.parametrize(
+    ("network_mode", "override", "expected"),
+    [("none", True, True), (None, False, False), ("bridge", False, False)],
+)
+def test_x_e2b_allow_internet_access_overrides_network_mode(
+    network_mode: str | None, override: bool, expected: bool
+) -> None:
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", network_mode=network_mode)},
+        **{"x-e2b": {"allow_internet_access": override}},
+    )
+    params = resolve_single_service_params(config, None)
+    assert params.allow_internet_access is expected
