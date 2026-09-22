@@ -494,14 +494,13 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         # parameter of its own.
         exec_cmd = _build_exec_cmd(cmd, user)
 
-        # Modal's own check counts characters; counting UTF-8 bytes diverts a
-        # superset of what it rejects and also keeps every argv element under
-        # the kernel's per-element MAX_ARG_STRLEN, which is a byte limit. The
-        # script `exec`s the command so the process tree matches the inline
-        # path (the shell is replaced rather than left as a parent); unlike the
-        # inline path this needs /bin/sh in the image, as the `user=` wrapper
-        # already does. The upload happens before the timeout budget starts,
-        # like the stdin upload on the other providers.
+        # Commands over Modal's cap are written to a script in the sandbox and
+        # run via /bin/sh instead. Size is measured in UTF-8 bytes: that covers
+        # everything Modal's character count rejects and also stays under the
+        # kernel's per-argument byte limit. The script uses `exec`, so the
+        # shell is replaced by the command and the process tree looks the same
+        # as the inline path. Needs /bin/sh in the image (the `user=` wrapper
+        # already does). The upload happens before the exec timeout starts.
         script_file: str | None = None
         if sum(len(arg.encode("utf-8")) for arg in exec_cmd) > _EXEC_ARG_MAX_BYTES:
             script_file = f"/tmp/.inspect-cmd-{uuid.uuid4().hex}"
