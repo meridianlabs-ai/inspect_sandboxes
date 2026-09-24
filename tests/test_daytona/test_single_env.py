@@ -5,6 +5,8 @@ import base64
 import os
 import re
 import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -97,13 +99,16 @@ def make_mock_sandbox(sandbox_id: str = "sb-test-123") -> MagicMock:
 SUDO_RE = re.compile(r"^sudo (?:--preserve-env=\S+ )?-u \S+ (bash -c )")
 
 
-def make_local_shell_sandbox(base_env: dict[str, str] | None = None) -> MagicMock:
+def make_local_shell_sandbox(
+    base_env: dict[str, str] | None = None, real_sudo: bool = False
+) -> MagicMock:
     """A fake AsyncSandbox whose ``process.exec`` runs commands in the local ``sh``.
 
     Behaves like the Daytona API: one merged output stream (stderr folded
     into stdout) with the trailing newline stripped (emulated here as a full
     trim, the harsher case), plus the exit code. Passwordless ``sudo -u`` is
-    emulated by running the wrapped ``bash -c`` as the current user, and
+    emulated by running the wrapped ``bash -c`` as the current user, unless
+    *real_sudo*, when the local ``sudo`` runs it (with its ``env_reset``).
     ``fs.upload_file`` writes to the local path so stdin temp files work.
     *base_env* is the image's environment (its PATH in particular).
     """
@@ -117,7 +122,7 @@ def make_local_shell_sandbox(base_env: dict[str, str] | None = None) -> MagicMoc
         timeout: int | None = None,
     ) -> MagicMock:
         proc = await asyncio.create_subprocess_shell(
-            SUDO_RE.sub(r"\1", command),
+            command if real_sudo else SUDO_RE.sub(r"\1", command),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd,
@@ -233,6 +238,48 @@ async def test_exec_with_user_and_env_preserves_the_env_through_sudo(
     # The values still travel through the API, never through the command line.
     assert mock_sandbox.process.exec.call_args[1]["env"] == {"A": "1 2", "B": ""}
     assert "1 2" not in command
+
+
+def _passwordless_sudo() -> bool:
+    if shutil.which("sudo") is None:
+        return False
+    try:
+        return (
+            subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+        )
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _passwordless_sudo(), reason="needs passwordless sudo")
+@pytest.mark.asyncio
+async def test_exec_with_user_and_env_through_real_sudo() -> None:
+    """The env values reach the command through the real ``sudo -u``.
+
+    sudo's ``env_reset`` drops everything the API put in its environment
+    unless ``--preserve-env`` names it; the SUDO_RE emulation cannot show
+    that, the local sudo does (passwordless, as on CI runners and Daytona).
+    """
+    sandbox = make_local_shell_sandbox(real_sudo=True)
+    env = DaytonaSingleServiceEnvironment(sandbox)
+    values = {"INSPECT_K1": "v 1 $(id)", "INSPECT_K2": "", "PATH": "/usr/bin:/bin"}
+
+    result = await env.exec(
+        [
+            "sh",
+            "-c",
+            'id -u; printf "%s|%s|%s\\n" "$INSPECT_K1" "${INSPECT_K2-unset}" "$PATH"',
+        ],
+        env=values,
+        user="root",
+    )
+
+    assert result.success, f"{result.stdout=} {result.stderr=}"
+    assert result.stdout == "0\nv 1 $(id)||/usr/bin:/bin\n"
+    assert result.stderr == ""
+    command = exec_commands(sandbox)[0]
+    assert "v 1" not in command
+    assert_no_capture_files(command)
 
 
 @pytest.mark.asyncio

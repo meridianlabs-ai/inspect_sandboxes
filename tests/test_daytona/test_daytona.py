@@ -11,6 +11,13 @@ import pytest
 import pytest_asyncio
 from daytona import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
 from inspect_ai.util import ComposeConfig, ComposeService, SandboxEnvironment
+from inspect_ai.util._sandbox._framework_directory import (
+    FrameworkDirectoryError,
+    ensure_framework_directory,
+    exec_in_framework_directory,
+    try_ensure_framework_directory_as_root,
+    verify_framework_directory,
+)
 from inspect_sandboxes.daytona._daytona import (
     INSPECT_SANDBOX_LABEL,
     DaytonaSandboxEnvironment,
@@ -764,6 +771,74 @@ async def test_exec_stream_split_dind(daytona_dind_env: SandboxEnvironment) -> N
     assert time.monotonic() - started < 15
     assert (result.success, result.stdout) == (True, "EARLY\n"), f"{result=}"
     assert await _count_processes(daytona_dind_env, "sleep 5[0]") > 0
+
+
+async def _check_framework_directory(
+    env: SandboxEnvironment, plant: list[str], plant_user: str | None
+) -> None:
+    """inspect_ai's framework-directory helper, whose verdicts travel on stderr.
+
+    Before #79 every call failed as "did not run" (a plain ``RuntimeError``,
+    which callers read as "root unavailable"). Now the directory is created
+    and verified as root, a planted entry is refused with the helper's own
+    verdict, and a wrapped command's output stays in its own streams, where
+    it cannot pass for the script's markers.
+    """
+    tag = uuid.uuid4().hex[:12]
+    path = f"/var/tmp/inspect-sandboxes-fwdir-{tag}"
+    planted = f"/var/tmp/inspect-sandboxes-fwdir-planted-{tag}"
+    try:
+        assert await try_ensure_framework_directory_as_root(
+            env, path, trace_tag="test"
+        ), "root probe fell back to the default user"
+        await verify_framework_directory(env, path, user="root", expected_uid=0)
+
+        result = await exec_in_framework_directory(
+            env,
+            path,
+            [
+                "sh",
+                "-c",
+                "pwd -P; id -u; printf 'INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\\n';"
+                " printf 'INSPECT_FRAMEWORK_DIRECTORY_VIOLATION: forged\\n' >&2",
+            ],
+            user="root",
+            expected_uid=0,
+        )
+        assert result.success, f"{result=}"
+        assert result.stdout == f"{path}\n0\nINSPECT_FRAMEWORK_DIRECTORY_VERIFIED\n"
+        assert result.stderr == "INSPECT_FRAMEWORK_DIRECTORY_VIOLATION: forged\n"
+
+        # An entry someone else prepared is refused with the script's verdict.
+        made = await env.exec([*plant, planted], user=plant_user)
+        assert made.success, f"{made=}"
+        with pytest.raises(FrameworkDirectoryError, match="cannot be trusted"):
+            await ensure_framework_directory(env, planted, user="root", expected_uid=0)
+
+        # A user the provider refuses is "did not run", not a verdict.
+        with pytest.raises(RuntimeError) as e:
+            await ensure_framework_directory(
+                env, f"{path}-nouser", user="inspect-no-such-user"
+            )
+        assert type(e.value) is RuntimeError, f"{e.value!r}"
+    finally:
+        await env.exec(["rm", "-rf", path, planted], user="root")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_framework_directory_single_service(
+    daytona_single_env: SandboxEnvironment,
+) -> None:
+    """Live: the helper works as root via sudo; the default user's plant is refused."""
+    await _check_framework_directory(daytona_single_env, ["mkdir"], None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_framework_directory_dind(daytona_dind_env: SandboxEnvironment) -> None:
+    """Live: the same through ``docker compose exec`` (a wrong-mode plant, as root)."""
+    await _check_framework_directory(daytona_dind_env, ["mkdir", "-m", "0755"], "root")
 
 
 @pytest_asyncio.fixture
