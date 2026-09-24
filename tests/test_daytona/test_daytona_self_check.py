@@ -37,15 +37,6 @@ SANDBOX_CONFIGS = [
             "test_exec_permission_error": XFail(
                 "exit code 126, not translated to PermissionError"
             ),
-            "test_write_text_file_without_permissions": XFail(
-                "Daytona returns 400, not 403 for write permission errors"
-            ),
-            "test_write_binary_file_without_permissions": XFail(
-                "Daytona returns 400, not 403 for write permission errors"
-            ),
-            "test_exec_as_user": XFail(
-                "adduser/useradd may not be available in default snapshot"
-            ),
         },
     ),
     SandboxConfig(
@@ -64,7 +55,6 @@ SANDBOX_CONFIGS = [
                 "vm_exec passes the whole VM command to sh -c as one argument,"
                 " capped at 128 KiB (MAX_ARG_STRLEN)"
             ),
-            "test_exec_as_user": XFail("adduser/useradd may not be available"),
         },
     ),
 ]
