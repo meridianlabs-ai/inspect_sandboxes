@@ -24,15 +24,17 @@ from inspect_ai.util._sandbox.environment import (
 )
 from typing_extensions import override
 
-from ._retry import exec_retry, run_with_timeout_retry, standard_retry
-from ._sandbox_utils import (
+from ._exec_capture import (
+    ExecCapture,
     build_capture_command,
     build_remove_command,
-    build_stdin_command,
     captured_exec_result,
+)
+from ._retry import exec_retry, run_with_timeout_retry, standard_retry
+from ._sandbox_utils import (
+    build_stdin_command,
     decode_file_content,
     delete_sandbox,
-    new_capture_tag,
     verify_file_size,
 )
 
@@ -102,10 +104,16 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
 
         Streams: The Daytona API returns a single merged output field with its
             trailing newline stripped, so the command runs with stdout and
-            stderr redirected to two private temp files under ``/tmp`` (created
+            stderr piped into two private temp files under ``/tmp`` (created
             as the requested ``user``) and the same shell prints both framed by
             per-call sentinels; see ``build_capture_command``. One API round
-            trip; requires a writable ``/tmp``.
+            trip; requires a writable ``/tmp`` and ``base64``. The exec waits
+            for every writer of the command's streams, so a daemon started
+            without redirecting its output blocks it until the timeout.
+
+        User: ``sudo -u <user>``, with ``--preserve-env`` naming the ``env``
+            keys so they survive sudo's ``env_reset``; a sudoers rule that
+            does not allow setting the environment refuses the exec.
 
         Timeout: The Daytona server enforces timeouts server-side, killing
             the process tree. No in-container ``timeout`` wrapping needed
@@ -125,16 +133,18 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         # Capture stdout and stderr separately. The wrapper goes inside the
         # user switch below so the temp files are created, read and removed
         # with the requested user's authority, not the default user's.
-        tag = new_capture_tag()
-        command = build_capture_command(command, tag)
+        capture = ExecCapture.new()
+        command = build_capture_command(command, capture)
 
         # Daytona's process.exec() has no user param — use sudo -u to switch.
+        # sudo resets the environment, so name the keys env passes through the
+        # API for it to keep.
         if user is not None:
-            if user.isdigit():
-                user_arg = shlex.quote(f"#{user}")
-            else:
-                user_arg = shlex.quote(user)
-            command = f"sudo -u {user_arg} bash -c {shlex.quote(command)}"
+            sudo = ["sudo"]
+            if env:
+                sudo.append(f"--preserve-env={','.join(env)}")
+            sudo.extend(["-u", f"#{user}" if user.isdigit() else user])
+            command = f"{shlex.join(sudo)} bash -c {shlex.quote(command)}"
 
         @exec_retry
         async def _run(t: int | None) -> ExecResult[str]:
@@ -144,7 +154,7 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
                 env=env,
                 timeout=t,
             )
-            return captured_exec_result(response.exit_code, response.result, tag)
+            return captured_exec_result(response.exit_code, response.result, capture)
 
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)

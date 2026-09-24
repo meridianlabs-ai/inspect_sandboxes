@@ -14,13 +14,16 @@ import pytest
 from daytona import DaytonaError
 from inspect_ai.util import ComposeConfig, ComposeService
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
-from inspect_sandboxes.daytona._dind_env import DaytonaDinDServiceEnvironment
+from inspect_sandboxes.daytona._dind_env import (
+    DaytonaDinDServiceEnvironment,
+    _timed_out,
+)
 from inspect_sandboxes.daytona._dind_project import DaytonaDinDProject, compose_command
-from inspect_sandboxes.daytona._sandbox_utils import (
+from inspect_sandboxes.daytona._exec_capture import (
+    ExecCapture,
     OutputCollectionError,
     build_capture_command,
     build_remove_command,
-    capture_files,
 )
 
 TAG_RE = re.compile(r"inspect-exec-([0-9a-f]{32})")
@@ -280,7 +283,136 @@ async def test_exec_captures_both_streams_on_the_vm() -> None:
     assert mock_vm_exec.call_args[0][0] is project.sandbox
     command = mock_vm_exec.call_args[0][1]
     inner = f"{EXPECTED_COMPOSE} sh -c 'echo out; echo err >&2'"
-    assert command == build_capture_command(inner, tag_of(command))
+    assert command == build_capture_command(
+        inner, ExecCapture.from_tag(tag_of(command))
+    )
+    # No timeout: no in-container timeout and no server deadline.
+    assert mock_vm_exec.call_args[1]["timeout"] is None
+
+
+@pytest.mark.asyncio
+async def test_exec_timeout_runs_under_in_container_timeout() -> None:
+    """The container command runs under /usr/bin/timeout; the server gets 10 s slack."""
+    env = make_env()
+
+    with (
+        patch(
+            "inspect_sandboxes.daytona._dind_env.compose_command",
+            wraps=compose_command,
+        ) as mock_cmd,
+        patch(
+            "inspect_sandboxes.daytona._dind_env.vm_exec",
+            scripted_vm_exec((0, "out", "")),
+        ) as mock_vm_exec,
+    ):
+        result = await env.exec(["sleep", "1"], timeout=7)
+
+    assert result.stdout == "out"
+    cmd = mock_cmd.call_args[0][1]
+    assert cmd[-6:] == ["/usr/bin/timeout", "-k", "5s", "7s", "sleep", "1"]
+    assert mock_vm_exec.call_args[1]["timeout"] == 17
+
+
+@pytest.mark.asyncio
+async def test_exec_timeout_with_stdin_keeps_the_cleanup_outside_the_timeout() -> None:
+    env = make_env()
+
+    with (
+        patch("inspect_sandboxes.daytona._dind_env.sdk_upload", new_callable=AsyncMock),
+        patch(
+            "inspect_sandboxes.daytona._dind_env.compose_exec",
+            new_callable=AsyncMock,
+            return_value=(0, ""),
+        ) as mock_cp,
+        patch(
+            "inspect_sandboxes.daytona._dind_env.compose_command",
+            wraps=compose_command,
+        ) as mock_cmd,
+        patch(
+            "inspect_sandboxes.daytona._dind_env.vm_exec",
+            scripted_vm_exec((0, "", ""), (0, "", "")),
+        ),
+    ):
+        await env.exec(["cat"], input="hi", timeout=3)
+
+    container_file = mock_cp.call_args[0][1][2].split(":", 1)[1]
+    cmd = mock_cmd.call_args[0][1]
+    assert cmd[-3:-1] == ["sh", "-c"]
+    assert cmd[-1].startswith(
+        f"/usr/bin/timeout -k 5s 3s cat < {container_file}; _ec=$?; "
+    )
+
+
+@pytest.mark.parametrize("returncode", [124, 137, 143])
+@pytest.mark.asyncio
+async def test_exec_in_container_timeout_raises(returncode: int) -> None:
+    env = make_env()
+
+    with (
+        patch(
+            "inspect_sandboxes.daytona._dind_env.vm_exec",
+            scripted_vm_exec((returncode, "early\n", "")),
+        ),
+        patch("inspect_sandboxes.daytona._dind_env._timed_out", return_value=True),
+    ):
+        with pytest.raises(TimeoutError, match="timed out after 2 seconds") as e:
+            await env.exec(["sh", "-c", "echo early; sleep 60"], timeout=2)
+
+    assert getattr(e.value, "truncated_output", None) == "early\n"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "elapsed", "expected"),
+    [
+        (124, 0.1, True),  # GNU timeout: unambiguous
+        (137, 2.5, True),  # SIGKILL after -k, once the deadline passed
+        (143, 2.0, True),  # BusyBox timeout (SIGTERM)
+        (137, 0.5, False),  # too fast: an OOM kill, not the timeout
+        (143, 0.5, False),  # too fast: some other SIGTERM
+        (1, 5.0, False),
+        (0, 5.0, False),
+    ],
+)
+def test_timed_out_classifies_exit_statuses(
+    returncode: int, elapsed: float, expected: bool
+) -> None:
+    assert _timed_out(returncode, elapsed, 2) is expected
+
+
+@pytest.mark.asyncio
+async def test_exec_fast_signal_exit_is_returned() -> None:
+    """A 137 well before the deadline (an OOM kill) is the command's result."""
+    env = make_env()
+
+    with patch(
+        "inspect_sandboxes.daytona._dind_env.vm_exec",
+        scripted_vm_exec((137, "", "Killed\n")),
+    ):
+        result = await env.exec(["big"], timeout=60)
+
+    assert (result.returncode, result.stderr) == (137, "Killed\n")
+
+
+@pytest.mark.asyncio
+async def test_exec_stdin_cleanup_failure_keeps_the_result() -> None:
+    """A failing VM-side rm of the stdin file does not replace the exec's result."""
+    env = make_env()
+
+    with (
+        patch("inspect_sandboxes.daytona._dind_env.sdk_upload", new_callable=AsyncMock),
+        patch(
+            "inspect_sandboxes.daytona._dind_env.compose_exec",
+            new_callable=AsyncMock,
+            return_value=(0, ""),
+        ),
+        patch(
+            "inspect_sandboxes.daytona._dind_env.vm_exec",
+            scripted_vm_exec((0, "ok", ""), DaytonaError("VM gone")),
+        ),
+    ):
+        result = await env.exec(["cat"], input="hi")
+
+    assert result.stdout == "ok"
 
 
 def make_local_shell_sandbox() -> MagicMock:
@@ -319,8 +451,25 @@ async def test_exec_streams_round_trip_through_the_vm_shell() -> None:
     assert result.stderr == "err\n"
     assert result.returncode == 5
     command = sandbox.process.exec.call_args[0][0]
-    for file in capture_files(tag_of(command)):
+    for file in ExecCapture.from_tag(tag_of(command)).files:
         assert not Path(file).exists(), f"{file} left behind"
+
+
+@pytest.mark.skipif(
+    not Path("/usr/bin/timeout").exists(), reason="needs /usr/bin/timeout"
+)
+@pytest.mark.asyncio
+async def test_exec_timeout_kills_the_command_through_the_vm_shell() -> None:
+    """The in-container timeout stops the command and its children, and raises."""
+    sandbox = make_local_shell_sandbox()
+    env = DaytonaDinDServiceEnvironment(make_mock_project(sandbox), "web", "/app")
+
+    with pytest.raises(TimeoutError) as e:
+        await env.exec(
+            ["sh", "-c", "echo early; (sleep 30; echo late) & sleep 30"], timeout=1
+        )
+
+    assert getattr(e.value, "truncated_output", None) == "early\n"
 
 
 @pytest.mark.asyncio

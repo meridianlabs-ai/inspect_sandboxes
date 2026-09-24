@@ -1,5 +1,6 @@
 """Tests for DaytonaSandboxEnvironment lifecycle orchestrator."""
 
+import shlex
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -692,40 +693,31 @@ async def _check_stream_split(env: SandboxEnvironment) -> None:
 
 
 async def _check_timeout(env: SandboxEnvironment) -> None:
-    """The server-side timeout kills the process tree, background children included.
+    """A timeout raises close to the deadline and kills the command's processes.
 
-    The bounds allow for the retries: the server reports an exec timeout as a
-    plain ``DaytonaError`` mentioning "timeout", which ``exec_retry`` retries
-    three times with backoff before ``run_with_timeout_retry`` sees it (and,
-    with ``timeout_retry``, tries twice more). That is pre-existing behaviour.
+    Single-service: the server kills the process tree and reports it as
+    ``DaytonaProcessExecutionTimeoutError`` (daytona >= 0.201), which
+    ``exec_retry`` leaves to ``run_with_timeout_retry``; with ``timeout_retry``
+    that tries twice more. DinD: the in-container ``timeout`` fires first and
+    its exit status is raised without a retry.
     """
     started = time.monotonic()
     with pytest.raises(TimeoutError):
-        await env.exec(["sh", "-c", "echo partial; sleep 60"], timeout=2)
-    assert time.monotonic() - started < 60
-
-    # A child that outlives the command does not extend the deadline (round 4 B4).
-    started = time.monotonic()
-    with pytest.raises(TimeoutError):
-        await env.exec(
-            ["sh", "-c", "echo EARLY; (sleep 5; echo LATE) &"],
-            timeout=1,
-            timeout_retry=False,
-        )
-    assert time.monotonic() - started < 15
+        await env.exec(["sh", "-c", "echo partial; (sleep 61) & sleep 60"], timeout=2)
+    assert time.monotonic() - started < 20
 
     result = await env.exec(["echo", "alive"])
     assert result.stdout == "alive\n", f"{result.stdout=}"
 
 
-async def _count_timed_out_survivors(env: SandboxEnvironment) -> int:
-    """Processes of ``_check_timeout``'s commands still alive (the pattern does not match itself)."""
+async def _count_processes(env: SandboxEnvironment, pattern: str) -> int:
+    """Processes whose command line matches *pattern* (a regex that must not match itself)."""
     result = await env.exec(
         [
             "sh",
             "-c",
             "for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done"
-            " | grep -c 'sleep [65]0' || true",
+            f" | grep -c {shlex.quote(pattern)} || true",
         ]
     )
     return int(result.stdout.strip())
@@ -745,8 +737,20 @@ async def test_exec_stream_split_single_service(
     """
     await _check_stream_split(daytona_single_env)
     await _check_timeout(daytona_single_env)
+
+    # The API waits for every writer of the streams, so a child that outlives
+    # the command holds the exec open until the deadline (round 4 B4).
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await daytona_single_env.exec(
+            ["sh", "-c", "echo EARLY; (sleep 50; echo LATE) &"],
+            timeout=1,
+            timeout_retry=False,
+        )
+    assert time.monotonic() - started < 10
+
     # The server kills the whole process tree at the deadline.
-    assert await _count_timed_out_survivors(daytona_single_env) == 0
+    assert await _count_processes(daytona_single_env, "sleep [65][01]") == 0
 
     sentinel = f"inspect-79-{uuid.uuid4().hex}"
     result = await daytona_single_env.exec(
@@ -763,20 +767,48 @@ async def test_exec_stream_split_single_service(
     assert leak.stdout.strip() != "0", "the default user should not be root"
     assert leak.stdout.splitlines()[1:] == [], f"root output readable: {leak.stdout=}"
 
+    # env survives the user switch (sudo's env_reset would drop it).
+    result = await daytona_single_env.exec(
+        ["sh", "-c", 'echo "$K1|$K2"; id -u'],
+        env={"K1": "v 1", "K2": "v2"},
+        user="root",
+    )
+    assert result.stdout == "v 1|v2\n0\n", f"{result.stdout=} {result.stderr=}"
+
+    # A sudo warning outside the frame leaves a successful exec intact. Last:
+    # it leaves every later sudo warning about the hostname.
+    result = await daytona_single_env.exec(
+        ["hostname", f"zz-unresolvable-{uuid.uuid4().hex[:8]}"], user="root"
+    )
+    assert result.success, f"{result.stderr=}"
+    result = await daytona_single_env.exec(["id", "-u"], user="root")
+    assert result.success, f"{result.stdout=} {result.stderr=}"
+    assert result.stdout == "0\n", f"{result.stdout=}"
+    assert "unable to resolve host" in result.stderr, f"{result.stderr=}"
+
 
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_exec_stream_split_dind(daytona_dind_env: SandboxEnvironment) -> None:
     """Live: DinD exec() splits the streams through the VM-side wrapper.
 
-    The timeout still raises, but the processes inside the service container
-    survive it: the server kills the VM-side ``docker compose exec`` and
-    ``docker exec`` detaches on signal (pre-existing; the Docker sandbox wraps
-    the container command in ``/usr/bin/timeout`` for this reason).
+    ``docker exec`` detaches on signal, so the in-container ``timeout`` is what
+    stops a timed-out command and its children; none survive. A child that
+    outlives a command which exits in time is ``docker exec``'s business, as
+    in Inspect's Docker sandbox: the exec returns about 2 s after the command
+    exits, without the child's later output, and the child keeps running.
     """
     await _check_stream_split(daytona_dind_env)
     await _check_timeout(daytona_dind_env)
-    assert await _count_timed_out_survivors(daytona_dind_env) > 0, "limitation lifted?"
+    assert await _count_processes(daytona_dind_env, "sleep 6[01]") == 0
+
+    started = time.monotonic()
+    result = await daytona_dind_env.exec(
+        ["sh", "-c", "echo EARLY; (sleep 50; echo LATE) &"], timeout=5
+    )
+    assert time.monotonic() - started < 15
+    assert (result.success, result.stdout) == (True, "EARLY\n"), f"{result=}"
+    assert await _count_processes(daytona_dind_env, "sleep 5[0]") > 0
 
 
 @pytest_asyncio.fixture

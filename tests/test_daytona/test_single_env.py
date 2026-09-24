@@ -18,11 +18,11 @@ from inspect_ai.util import (
     SandboxEnvironmentLimits,
 )
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
-from inspect_sandboxes.daytona._sandbox_utils import (
+from inspect_sandboxes.daytona._exec_capture import (
+    ExecCapture,
     OutputCollectionError,
     build_capture_command,
     build_remove_command,
-    capture_files,
 )
 from inspect_sandboxes.daytona._single_env import DaytonaSingleServiceEnvironment
 
@@ -34,6 +34,10 @@ def tag_of(command: str) -> str:
     match = TAG_RE.search(command)
     assert match is not None, f"no capture tag in {command!r}"
     return match.group(1)
+
+
+def capture_of(command: str) -> ExecCapture:
+    return ExecCapture.from_tag(tag_of(command))
 
 
 def framed(command: str, stdout: str = "", stderr: str = "") -> str:
@@ -90,7 +94,7 @@ def make_mock_sandbox(sandbox_id: str = "sb-test-123") -> MagicMock:
     return sandbox
 
 
-SUDO_RE = re.compile(r"^sudo -u \S+ (bash -c )")
+SUDO_RE = re.compile(r"^sudo (?:--preserve-env=\S+ )?-u \S+ (bash -c )")
 
 
 def make_local_shell_sandbox(base_env: dict[str, str] | None = None) -> MagicMock:
@@ -137,7 +141,7 @@ def exec_commands(sandbox: MagicMock) -> list[str]:
 
 
 def assert_no_capture_files(command: str) -> None:
-    for file in capture_files(tag_of(command)):
+    for file in capture_of(command).files:
         assert not Path(file).exists(), f"{file} left behind"
 
 
@@ -185,7 +189,7 @@ async def test_exec_joins_args_with_shlex(mock_sandbox: MagicMock) -> None:
 
     command_arg = exec_commands(mock_sandbox)[0]
     assert command_arg == build_capture_command(
-        "echo 'hello world'", tag_of(command_arg)
+        "echo 'hello world'", capture_of(command_arg)
     )
 
 
@@ -209,8 +213,48 @@ async def test_exec_with_user_wraps_with_su(mock_sandbox: MagicMock) -> None:
     # The capture wrapper sits inside the user switch, so the temp files are
     # created, read and removed with the requested user's authority.
     command = exec_commands(mock_sandbox)[0]
-    wrapped = build_capture_command("whoami", tag_of(command))
+    wrapped = build_capture_command("whoami", capture_of(command))
     assert command == f"sudo -u testuser bash -c {shlex.quote(wrapped)}"
+
+
+@pytest.mark.asyncio
+async def test_exec_with_user_and_env_preserves_the_env_through_sudo(
+    mock_sandbox: MagicMock,
+) -> None:
+    """The env keys survive sudo's env_reset: --preserve-env names them."""
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+    await env.exec(["sh", "-c", "echo $A"], env={"A": "1 2", "B": ""}, user="testuser")
+
+    command = exec_commands(mock_sandbox)[0]
+    wrapped = build_capture_command("sh -c 'echo $A'", capture_of(command))
+    assert command == (
+        f"sudo --preserve-env=A,B -u testuser bash -c {shlex.quote(wrapped)}"
+    )
+    # The values still travel through the API, never through the command line.
+    assert mock_sandbox.process.exec.call_args[1]["env"] == {"A": "1 2", "B": ""}
+    assert "1 2" not in command
+
+
+@pytest.mark.asyncio
+async def test_exec_sudo_warning_keeps_a_successful_exec(
+    mock_sandbox: MagicMock,
+) -> None:
+    """A sudo diagnostic before the frame goes on stderr; stdout and success stay."""
+
+    async def run(command: str, **kwargs: Any) -> MagicMock:
+        return exec_response(
+            0,
+            "sudo: unable to resolve host zz-unresolvable: Name or service not known\n"
+            + framed(command, "root\n", ""),
+        )
+
+    mock_sandbox.process.exec = AsyncMock(side_effect=run)
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+    result = await env.exec(["whoami"], user="root")
+
+    assert result.success
+    assert result.stdout == "root\n"
+    assert result.stderr.startswith("sudo: unable to resolve host zz-unresolvable")
 
 
 @pytest.mark.asyncio
@@ -222,7 +266,7 @@ async def test_exec_with_numeric_user_resolves_via_getent(
     await env.exec(["whoami"], user="1000")
 
     command = exec_commands(mock_sandbox)[0]
-    wrapped = build_capture_command("whoami", tag_of(command))
+    wrapped = build_capture_command("whoami", capture_of(command))
     assert command == f"sudo -u '#1000' bash -c {shlex.quote(wrapped)}"
 
 
@@ -493,7 +537,7 @@ async def test_exec_without_stdin_no_upload(mock_sandbox: MagicMock) -> None:
 
     mock_sandbox.fs.upload_file.assert_not_called()
     command = exec_commands(mock_sandbox)[0]
-    assert command == build_capture_command("echo hi", tag_of(command))
+    assert command == build_capture_command("echo hi", capture_of(command))
 
 
 @pytest.mark.asyncio
