@@ -8,6 +8,9 @@ permission or leaves the job token in .git/config; the coverage writes run
 where nothing from the checkout does; the required check names stay as the
 `main` ruleset lists them; and py-build refuses a uv.lock that installs from
 anywhere but PyPI or this repository.
+
+The Claude stubs opt in to tier 2 on every job that calls a reusable workflow
+declaring `allow_build_config`; the reviewer's takes no such input.
 """
 
 from __future__ import annotations
@@ -195,3 +198,26 @@ def test_lock_source_check_refuses_other_sources(tmp_path: Path, package: str) -
     assert result.returncode == 1
     assert result.stdout.count("::error file=uv.lock::y 1.0: ") == 1, result.stdout
     assert "six" not in result.stdout
+
+
+# The agents reusable workflows that declare `allow_build_config`.
+OPT_IN_WORKFLOWS = {"claude.yml", "claude-auto.yml", "claude-auto-review.yml"}
+
+
+def test_claude_stubs_opt_in_to_tier_2() -> None:
+    opted_in = {}
+    for stub in ("claude.yml", "claude-auto.yml", "claude-review.yml"):
+        for name, job in _load(WORKFLOWS / stub)["jobs"].items():
+            uses = str(job.get("uses", ""))
+            if uses.startswith("meridianlabs-ai/agents/.github/workflows/"):
+                called = uses.split("/")[-1].split("@")[0]
+                setting = job.get("with", {}).get("allow_build_config")
+                assert setting is (True if called in OPT_IN_WORKFLOWS else None), name
+                opted_in[f"{stub}:{name}"] = called
+    assert opted_in == {
+        "claude.yml:claude": "claude.yml",
+        "claude.yml:claude-auto": "claude.yml",
+        "claude-auto.yml:ci-fix": "claude-auto.yml",
+        "claude-auto.yml:review-fix": "claude-auto-review.yml",
+        "claude-review.yml:review": "claude-review.yml",
+    }
