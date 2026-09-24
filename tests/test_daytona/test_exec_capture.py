@@ -3,8 +3,11 @@
 import asyncio
 import base64
 import os
+import resource
 import shutil
+import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -50,10 +53,13 @@ def test_build_capture_command_shape() -> None:
         f" 6<{OUT_FILE} 7<{ERR_FILE} 8<{STATUS_FILE}"
         f" && ({pin}; rm -f {files}); then "
         "{ { ( (echo 'a b' >&2) 3>&- 4>&- 5>&- 6<&- 7<&- 8<&- 9>&-; echo $? >&9; )"
-        f" 2>&5 | ({pin}; exec cat >&3); }} 5>&1 | ({pin}; exec cat >&4); }}; "
-        "read -r _ec <&8; "
-        f"({pin}; printf %s '{START}' && base64 <&6 && printf %s '{MID}'"
-        f" && base64 <&7 && printf %s '{END}') || printf %s '{FAILED}'; "
+        f" 2>&5 | ({pin}; cat >&3 || echo F >&9); }} 5>&1"
+        f" | ({pin}; cat >&4 || echo F >&9); }}; "
+        "_ec=; _cf=; while read -r _l; do"
+        " case $_l in F) _cf=1 ;; *) _ec=$_l ;; esac; done <&8; "
+        f"{{ test -z \"$_cf\" && ({pin}; printf %s '{START}' && base64 <&6"
+        f" && printf %s '{MID}' && base64 <&7 && printf %s '{END}'); }}"
+        f" || printf %s '{FAILED}'; "
         "exit ${_ec:-1}; fi; exit 1"
     )
 
@@ -219,13 +225,18 @@ def test_captured_exec_result_reports_a_missing_frame_as_a_failed_exec() -> None
         captured_exec_result(0, f"{START}{FAILED}", CAPTURE)
 
 
-async def _sh(command: str, env: dict[str, str] | None = None) -> tuple[int, str]:
+async def _sh(
+    command: str,
+    env: dict[str, str] | None = None,
+    preexec_fn: Callable[[], None] | None = None,
+) -> tuple[int, str]:
     """Run *command* like the Daytona API does: merged output, plus the exit code."""
     proc = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         env=env,
+        preexec_fn=preexec_fn,
     )
     output, _ = await proc.communicate()
     assert proc.returncode is not None
@@ -342,6 +353,39 @@ async def test_capture_reports_a_collection_failure(
 
     assert exit_code == 4
     with pytest.raises(OutputCollectionError, match="base64"):
+        parse_captured_output(output, CAPTURE)
+    _assert_no_capture_files()
+
+
+def _file_size_limit(ignore_sigxfsz: bool) -> Callable[[], None]:
+    """A preexec hook capping files at 1 KiB, like a full disk or a quota."""
+
+    def limit() -> None:
+        if ignore_sigxfsz:
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)  # writes fail with EFBIG
+        resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+
+    return limit
+
+
+@pytest.mark.parametrize("ignore_sigxfsz", [True, False], ids=["efbig", "sigxfsz"])
+@pytest.mark.parametrize("redirect", ["", " >&2"], ids=["stdout", "stderr"])
+@pytest.mark.asyncio
+async def test_capture_reports_a_collector_that_could_not_write(
+    redirect: str, ignore_sigxfsz: bool
+) -> None:
+    """A collector that cannot store its stream fails the collection, not the data.
+
+    The command exits 0, so only the collectors' own statuses show that part
+    of the stream was lost; a truncated stream must never pass for the output.
+    """
+    exit_code, output = await _sh(
+        build_capture_command(f"printf '%02048d' 0{redirect}", CAPTURE),
+        preexec_fn=_file_size_limit(ignore_sigxfsz),
+    )
+
+    assert exit_code == 0
+    with pytest.raises(OutputCollectionError, match="could not be collected"):
         parse_captured_output(output, CAPTURE)
     _assert_no_capture_files()
 

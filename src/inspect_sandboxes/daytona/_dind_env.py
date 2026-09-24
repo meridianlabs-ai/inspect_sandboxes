@@ -62,10 +62,10 @@ logger = getLogger(__name__)
 _TIMEOUT_SLACK = 10
 
 # Exit statuses of a command stopped by /usr/bin/timeout: 124 GNU (SIGTERM),
-# 137 after the -k SIGKILL, 143 BusyBox (SIGTERM). 137 and 143 also come from
-# an OOM kill or any SIGTERM, so they count only once the timeout has elapsed.
-_TIMEOUT_EXIT = 124
-_SIGNAL_EXITS = (137, 143)
+# 137 after the -k SIGKILL, 143 BusyBox (SIGTERM). A command can exit with any
+# of them itself (124 from its own `timeout`, 137 from an OOM kill), so they
+# count as the timeout only once it has elapsed.
+_TIMEOUT_EXITS = (124, 137, 143)
 
 
 class DaytonaDinDServiceEnvironment(SandboxEnvironment):
@@ -244,7 +244,9 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             inside the container would survive it. As in the Docker sandbox,
             the container command runs under ``/usr/bin/timeout -k 5s`` and
             the server's deadline gets 10 s of slack so the in-container
-            timeout fires first; its exit status is raised as ``TimeoutError``.
+            timeout fires first. Its exit status (124, 137 or 143) is raised as
+            ``TimeoutError`` once the deadline has passed; a command that
+            exits with one of them sooner gets its own result.
         """
         # Resolve working directory
         workdir = cwd if cwd is not None else self._working_dir
@@ -439,6 +441,4 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
 
 
 def _timed_out(returncode: int, elapsed: float, timeout: int) -> bool:
-    return returncode == _TIMEOUT_EXIT or (
-        returncode in _SIGNAL_EXITS and elapsed >= timeout
-    )
+    return returncode in _TIMEOUT_EXITS and elapsed >= timeout

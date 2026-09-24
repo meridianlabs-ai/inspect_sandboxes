@@ -364,7 +364,8 @@ async def test_exec_in_container_timeout_raises(returncode: int) -> None:
 @pytest.mark.parametrize(
     ("returncode", "elapsed", "expected"),
     [
-        (124, 0.1, True),  # GNU timeout: unambiguous
+        (124, 2.1, True),  # GNU timeout (SIGTERM)
+        (124, 0.1, False),  # too fast: the command's own status (its own timeout)
         (137, 2.5, True),  # SIGKILL after -k, once the deadline passed
         (143, 2.0, True),  # BusyBox timeout (SIGTERM)
         (137, 0.5, False),  # too fast: an OOM kill, not the timeout
@@ -379,18 +380,32 @@ def test_timed_out_classifies_exit_statuses(
     assert _timed_out(returncode, elapsed, 2) is expected
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    [
+        (137, "", "Killed\n"),  # an OOM kill
+        (124, "done\n", ""),  # the command's own status, e.g. its own timeout
+    ],
+)
 @pytest.mark.asyncio
-async def test_exec_fast_signal_exit_is_returned() -> None:
-    """A 137 well before the deadline (an OOM kill) is the command's result."""
+async def test_exec_fast_timeout_status_is_the_commands_result(
+    returncode: int, stdout: str, stderr: str
+) -> None:
+    """A timeout-like status well before the deadline is returned, not raised."""
     env = make_env()
 
     with patch(
         "inspect_sandboxes.daytona._dind_env.vm_exec",
-        scripted_vm_exec((137, "", "Killed\n")),
+        scripted_vm_exec((returncode, stdout, stderr)),
     ):
-        result = await env.exec(["big"], timeout=60)
+        result = await env.exec(["sh", "-c", "work"], timeout=60)
 
-    assert (result.returncode, result.stderr) == (137, "Killed\n")
+    assert not result.success
+    assert (result.returncode, result.stdout, result.stderr) == (
+        returncode,
+        stdout,
+        stderr,
+    )
 
 
 @pytest.mark.asyncio
