@@ -11,7 +11,6 @@ import pytest
 import pytest_asyncio
 from daytona import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
 from inspect_ai.util import ComposeConfig, ComposeService, SandboxEnvironment
-from inspect_ai.util._sandbox.self_check import self_check
 from inspect_sandboxes.daytona._daytona import (
     INSPECT_SANDBOX_LABEL,
     DaytonaSandboxEnvironment,
@@ -566,50 +565,23 @@ async def test_cli_cleanup_bulk_partial_failure(
     assert "Failed to delete: 1" in captured.out
 
 
-def _check_self_check_results(
-    results: dict[str, bool | str], known_failures: list[str]
-) -> None:
-    failed = [
-        (name, err)
-        for name, err in results.items()
-        if err is not True and name not in known_failures
-    ]
-    if failed:
-        details = "\n".join(f"  {name}: {err}" for name, err in failed)
-        raise AssertionError(f"{len(failed)} unexpected test(s) failed:\n{details}")
-
-
 @pytest_asyncio.fixture
 async def daytona_single_env() -> AsyncGenerator[SandboxEnvironment, None]:
     """Create a real single-service Daytona sandbox for integration testing."""
-    await DaytonaSandboxEnvironment.task_init("test_self_check", None)
-    envs = await DaytonaSandboxEnvironment.sample_init("test_self_check", None, {})
+    await DaytonaSandboxEnvironment.task_init("test_exec_stream_split", None)
+    envs = await DaytonaSandboxEnvironment.sample_init(
+        "test_exec_stream_split", None, {}
+    )
     yield envs["default"]
     try:
         await DaytonaSandboxEnvironment.sample_cleanup(
-            "test_self_check", None, envs, False
+            "test_exec_stream_split", None, envs, False
         )
         await DaytonaSandboxEnvironment.task_cleanup(
-            "test_self_check", None, cleanup=True
+            "test_exec_stream_split", None, cleanup=True
         )
     except Exception as e:
         print(f"Cleanup error: {e}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_self_check_single_service(
-    daytona_single_env: SandboxEnvironment,
-) -> None:
-    """Run inspect_ai's self-check suite against a single-service Daytona sandbox."""
-    known_failures = [
-        "test_exec_permission_error",  # exit code 126, not translated to PermissionError
-        "test_write_text_file_without_permissions",  # Daytona returns 400, not 403 for write permission errors
-        "test_write_binary_file_without_permissions",  # same
-        "test_exec_as_user",  # adduser/useradd may not be available in default snapshot
-    ]
-    results = await self_check(daytona_single_env)
-    _check_self_check_results(results, known_failures)
 
 
 @pytest_asyncio.fixture
@@ -628,37 +600,20 @@ async def daytona_dind_env() -> AsyncGenerator[SandboxEnvironment, None]:
             ),
         }
     )
-    await DaytonaSandboxEnvironment.task_init("test_self_check_dind", None)
+    await DaytonaSandboxEnvironment.task_init("test_exec_stream_split_dind", None)
     envs = await DaytonaSandboxEnvironment.sample_init(
-        "test_self_check_dind", config, {}
+        "test_exec_stream_split_dind", config, {}
     )
     yield envs["default"]
     try:
         await DaytonaSandboxEnvironment.sample_cleanup(
-            "test_self_check_dind", config, envs, False
+            "test_exec_stream_split_dind", config, envs, False
         )
         await DaytonaSandboxEnvironment.task_cleanup(
-            "test_self_check_dind", None, cleanup=True
+            "test_exec_stream_split_dind", None, cleanup=True
         )
     except Exception as e:
         print(f"Cleanup error: {e}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_self_check_dind(
-    daytona_dind_env: SandboxEnvironment,
-) -> None:
-    """Run inspect_ai's self-check suite against a DinD Daytona sandbox."""
-    known_failures = [
-        "test_exec_permission_error",  # exit code 126, not translated to PermissionError
-        "test_write_text_file_without_permissions",  # root user in container
-        "test_write_binary_file_without_permissions",  # same
-        "test_read_file_not_allowed",  # root user
-        "test_exec_as_user",  # adduser/useradd may not be available
-    ]
-    results = await self_check(daytona_dind_env)
-    _check_self_check_results(results, known_failures)
 
 
 async def _check_stream_split(env: SandboxEnvironment) -> None:

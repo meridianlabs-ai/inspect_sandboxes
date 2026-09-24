@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.5.0...v0.6.0) (2026-09-21)
+
+
+### Features
+
+* expose Modal Sandbox experimental options ([#73](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/73)) ([79d4fae](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/79d4fae46c512c8976a63b5f271847bca028611b))
+
+
+### Bug Fixes
+
+* honor Compose entrypoint in Modal sandboxes ([#74](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/74)) ([d72523f](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/d72523f9ec0d1d08a9ab21eaff7066b0ab21d96b))
+* honour user= on Modal sandbox exec() via su ([#61](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/61)) ([02a9f89](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/02a9f898d73bb1598491ba120d1b550f53916a1e))
+* migrate Modal sandbox filesystem API ([#71](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/71)) ([0f6e2df](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/0f6e2df2774ff87df4df58df6d4f8632c43f9961))
+
 ## [0.5.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.4.1...v0.5.0) (2026-08-18)
 
 

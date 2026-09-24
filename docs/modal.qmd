@@ -107,6 +107,7 @@ The top-level `x-modal` key on a compose file passes settings to [`modal.Sandbox
 | `unencrypted_ports` | list[int] | `[]` | Ports to tunnel without encryption. |
 | `custom_domain` | str | `None` | Custom subdomain parent for sandbox connections. |
 | `verbose` | bool | `False` | Enable verbose Modal logging. |
+| `experimental_options` | dict | `None` | Passed through to `modal.Sandbox.create()`. Keys and behavior may change between Modal releases. |
 :::
 
 Mount a runtime payload Volume read-only:
@@ -129,6 +130,17 @@ x-modal:
   gpu: "A10G"
   secrets: ["openai-api-key"]
 ```
+
+Use Modal's beta [VM Sandbox runtime](https://modal.com/docs/guide/vm-sandboxes)
+for workloads that require a real Linux kernel rather than gVisor:
+
+```yaml
+x-modal:
+  experimental_options:
+    vm_runtime: true
+```
+
+VM Sandboxes are in beta, use a different resource model, and do not support GPUs.
 
 Unsupported Modal parameters (require SDK objects, not compose-representable): `network_file_systems`, `proxy`.
 
@@ -154,7 +166,8 @@ inspect sandbox cleanup modal <sandbox-id>      # terminate one
 ## Notes
 
 - **Network mode**: Docker Compose `network_mode` is automatically translated to Modal's `block_network`. `network_mode: none` blocks all network access; any other value (e.g. `bridge`) allows it. `x-modal.block_network` takes precedence if set.
+- **Entrypoint**: Docker Compose `entrypoint` replaces the image's `ENTRYPOINT`, suppresses its `CMD`, and is prepended to `command`. `[]` or `''` clears the image entrypoint so `command` runs directly; at least one of the two must be non-empty.
 
 ## Limitations {#modal-limitations}
 
-- **Single service only**: Multi-service compose files raise a `ValueError`. Modal sandboxes run on [gVisor](https://gvisor.dev/), a user-space kernel that restricts the low-level network operations Docker needs to connect containers together — specifically, creating virtual ethernet pairs between containers and setting up NAT rules. Modal's alpha `experimental_options={"enable_docker": True}` doesn't currently lift these restrictions, so compose services can't share a private network or reach each other by service name. For multi-service workloads, use the [Daytona provider](daytona.qmd), which supports multi-service compose via Docker-in-Docker.
+- **Single service only**: Multi-service compose files raise a `ValueError` before sandbox creation. Modal's default [gVisor](https://gvisor.dev/) runtime restricts the low-level network operations Docker needs to connect containers, and `experimental_options={"enable_docker": True}` does not lift those restrictions. The VM runtime supports inter-container networking, but `inspect_sandboxes` does not currently translate or orchestrate multiple Compose services there. For multi-service workloads, use the [Daytona provider](daytona.qmd), which supports multi-service compose via Docker-in-Docker.

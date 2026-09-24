@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import posixpath
 import shlex
 import sys
+import uuid
 from contextvars import ContextVar
 from logging import getLogger
 from pathlib import PurePosixPath
-from typing import Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, Never, cast, overload
 
 import modal
 import modal.exception
+import modal.sandbox
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
@@ -36,6 +39,7 @@ from rich.prompt import Confirm
 from rich.table import Table
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -46,10 +50,30 @@ from inspect_sandboxes._util.naming import make_sandbox_name
 
 from ._compose import _MODAL_PORT_KEYS, convert_compose_to_modal_params
 
+if TYPE_CHECKING:
+    # modal.types only exists from modal 1.5.2; the class is used as an annotation only.
+    from modal.types import FileInfo
+
 logger = getLogger(__name__)
 
 MODAL_APP_NAME = "inspect_modal_sandbox"
 INSPECT_SANDBOX_TAG = {"created_by": "inspect-ai"}
+
+# Modal's Sandbox.exec() validates the total argv length client-side and raises
+# InvalidError beyond ARG_MAX_BYTES (64 KiB: a quarter of the usual Linux
+# ARG_MAX, leaving room for its own `runsc exec ...` prefix). exec() stages
+# anything larger as a script inside the sandbox and runs that instead.
+# A direct reference so a rename in Modal fails loudly at import time; Modal's
+# .pyi stubs don't declare the constant, hence the pyright ignore.
+_EXEC_ARG_MAX_BYTES: int = modal.sandbox.ARG_MAX_BYTES  # pyright: ignore[reportAttributeAccessIssue]
+
+# Sandbox.exec()'s stdin writer buffers write() calls and raises BufferError as
+# soon as a single write() would push the buffer past its cap
+# (modal.io_streams.TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE, 16 MiB), so exec()
+# streams `input` in chunks and drains between them. 1 MiB is deliberately far
+# below the cap: it keeps each gRPC message small and is the size validated
+# against real sandboxes (50 MiB round-trips in the conformance suite).
+_STDIN_CHUNK_BYTES = 1024 * 1024
 
 _running_sandboxes: ContextVar[list[str]] = ContextVar("modal_running_sandboxes")
 
@@ -70,12 +94,29 @@ def running_sandboxes() -> list[str]:
 #   is exhausted the error reaches this layer for additional retry.
 # ---------------------------------------------------------------------------
 
+
 # Retry decorator for file I/O and sandbox lifecycle ops.
 # RemoteError indicates permanent server-side failures (e.g. image build errors).
+def _is_permanent_error(exc: BaseException) -> bool:
+    """Errors that must not be retried.
+
+    Modal reports specific filesystem failures (missing path, is a directory,
+    permission denied, ...) as subclasses of SandboxFilesystemError, but wraps
+    transient exec failures in the bare base class, so only subclasses are
+    treated as permanent.
+    """
+    if isinstance(exc, modal.exception.RemoteError):
+        return True
+    return (
+        isinstance(exc, modal.exception.SandboxFilesystemError)
+        and type(exc) is not modal.exception.SandboxFilesystemError
+    )
+
+
 _standard_retry = retry(
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_not_exception_type(modal.exception.RemoteError),
+    retry=retry_if_exception(lambda exc: not _is_permanent_error(exc)),
     reraise=True,
 )
 
@@ -211,9 +252,15 @@ def _build_exec_cmd(cmd: list[str], user: str | None) -> list[str]:
 
 @sandboxenv(name="modal")
 class ModalSandboxEnvironment(SandboxEnvironment):
-    def __init__(self, sandbox: modal.Sandbox, has_tunnels: bool = False) -> None:
+    def __init__(
+        self,
+        sandbox: modal.Sandbox,
+        has_tunnels: bool = False,
+        working_dir: str | None = None,
+    ) -> None:
         super().__init__()
         self.sandbox = sandbox
+        self._working_dir = working_dir
         # Whether any tunnels were declared at creation (from service.ports or
         # x-modal.*_ports). When none were, connection() must NOT call
         # tunnels(): with no declared tunnels that RPC blocks for ~50s before
@@ -305,7 +352,13 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         running_sandboxes().append(sandbox.object_id)
 
         has_tunnels = any(sandbox_kwargs.get(key) for key in _MODAL_PORT_KEYS)
-        return {"default": cls(sandbox, has_tunnels=has_tunnels)}
+        return {
+            "default": cls(
+                sandbox,
+                has_tunnels=has_tunnels,
+                working_dir=sandbox_kwargs.get("workdir"),
+            )
+        }
 
     @override
     @classmethod
@@ -449,6 +502,24 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         # parameter of its own.
         exec_cmd = _build_exec_cmd(cmd, user)
 
+        # Commands over Modal's cap are written to a script in the sandbox and
+        # run via /bin/sh instead. Size is measured in UTF-8 bytes: that covers
+        # everything Modal's character count rejects and also stays under the
+        # kernel's per-argument byte limit. The script uses `exec`, so the
+        # shell is replaced by the command and the process tree looks the same
+        # as the inline path. Needs /bin/sh in the image (the `user=` wrapper
+        # already does). The upload happens before the exec timeout starts.
+        script_file: str | None = None
+        if sum(len(arg.encode("utf-8")) for arg in exec_cmd) > _EXEC_ARG_MAX_BYTES:
+            script_file = f"/tmp/.inspect-cmd-{uuid.uuid4().hex}"
+            try:
+                await self._write_file_content(
+                    script_file, "exec " + shlex.join(cmd) + "\n"
+                )
+            except modal.exception.SandboxFilesystemError as e:
+                self._raise_filesystem_error(script_file, e)
+            exec_cmd = _build_exec_cmd(["/bin/sh", script_file], user)
+
         # Modal requires absolute paths for workdir
         workdir = cwd
         if workdir is not None and not PurePosixPath(workdir).is_absolute():
@@ -458,6 +529,16 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 "(relative to filesystem root). For clarity, consider using absolute paths.",
             )
             workdir = f"/{workdir}"
+
+        # Encode once, outside the retried/timed region: a large str input
+        # would otherwise be re-encoded on every attempt.
+        stdin_data: bytes | None
+        if input is None:
+            stdin_data = None
+        elif isinstance(input, str):
+            stdin_data = input.encode("utf-8")
+        else:
+            stdin_data = input
 
         @_exec_retry
         async def _run() -> ExecResult[str]:
@@ -469,21 +550,32 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 env=modal_env,
             )
 
-            if input is not None:
+            if stdin_data is not None:
+                # Chunk under Modal's stdin buffer cap and drain between
+                # chunks; EOF rides along with the last chunk's drain so a
+                # small input still costs a single stdin RPC.
+                eof_sent = False
                 try:
-                    data = input.encode("utf-8") if isinstance(input, str) else input
-                    process.stdin.write(data)
+                    for offset in range(0, len(stdin_data), _STDIN_CHUNK_BYTES):
+                        end = offset + _STDIN_CHUNK_BYTES
+                        process.stdin.write(stdin_data[offset:end])
+                        if end >= len(stdin_data):
+                            process.stdin.write_eof()
+                            eof_sent = True
+                        await process.stdin.drain.aio()
                 except modal.exception.InternalError as e:
                     logger.warning(f"Modal InternalError while writing stdin: {e}.")
                     raise
                 finally:
-                    # No kill() on Modal's ContainerProcess
-                    # Close stdin to unblock the process
-                    try:
-                        process.stdin.write_eof()
-                        await process.stdin.drain.aio()
-                    except Exception:
-                        pass
+                    # No kill() on Modal's ContainerProcess; close stdin to
+                    # unblock the process when the input was empty or the
+                    # upload failed part-way.
+                    if not eof_sent:
+                        try:
+                            process.stdin.write_eof()
+                            await process.stdin.drain.aio()
+                        except Exception:
+                            pass
 
             try:
                 stdout = await process.stdout.read.aio()
@@ -517,19 +609,30 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             attempt_timeouts = [timeout]
 
         last_timeout_exc: asyncio.TimeoutError | None = None
-        for t in attempt_timeouts:
-            try:
-                if t is not None:
-                    return await asyncio.wait_for(_run(), timeout=t)
-                else:
-                    return await _run()
-            except asyncio.TimeoutError as e:
-                last_timeout_exc = e
+        try:
+            for t in attempt_timeouts:
+                try:
+                    if t is not None:
+                        return await asyncio.wait_for(_run(), timeout=t)
+                    else:
+                        return await _run()
+                except asyncio.TimeoutError as e:
+                    last_timeout_exc = e
 
-        assert last_timeout_exc is not None
-        raise TimeoutError(
-            f"Command timed out after {timeout} seconds"
-        ) from last_timeout_exc
+            assert last_timeout_exc is not None
+            raise TimeoutError(
+                f"Command timed out after {timeout} seconds"
+            ) from last_timeout_exc
+        finally:
+            if script_file is not None:
+                try:
+                    await self._remove_file(script_file)
+                except Exception as e:
+                    trace_message(
+                        logger,
+                        "modal",
+                        f"Could not remove exec script {script_file}: {e}",
+                    )
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
@@ -538,14 +641,11 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
-        parent = str(PurePosixPath(file).parent)
-        if parent and parent not in ("/", "."):
-            await self._create_parent_folder(parent)
-
+        file = await self._resolve_file_path(file)
         try:
             await self._write_file_content(file, contents)
-        except IsADirectoryError as e:
-            raise IsADirectoryError(errno.EISDIR, "Is a directory", file) from e
+        except modal.exception.SandboxFilesystemError as e:
+            self._raise_filesystem_error(file, e)
 
     @overload
     async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
@@ -563,16 +663,19 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
-        await self._verify_read_file_size(file)
-
+        file = await self._resolve_file_path(file)
         try:
+            info = await self._get_file_info(file)
+            if info.is_dir():
+                raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
+            if info.size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
+                raise OutputLimitExceededError(
+                    limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
+                    truncated_output=None,
+                )
             contents_bytes = await self._read_file_content(file)
-        except modal.exception.FilesystemExecutionError as e:
-            if await self._is_directory(file):
-                raise IsADirectoryError(errno.EISDIR, "Is a directory", file) from e
-            raise FileNotFoundError(
-                errno.ENOENT, "No such file or directory", file
-            ) from e
+        except modal.exception.SandboxFilesystemError as e:
+            self._raise_filesystem_error(file, e)
 
         if text:
             try:
@@ -669,56 +772,61 @@ class ModalSandboxEnvironment(SandboxEnvironment):
     @_standard_retry
     async def _write_file_content(self, file: str, contents: str | bytes) -> None:
         if isinstance(contents, str):
-            async with await self.sandbox.open.aio(file, "w") as f:
-                await f.write.aio(contents)
+            await self.sandbox.filesystem.write_text.aio(contents, file)
         else:
-            async with await self.sandbox.open.aio(file, "wb") as f:
-                await f.write.aio(contents)
+            await self.sandbox.filesystem.write_bytes.aio(contents, file)
+
+    async def _remove_file(self, file: str) -> None:
+        # Best-effort, single attempt: this runs in exec()'s finally block, so
+        # retry backoff here would stall every exit path (including timeouts
+        # and cancellation) over a file nobody will read again.
+        await self.sandbox.filesystem.remove.aio(file)
 
     @_standard_retry
     async def _read_file_content(self, file: str) -> bytes:
-        async with await self.sandbox.open.aio(file, "rb") as f:
-            return await f.read.aio()
+        return await self.sandbox.filesystem.read_bytes.aio(file)
+
+    async def _resolve_file_path(self, file: str) -> str:
+        """Resolve relative paths against the sandbox's working directory."""
+        if posixpath.isabs(file):
+            return file
+
+        if self._working_dir is None:
+            result = await self.exec(["pwd"])
+            if not result.success:
+                raise RuntimeError(
+                    "Failed to resolve the Modal sandbox working directory: "
+                    f"{result.stderr}"
+                )
+            working_dir = result.stdout.strip()
+            if not posixpath.isabs(working_dir):
+                raise RuntimeError(
+                    "Modal sandbox returned a non-absolute working directory: "
+                    f"{working_dir!r}"
+                )
+            self._working_dir = working_dir
+
+        # Preserve `..` for the sandbox kernel to resolve. Lexically normalizing it
+        # here would change POSIX semantics when an earlier component is a symlink.
+        return posixpath.join(self._working_dir, file)
 
     @_standard_retry
-    async def _create_parent_folder(self, path: str) -> None:
-        try:
-            await self.sandbox.mkdir.aio(path, parents=True)
-        except FileExistsError:
-            pass
+    async def _get_file_info(self, file: str) -> FileInfo:
+        return await self.sandbox.filesystem.stat.aio(file)
 
-    @_standard_retry
-    async def _is_directory(self, file: str) -> bool:
-        process = await self.sandbox.exec.aio("test", "-d", file)
-        await process.wait.aio()
-        return process.returncode == 0
-
-    @_standard_retry
-    async def _get_file_size(self, file: str) -> int:
-        process = await self.sandbox.exec.aio("stat", "-c", "%s", file)
-        stdout = await process.stdout.read.aio()
-        await process.wait.aio()
-
-        if process.returncode != 0:
-            if process.returncode == 1:
-                raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
-            stderr = await process.stderr.read.aio()
-            raise RuntimeError(
-                f"stat command failed with code {process.returncode}: {stderr}"
-            )
-
-        try:
-            return int(stdout.strip())
-        except ValueError as e:
-            raise RuntimeError(f"Failed to parse file size for {file}") from e
-
-    async def _verify_read_file_size(self, file: str) -> None:
-        if await self._is_directory(file):
-            raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
-
-        file_size = await self._get_file_size(file)
-        if file_size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
-            raise OutputLimitExceededError(
-                limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
-                truncated_output=None,
-            )
+    @staticmethod
+    def _raise_filesystem_error(
+        file: str, error: modal.exception.SandboxFilesystemError
+    ) -> Never:
+        """Translate Modal filesystem errors into Inspect's sandbox contract."""
+        if isinstance(error, modal.exception.SandboxFilesystemNotFoundError):
+            raise FileNotFoundError(
+                errno.ENOENT, "No such file or directory", file
+            ) from error
+        if isinstance(error, modal.exception.SandboxFilesystemIsADirectoryError):
+            raise IsADirectoryError(errno.EISDIR, "Is a directory", file) from error
+        if isinstance(error, modal.exception.SandboxFilesystemNotADirectoryError):
+            raise NotADirectoryError(errno.ENOTDIR, "Not a directory", file) from error
+        if isinstance(error, modal.exception.SandboxFilesystemPermissionError):
+            raise PermissionError(errno.EACCES, "Permission denied", file) from error
+        raise error
