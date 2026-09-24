@@ -53,11 +53,10 @@ def test_build_capture_command_shape() -> None:
         f" 6<{OUT_FILE} 7<{ERR_FILE} 8<{STATUS_FILE}"
         f" && ({pin}; rm -f {files}); then "
         "{ { ( (echo 'a b' >&2) 3>&- 4>&- 5>&- 6<&- 7<&- 8<&- 9>&-; echo $? >&9; )"
-        f" 2>&5 | ({pin}; cat >&3 || echo F >&9); }} 5>&1"
-        f" | ({pin}; cat >&4 || echo F >&9); }}; "
-        "_ec=; _cf=; while read -r _l; do"
-        " case $_l in F) _cf=1 ;; *) _ec=$_l ;; esac; done <&8; "
-        f"{{ test -z \"$_cf\" && ({pin}; printf %s '{START}' && base64 <&6"
+        f" 2>&5 | ({pin}; cat >&3 || printf %s '{FAILED}' >&2); }} 5>&1"
+        f" | ({pin}; cat >&4 || printf %s '{FAILED}' >&2); }}; "
+        "_ec=; read -r _ec <&8; case $_ec in ''|*[!0-9]*) _ec= ;; esac; "
+        f"{{ test -n \"$_ec\" && ({pin}; printf %s '{START}' && base64 <&6"
         f" && printf %s '{MID}' && base64 <&7 && printf %s '{END}'); }}"
         f" || printf %s '{FAILED}'; "
         "exit ${_ec:-1}; fi; exit 1"
@@ -357,13 +356,13 @@ async def test_capture_reports_a_collection_failure(
     _assert_no_capture_files()
 
 
-def _file_size_limit(ignore_sigxfsz: bool) -> Callable[[], None]:
-    """A preexec hook capping files at 1 KiB, like a full disk or a quota."""
+def _file_size_limit(ignore_sigxfsz: bool, size: int = 1024) -> Callable[[], None]:
+    """A preexec hook capping files at *size* bytes, like a full disk or a quota."""
 
     def limit() -> None:
         if ignore_sigxfsz:
             signal.signal(signal.SIGXFSZ, signal.SIG_IGN)  # writes fail with EFBIG
-        resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (size, size))
 
     return limit
 
@@ -385,6 +384,31 @@ async def test_capture_reports_a_collector_that_could_not_write(
     )
 
     assert exit_code == 0
+    with pytest.raises(OutputCollectionError, match="could not be collected"):
+        parse_captured_output(output, CAPTURE)
+    _assert_no_capture_files()
+
+
+@pytest.mark.parametrize("ignore_sigxfsz", [True, False], ids=["efbig", "sigxfsz"])
+@pytest.mark.parametrize(
+    "command", ["exit 0", "printf '%02048d' 0; printf '%02048d' 0 >&2"]
+)
+@pytest.mark.asyncio
+async def test_capture_reports_a_lost_status_or_failure_record(
+    command: str, ignore_sigxfsz: bool
+) -> None:
+    """Nothing can be written to the scratch files at all (a completely full disk).
+
+    The command's exit status never reaches the status file, and a collector's
+    failure could not be recorded there either, so neither may pass for a
+    result: an exec that ran but left no status is a collection failure.
+    """
+    exit_code, output = await _sh(
+        build_capture_command(command, CAPTURE),
+        preexec_fn=_file_size_limit(ignore_sigxfsz, size=0),
+    )
+
+    assert exit_code != 0
     with pytest.raises(OutputCollectionError, match="could not be collected"):
         parse_captured_output(output, CAPTURE)
     _assert_no_capture_files()

@@ -97,13 +97,15 @@ def build_capture_command(command: str, capture: ExecCapture) -> str:
     the command cannot reach them by name, and nothing is left behind if the
     process tree is killed. The command runs in a subshell with those
     descriptors closed, its stdout and stderr piped into two ``cat`` collectors
-    that append to the files. Its exit status is written to the status file,
-    and so is a failure mark from a collector that could not store its stream
-    (a full disk, a file-size limit). Then ``<stdout>``, base64(stdout),
-    ``<stderr>``, base64(stderr), ``<end>`` are printed, or ``<failed>`` if a
-    collector or the encoding failed, so a truncated stream is never
-    delivered as the output, and the wrapper exits with the command's status. Its own programs are resolved through
-    ``SYSTEM_PATH``. Decode the output with :func:`parse_captured_output`.
+    that append to the files. Its exit status is written to the status file.
+    Then ``<stdout>``, base64(stdout), ``<stderr>``, base64(stderr), ``<end>``
+    are printed and the wrapper exits with the command's status. A collector
+    that could not store its stream (a full disk, a file-size limit) prints
+    ``<failed>`` on the API stream itself, since the scratch filesystem may
+    have no room for a record, and ``<failed>`` replaces the frame when the
+    status record is missing or the encoding fails, so a truncated stream or
+    a lost status is never delivered as the command's result. Its own
+    programs are resolved through ``SYSTEM_PATH``. Decode the output with :func:`parse_captured_output`.
 
     The pipes only close once every writer has, so a background child's late
     output is collected too, and a daemon started without redirecting its
@@ -130,15 +132,18 @@ def build_capture_command(command: str, capture: ExecCapture) -> str:
         f" && exec 3>>{out_file} 4>>{err_file} 9>>{status_file}"
         f" 6<{out_file} 7<{err_file} 8<{status_file}"
         f" && ({pin}; rm -f {files}); then "
-        # run: stdout -> pipe -> cat -> fd 3 (out); stderr -> pipe -> cat -> fd 4 (err);
-        # a collector that cannot store its stream (a full disk) writes F to fd 9
+        # run: stdout -> pipe -> cat -> fd 3 (out); stderr -> pipe -> cat -> fd 4 (err).
+        # A collector that cannot store its stream (a full disk) prints the
+        # failure sentinel on its own stderr, the API stream: the scratch
+        # filesystem may have no room for a record of it.
         f"{{ {{ ( ({command}) 3>&- 4>&- 5>&- 6<&- 7<&- 8<&- 9>&-; echo $? >&9; )"
-        f" 2>&5 | ({pin}; cat >&3 || echo F >&9); }} 5>&1"
-        f" | ({pin}; cat >&4 || echo F >&9); }}; "
-        f"_ec=; _cf=; while read -r _l; do"
-        f" case $_l in F) _cf=1 ;; *) _ec=$_l ;; esac; done <&8; "
+        f" 2>&5 | ({pin}; cat >&3 || printf %s {failed} >&2); }} 5>&1"
+        f" | ({pin}; cat >&4 || printf %s {failed} >&2); }}; "
+        # a missing or garbled status record (it could not be written) is a
+        # collection failure too, never the command's result
+        f"_ec=; read -r _ec <&8; case $_ec in ''|*[!0-9]*) _ec= ;; esac; "
         # emit: both streams base64, framed; a collection failure is marked
-        f'{{ test -z "$_cf" && ({pin}; printf %s {start} && base64 <&6'
+        f'{{ test -n "$_ec" && ({pin}; printf %s {start} && base64 <&6'
         f" && printf %s {mid} && base64 <&7 && printf %s {end}); }}"
         f" || printf %s {failed}; "
         f"exit ${{_ec:-1}}; fi; exit 1"
