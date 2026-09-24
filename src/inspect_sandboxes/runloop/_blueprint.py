@@ -29,6 +29,7 @@ across users and runs.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -75,6 +76,25 @@ _IGNORED_FILE_NAMES = {".DS_Store"}
 def _hash_inputs(payload: dict[str, object]) -> str:
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:_HASH_LEN]
+
+
+# Serialize same-name blueprint builds within the process. Runloop's
+# ``blueprints.create`` is not name-idempotent, so without this every
+# concurrent ``sample_init`` that misses the cache would create its own
+# duplicate blueprint and blow the account cap. Keyed by blueprint name.
+_blueprint_build_locks: dict[str, asyncio.Lock] = {}
+
+
+def blueprint_build_lock(name: str) -> asyncio.Lock:
+    """Return the process-wide build lock for a blueprint name (created once)."""
+    # get-or-create is atomic: there's no await between the get and the set, so
+    # the event loop can't interleave two callers here. (If you ever add an
+    # await in this function, guard the dict with its own asyncio.Lock.)
+    lock = _blueprint_build_locks.get(name)
+    if lock is None:
+        lock = asyncio.Lock()
+        _blueprint_build_locks[name] = lock
+    return lock
 
 
 def _is_ignored_context_path(rel_path: Path) -> bool:
@@ -227,10 +247,13 @@ async def _find_or_await_blueprint(client: AsyncRunloop, name: str) -> bool:
     point the caller creates a fresh one.
 
     This dedupes concurrent ``sample_init`` calls and the case where a prior
-    run left an in-flight blueprint behind.
+    run left an in-flight blueprint behind. Blueprints in state ``deleted`` are
+    ignored — Runloop keeps returning them by name, but they can't back a devbox.
     """
     in_flight: list[str] = []
     async for bp in client.blueprints.list(name=name):
+        if bp.state == "deleted":
+            continue
         if bp.status == "build_complete":
             return True
         if bp.status in ("queued", "provisioning", "building"):
@@ -260,40 +283,41 @@ async def build_blueprint_for_dockerfile(
     name = blueprint_name_for_dockerfile(
         dockerfile_path, launch_parameters=launch_parameters
     )
-    if await _find_or_await_blueprint(client, name):
-        trace_message(logger, "runloop", f"Blueprint {name} cached, reusing")
-        return name
+    async with blueprint_build_lock(name):
+        if await _find_or_await_blueprint(client, name):
+            trace_message(logger, "runloop", f"Blueprint {name} cached, reusing")
+            return name
 
-    path = Path(dockerfile_path)
-    dockerfile = path.read_bytes().decode("utf-8", errors="replace")
-    object_id = await _upload_build_context(client, path.parent)
-    trace_message(
-        logger, "runloop", f"Building blueprint {name} from {dockerfile_path}"
-    )
-    try:
-        # POST without SDK retries: Runloop's blueprint create is not
-        # idempotent, so retries spawn duplicate blueprints (and blow the
-        # account cap). `idempotency_key` is also sent, but Runloop doesn't
-        # currently honor it for this endpoint. Polling uses the default
-        # client so transient retrieve errors are still retried.
-        blueprint = await client.with_options(max_retries=0).blueprints.create(
-            name=name,
-            dockerfile=dockerfile,
-            build_context={"object_id": object_id, "type": "object"},
-            launch_parameters=launch_parameters or {},
-            idempotency_key=name,
+        path = Path(dockerfile_path)
+        dockerfile = path.read_bytes().decode("utf-8", errors="replace")
+        object_id = await _upload_build_context(client, path.parent)
+        trace_message(
+            logger, "runloop", f"Building blueprint {name} from {dockerfile_path}"
         )
-        await client.blueprints.await_build_complete(
-            blueprint.id, polling_config=_BLUEPRINT_POLLING_CONFIG
-        )
-    finally:
-        # The Object is only needed during the build; the resulting blueprint
-        # carries the layers. Delete it so we don't blow Runloop's per-account
-        # Object cap (3 on the free tier).
         try:
-            await client.objects.delete(object_id)
-        except Exception:
-            pass
+            # POST without SDK retries: Runloop's blueprint create is not
+            # idempotent, so retries spawn duplicate blueprints (and blow the
+            # account cap). `idempotency_key` is also sent, but Runloop doesn't
+            # currently honor it for this endpoint. Polling uses the default
+            # client so transient retrieve errors are still retried.
+            blueprint = await client.with_options(max_retries=0).blueprints.create(
+                name=name,
+                dockerfile=dockerfile,
+                build_context={"object_id": object_id, "type": "object"},
+                launch_parameters=launch_parameters or {},
+                idempotency_key=name,
+            )
+            await client.blueprints.await_build_complete(
+                blueprint.id, polling_config=_BLUEPRINT_POLLING_CONFIG
+            )
+        finally:
+            # The Object is only needed during the build; the resulting
+            # blueprint carries the layers. Delete it so we don't blow
+            # Runloop's per-account Object cap (3 on the free tier).
+            try:
+                await client.objects.delete(object_id)
+            except Exception:
+                pass
     return name
 
 
@@ -305,24 +329,27 @@ async def build_blueprint_for_image(
 ) -> str:
     """Build (or reuse cached) Runloop blueprint from a base image."""
     name = blueprint_name_for_image(image, launch_parameters=launch_parameters)
-    if await _find_or_await_blueprint(client, name):
-        trace_message(logger, "runloop", f"Blueprint {name} cached, reusing")
-        return name
+    async with blueprint_build_lock(name):
+        if await _find_or_await_blueprint(client, name):
+            trace_message(logger, "runloop", f"Blueprint {name} cached, reusing")
+            return name
 
-    dockerfile = f"FROM {image}\n"
-    trace_message(logger, "runloop", f"Building blueprint {name} from image {image}")
-    # POST without SDK retries: Runloop's blueprint create is not idempotent,
-    # so retries spawn duplicate blueprints (and blow the account cap).
-    # `idempotency_key` is also sent, but Runloop doesn't currently honor it
-    # for this endpoint. Polling uses the default client so transient
-    # retrieve errors are still retried.
-    blueprint = await client.with_options(max_retries=0).blueprints.create(
-        name=name,
-        dockerfile=dockerfile,
-        launch_parameters=launch_parameters or {},
-        idempotency_key=name,
-    )
-    await client.blueprints.await_build_complete(
-        blueprint.id, polling_config=_BLUEPRINT_POLLING_CONFIG
-    )
+        dockerfile = f"FROM {image}\n"
+        trace_message(
+            logger, "runloop", f"Building blueprint {name} from image {image}"
+        )
+        # POST without SDK retries: Runloop's blueprint create is not
+        # idempotent, so retries spawn duplicate blueprints (and blow the
+        # account cap). `idempotency_key` is also sent, but Runloop doesn't
+        # currently honor it for this endpoint. Polling uses the default
+        # client so transient retrieve errors are still retried.
+        blueprint = await client.with_options(max_retries=0).blueprints.create(
+            name=name,
+            dockerfile=dockerfile,
+            launch_parameters=launch_parameters or {},
+            idempotency_key=name,
+        )
+        await client.blueprints.await_build_complete(
+            blueprint.id, polling_config=_BLUEPRINT_POLLING_CONFIG
+        )
     return name

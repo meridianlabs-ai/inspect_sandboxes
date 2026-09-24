@@ -14,6 +14,7 @@ from inspect_sandboxes.runloop._runloop import (
     RunloopSandboxEnvironment,
     _run_id,
     _running_sandboxes,
+    list_devboxes,
 )
 from inspect_sandboxes.runloop._single_env import RunloopSingleServiceEnvironment
 
@@ -110,14 +111,16 @@ async def test_full_lifecycle(
 
         await RunloopSandboxEnvironment.sample_cleanup("test_task", None, envs, False)
         mock_client.devboxes.shutdown.assert_any_await("dbx-test-123")
-        assert _running_sandboxes.get() == []
+        # sample_cleanup shuts the devbox down but leaves it tracked; task_cleanup
+        # is the authority that clears _running_sandboxes.
+        assert _running_sandboxes.get() == ["dbx-test-123"]
 
         mock_client.devboxes.shutdown.reset_mock()
         # Re-arm list for the orphan pass.
         mock_client.devboxes.list = MagicMock(return_value=_make_async_iter([]))
         await RunloopSandboxEnvironment.task_cleanup("test_task", None, cleanup=True)
-        # Both passes: pass-1 has nothing tracked, pass-2 list returns no items.
-        mock_client.devboxes.shutdown.assert_not_awaited()
+        # Pass-1 shuts down the still-tracked devbox; pass-2 list returns nothing.
+        mock_client.devboxes.shutdown.assert_any_await("dbx-test-123")
         assert _running_sandboxes.get() == []
         # Client is closed during task_cleanup.
         mock_client.close.assert_awaited()
@@ -359,6 +362,52 @@ async def test_task_cleanup_no_op_when_cleanup_false(
         await RunloopSandboxEnvironment.task_init("t", None)
         await RunloopSandboxEnvironment.task_cleanup("t", None, cleanup=False)
         mock_client.devboxes.shutdown.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_list_devboxes_omits_status_filter() -> None:
+    """Listing for cleanup must not filter by status; suspended/provisioning are alive."""
+    client = MagicMock()
+    client.devboxes = MagicMock()
+    client.devboxes.list = MagicMock(return_value=_make_async_iter([]))
+
+    await list_devboxes(client, {"created_by": "inspect-ai"})
+
+    assert "status" not in client.devboxes.list.call_args.kwargs
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("scheduled", True),
+        ("queued", True),
+        ("provisioning", True),
+        ("initializing", True),
+        ("running", True),
+        ("suspending", True),
+        ("suspended", True),
+        ("resuming", True),
+        ("failure", False),
+        ("shutdown", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_devboxes_excludes_terminal_status(
+    status: str, expected: bool
+) -> None:
+    """Every non-terminal status is listed; only shutdown/failure are skipped."""
+    metadata = {"created_by": "inspect-ai"}
+    devbox = MagicMock()
+    devbox.id = "dbx-1"
+    devbox.status = status
+    devbox.metadata = metadata
+    client = MagicMock()
+    client.devboxes = MagicMock()
+    client.devboxes.list = MagicMock(return_value=_make_async_iter([devbox]))
+
+    devboxes = await list_devboxes(client, metadata)
+
+    assert (len(devboxes) == 1) is expected
 
 
 @pytest.mark.asyncio

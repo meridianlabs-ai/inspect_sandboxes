@@ -32,17 +32,20 @@ from ._compose import (
     RunloopSingleServiceParams,
     resolve_single_service_params,
 )
+from ._retry import DEVBOX_CREATE_POLLING_CONFIG
 from ._single_env import RunloopSingleServiceEnvironment
 
 logger = getLogger(__name__)
 
 INSPECT_SANDBOX_METADATA = {"created_by": "inspect-ai"}
 
-# Free tier caps concurrent Devboxes at 5; can be raised on Pro.
-_DEFAULT_CONCURRENCY = 5
-
 # Page size for paginated list responses.
 _LIST_PAGE_LIMIT = 100
+
+# Devbox statuses that are already terminal — excluded from cleanup listing so
+# we don't try to reclaim them. Every other status (provisioning, suspended,
+# etc.) is still alive and billable, so it must be reclaimable.
+_TERMINAL_DEVBOX_STATUSES = {"shutdown", "failure"}
 
 _runloop_client: ContextVar[AsyncRunloop | None] = ContextVar(
     "runloop_client", default=None
@@ -64,13 +67,16 @@ def _run_metadata(task_name: str | None = None) -> dict[str, str]:
 
 
 async def list_devboxes(client: AsyncRunloop, metadata: dict[str, str]) -> list[Any]:
-    """List running devboxes whose metadata matches *all* given key/value pairs.
+    """List non-terminal devboxes whose metadata matches *all* key/value pairs.
 
     Runloop's ``devboxes.list`` API doesn't accept a metadata filter, so we
-    paginate and filter client-side.
+    paginate and filter client-side. We keep every non-terminal devbox (not just
+    ``running``) so provisioning/suspended ones are still reclaimed by cleanup.
     """
     matches: list[Any] = []
-    async for devbox in client.devboxes.list(status="running", limit=_LIST_PAGE_LIMIT):
+    async for devbox in client.devboxes.list(limit=_LIST_PAGE_LIMIT):
+        if getattr(devbox, "status", None) in _TERMINAL_DEVBOX_STATUSES:
+            continue
         meta = getattr(devbox, "metadata", None) or {}
         if all(meta.get(k) == v for k, v in metadata.items()):
             matches.append(devbox)
@@ -98,10 +104,6 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
     @classmethod
     def is_docker_compatible(cls) -> bool:
         return True
-
-    @classmethod
-    def default_concurrency(cls) -> int | None:
-        return _DEFAULT_CONCURRENCY
 
     @override
     @classmethod
@@ -158,6 +160,7 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
             devbox = await client.devboxes.create_and_await_running(
                 name=sandbox_name,
                 metadata=run_metadata,
+                polling_config=DEVBOX_CREATE_POLLING_CONFIG,
             )
         elif is_dockerfile(config):
             blueprint_name = await build_blueprint_for_dockerfile(client, str(config))
@@ -165,6 +168,7 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
                 name=sandbox_name,
                 blueprint_name=blueprint_name,
                 metadata=run_metadata,
+                polling_config=DEVBOX_CREATE_POLLING_CONFIG,
             )
         elif is_compose_yaml(config) or isinstance(config, ComposeConfig):
             if isinstance(config, ComposeConfig):
@@ -197,6 +201,7 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
             create_kwargs: dict[str, object] = {
                 "name": sandbox_name,
                 "metadata": run_metadata,
+                "polling_config": DEVBOX_CREATE_POLLING_CONFIG,
             }
             if blueprint_name is not None:
                 create_kwargs["blueprint_name"] = blueprint_name
@@ -272,32 +277,16 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
 
         any_env = next(iter(environments.values()))
         if isinstance(any_env, RunloopDinDServiceEnvironment):
-            devbox_ids = [
-                any_env.as_type(RunloopDinDServiceEnvironment).project.devbox_id
-            ]
             await RunloopDinDServiceEnvironment.sample_cleanup(
                 task_name, config, environments, interrupted
             )
         else:
-            devbox_ids = [
-                env.as_type(RunloopSingleServiceEnvironment).devbox_id
-                for env in environments.values()
-            ]
             await RunloopSingleServiceEnvironment.sample_cleanup(
                 task_name, config, environments, interrupted
             )
-
-        # Skip the redundant shutdown in task_cleanup's first pass. Anything
-        # we failed to shut down here is still caught by the orphan-recovery
-        # pass via inspect_run_id metadata.
-        if interrupted:
-            return
-        running = _running_sandboxes.get()
-        for devbox_id in devbox_ids:
-            try:
-                running.remove(devbox_id)
-            except ValueError:
-                pass
+        # Devboxes stay tracked in _running_sandboxes until task_cleanup shuts
+        # them down. That pass is idempotent (NotFoundError = already gone), so a
+        # shutdown that failed above is retried there instead of being dropped.
 
     @override
     @classmethod

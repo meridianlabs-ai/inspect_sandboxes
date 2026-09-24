@@ -19,7 +19,6 @@ Each compose service is then exposed as a ``RunloopDinDServiceEnvironment``.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import shlex
@@ -28,10 +27,10 @@ from dataclasses import dataclass, field
 from logging import getLogger
 from pathlib import Path
 
-import httpx
 from inspect_ai.util import ComposeConfig
-from runloop_api_client import AsyncRunloop
+from runloop_api_client import AsyncRunloop, BadRequestError
 from runloop_api_client.types.shared_params import LaunchParameters
+from uuid_utils import uuid7
 
 from inspect_sandboxes._util.dind_compose import (
     compute_healthcheck_timeout,
@@ -45,14 +44,18 @@ from ._blueprint import (
     _find_or_await_blueprint,
     _hash_inputs,
     _launch_params_for_hash,
+    blueprint_build_lock,
 )
-from ._retry import exec_retry, poll_execution, standard_retry
+from ._retry import (
+    DEVBOX_CREATE_POLLING_CONFIG,
+    execute_with_poll,
+    standard_retry,
+)
 from ._single_env import (
     EXEC_LAST_N,
     FILE_REQUEST_TIMEOUT,
-    LARGE_FILE_THRESHOLD,
-    _devbox_download_command,
-    _devbox_upload_command,
+    _raise_filesystem_error,
+    _verify_exec_output_size,
 )
 
 logger = getLogger(__name__)
@@ -105,36 +108,29 @@ class RunloopDinDProject:
     services: list[str] = field(default_factory=list)
 
 
-@exec_retry
-async def _submit_vm_exec(client: AsyncRunloop, devbox_id: str, wrapped: str) -> str:
-    """Submit a command to the devbox, returning its execution id.
-
-    Only the submission is retried; ``vm_exec`` polls separately so a transient
-    mid-poll error never re-runs (and thus double-executes) the command.
-    """
-    started = await client.devboxes.execute_async(devbox_id, command=wrapped)
-    return started.execution_id
-
-
 async def vm_exec(
     client: AsyncRunloop,
     devbox_id: str,
     command: str,
     timeout: int | None = 60,
+    raise_on_truncation: bool = False,
 ) -> tuple[int, str, str]:
     """Execute a command on the DinD devbox VM (not inside a compose service).
 
     Wraps with ``sh -c`` so shell features (pipes, &&, redirects) work.
-    Returns ``(exit_code, stdout, stderr)``.
+    Returns ``(exit_code, stdout, stderr)``. Internal callers keep
+    ``raise_on_truncation=False`` (a long ``docker build`` log is fine to
+    truncate); the user-facing ``exec`` path sets it so an over-limit command
+    raises ``OutputLimitExceededError`` instead of silently dropping output.
     """
     wrapped = f"sh -c {shlex.quote(command)}"
-    # Submit once (retried on transient errors), then poll ourselves — the
-    # SDK's long-poll await has a server-side minimum wait that doesn't respect
-    # short user timeouts.
-    execution_id = await _submit_vm_exec(client, devbox_id, wrapped)
-    response = await poll_execution(
-        client, devbox_id, execution_id, timeout, last_n=EXEC_LAST_N
+    # Stable command_id (generated once) lets a retried submit dedupe.
+    command_id = str(uuid7())
+    response = await execute_with_poll(
+        client, devbox_id, wrapped, command_id, timeout, last_n=EXEC_LAST_N
     )
+    if raise_on_truncation:
+        _verify_exec_output_size(response)
     return (
         response.exit_status if response.exit_status is not None else 0,
         response.stdout or "",
@@ -148,10 +144,13 @@ async def compose_exec(
     *,
     env: dict[str, str] | None = None,
     timeout: int | None = 60,
+    raise_on_truncation: bool = False,
 ) -> tuple[int, str, str]:
     """Run a ``docker compose`` subcommand on the DinD Devbox.
 
-    Returns (exit_code, stdout, stderr).
+    Returns (exit_code, stdout, stderr). ``raise_on_truncation`` is forwarded to
+    ``vm_exec`` so a user-facing ``exec`` whose output overflows raises rather
+    than silently truncating.
     """
     parts = [
         "sudo",
@@ -171,7 +170,13 @@ async def compose_exec(
         prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
         cmd = f"{prefix} {cmd}"
 
-    return await vm_exec(project.client, project.devbox_id, cmd, timeout=timeout)
+    return await vm_exec(
+        project.client,
+        project.devbox_id,
+        cmd,
+        timeout=timeout,
+        raise_on_truncation=raise_on_truncation,
+    )
 
 
 async def _wait_for_docker_daemon(client: AsyncRunloop, devbox_id: str) -> None:
@@ -235,132 +240,46 @@ async def _wait_for_services(
     )
 
 
+@standard_retry
 async def _upload_file(
     client: AsyncRunloop, devbox_id: str, remote_path: str, data: bytes
 ) -> None:
-    """Upload a single file to the devbox. Creates parent directories as needed.
+    """Upload a single file to the devbox, creating parent directories as needed.
 
-    Small files round-trip via base64-over-shell (one exec call); files at or
-    above ``LARGE_FILE_THRESHOLD`` go through the Runloop Objects API to avoid
-    the request-body cap on the exec endpoint.
+    ``upload_file`` sends binary content of any size via multipart form data but
+    writes only the file, so the parent directory is created first.
     """
-    if len(data) >= LARGE_FILE_THRESHOLD:
-        await _upload_file_via_object(client, devbox_id, remote_path, data)
-        return
-    await _upload_file_via_shell(client, devbox_id, remote_path, data)
+    parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else ""
+    if parent:
+        await vm_exec(
+            client,
+            devbox_id,
+            f"mkdir -p {shlex.quote(parent)}",
+            timeout=FILE_REQUEST_TIMEOUT,
+        )
+    try:
+        await client.devboxes.upload_file(
+            devbox_id, path=remote_path, file=data, timeout=FILE_REQUEST_TIMEOUT
+        )
+    except BadRequestError as e:
+        _raise_filesystem_error(e, remote_path)
 
 
 @standard_retry
-async def _upload_file_via_shell(
-    client: AsyncRunloop, devbox_id: str, remote_path: str, data: bytes
-) -> None:
-    encoded = base64.b64encode(data).decode("ascii")
-    parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else ""
-    mkdir = f"mkdir -p {shlex.quote(parent)} && " if parent else ""
-    cmd = f"{mkdir}echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(remote_path)}"
-    exit_code, _, stderr = await vm_exec(
-        client, devbox_id, cmd, timeout=FILE_REQUEST_TIMEOUT
-    )
-    if exit_code != 0:
-        raise RuntimeError(
-            f"Failed to upload {remote_path}: exit={exit_code} stderr={stderr!r}"
-        )
-
-
-async def _upload_file_via_object(
-    client: AsyncRunloop, devbox_id: str, remote_path: str, data: bytes
-) -> None:
-    """Route the bytes through a Runloop Object (presigned PUT + devbox curl)."""
-    obj = await client.objects.create(
-        content_type="binary",
-        name=f"inspect-vmwrite-{uuid.uuid4().hex[:12]}",
-    )
-    if obj.upload_url is None:
-        raise RuntimeError("Runloop did not return an upload URL for the write Object.")
-    try:
-        async with httpx.AsyncClient(timeout=FILE_REQUEST_TIMEOUT) as http:
-            put = await http.put(obj.upload_url, content=data)
-            put.raise_for_status()
-        await client.objects.complete(obj.id)
-        download = await client.objects.download(obj.id)
-        parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else ""
-        mkdir = f"mkdir -p {shlex.quote(parent)} && " if parent else ""
-        cmd = f"{mkdir}{_devbox_download_command(download.download_url, remote_path)}"
-        exit_code, _, stderr = await vm_exec(
-            client, devbox_id, cmd, timeout=FILE_REQUEST_TIMEOUT
-        )
-        if exit_code != 0:
-            raise RuntimeError(
-                f"Failed to upload {remote_path}: exit={exit_code} stderr={stderr!r}"
-            )
-    finally:
-        try:
-            await client.objects.delete(obj.id)
-        except Exception:
-            pass
-
-
 async def _download_file(
-    client: AsyncRunloop, devbox_id: str, remote_path: str, *, size: int
+    client: AsyncRunloop, devbox_id: str, remote_path: str
 ) -> bytes:
     """Download a single file from the devbox.
 
-    Small files round-trip via base64-over-shell (one exec call); files at or
-    above ``LARGE_FILE_THRESHOLD`` go through the Runloop Objects API.
+    ``download_file`` streams binary content of any size.
     """
-    if size >= LARGE_FILE_THRESHOLD:
-        return await _download_file_via_object(client, devbox_id, remote_path)
-    return await _download_file_via_shell(client, devbox_id, remote_path)
-
-
-@standard_retry
-async def _download_file_via_shell(
-    client: AsyncRunloop, devbox_id: str, remote_path: str
-) -> bytes:
-    exit_code, stdout, stderr = await vm_exec(
-        client,
-        devbox_id,
-        f"base64 -w 0 {shlex.quote(remote_path)}",
-        timeout=FILE_REQUEST_TIMEOUT,
-    )
-    if exit_code != 0:
-        raise RuntimeError(
-            f"Failed to read {remote_path}: exit={exit_code} stderr={stderr!r}"
-        )
-    return base64.b64decode(stdout.strip())
-
-
-async def _download_file_via_object(
-    client: AsyncRunloop, devbox_id: str, remote_path: str
-) -> bytes:
-    """Route the bytes through a Runloop Object (devbox curls PUT, we GET)."""
-    obj = await client.objects.create(
-        content_type="binary",
-        name=f"inspect-vmread-{uuid.uuid4().hex[:12]}",
-    )
-    if obj.upload_url is None:
-        raise RuntimeError("Runloop did not return an upload URL for the read Object.")
     try:
-        cmd = _devbox_upload_command(remote_path, obj.upload_url)
-        exit_code, _, stderr = await vm_exec(
-            client, devbox_id, cmd, timeout=FILE_REQUEST_TIMEOUT
+        response = await client.devboxes.download_file(
+            devbox_id, path=remote_path, timeout=FILE_REQUEST_TIMEOUT
         )
-        if exit_code != 0:
-            raise RuntimeError(
-                f"Failed to upload {remote_path} to object store: "
-                f"exit={exit_code} stderr={stderr!r}"
-            )
-        await client.objects.complete(obj.id)
-        download = await client.objects.download(obj.id)
-        async with httpx.AsyncClient(timeout=FILE_REQUEST_TIMEOUT) as http:
-            response = await http.get(download.download_url)
-            response.raise_for_status()
-            return response.content
-    finally:
-        try:
-            await client.objects.delete(obj.id)
-        except Exception:
-            pass
+    except BadRequestError as e:
+        _raise_filesystem_error(e, remote_path)
+    return await response.read()
 
 
 async def _upload_directory(
@@ -444,23 +363,24 @@ async def _ensure_dind_blueprint(
 ) -> str:
     """Build (or reuse cached) DinD blueprint. Returns the blueprint name."""
     name = _dind_blueprint_name(launch_parameters)
-    if await _find_or_await_blueprint(client, name):
-        logger.debug("Using existing DinD blueprint: %s", name)
-        return name
-    # POST without SDK retries: Runloop's blueprint create is not idempotent,
-    # so retries spawn duplicate blueprints (and blow the account cap).
-    # Polling uses the default client so transient retrieve errors are still
-    # retried.
-    blueprint = await client.with_options(max_retries=0).blueprints.create(
-        name=name,
-        dockerfile=_DIND_DOCKERFILE,
-        launch_parameters=launch_parameters or {},
-        idempotency_key=name,
-    )
-    await client.blueprints.await_build_complete(
-        blueprint.id, polling_config=_BLUEPRINT_POLLING_CONFIG
-    )
-    logger.debug("Built DinD blueprint: %s", name)
+    async with blueprint_build_lock(name):
+        if await _find_or_await_blueprint(client, name):
+            logger.debug("Using existing DinD blueprint: %s", name)
+            return name
+        # POST without SDK retries: Runloop's blueprint create is not
+        # idempotent, so retries spawn duplicate blueprints (and blow the
+        # account cap). Polling uses the default client so transient retrieve
+        # errors are still retried.
+        blueprint = await client.with_options(max_retries=0).blueprints.create(
+            name=name,
+            dockerfile=_DIND_DOCKERFILE,
+            launch_parameters=launch_parameters or {},
+            idempotency_key=name,
+        )
+        await client.blueprints.await_build_complete(
+            blueprint.id, polling_config=_BLUEPRINT_POLLING_CONFIG
+        )
+        logger.debug("Built DinD blueprint: %s", name)
     return name
 
 
@@ -501,6 +421,7 @@ async def create_dind_project(
     create_kwargs: dict[str, object] = {
         "blueprint_name": blueprint_name,
         "metadata": metadata,
+        "polling_config": DEVBOX_CREATE_POLLING_CONFIG,
     }
     if name is not None:
         create_kwargs["name"] = name

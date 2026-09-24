@@ -1312,6 +1312,7 @@ dependencies = [
     { name = "modal" },
     { name = "runloop-api-client" },
     { name = "tenacity" },
+    { name = "uuid-utils" },
 ]
 
 [package.dev-dependencies]
@@ -1350,6 +1351,7 @@ requires-dist = [
     { name = "modal", specifier = ">=1.5.0" },
     { name = "runloop-api-client", specifier = ">=1.20" },
     { name = "tenacity", specifier = ">=9.1.4" },
+    { name = "uuid-utils", specifier = ">=0.11.0" },
 ]
 
 [package.metadata.requires-dev]

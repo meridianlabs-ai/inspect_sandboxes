@@ -40,7 +40,7 @@ from ._dind_project import (
     discover_working_dir,
     vm_exec,
 )
-from ._retry import run_with_timeout_retry
+from ._retry import run_with_timeout_retry, shutdown_devbox
 
 logger = getLogger(__name__)
 
@@ -162,7 +162,7 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
         project = any_env.project
         try:
             await destroy_dind_project(project)
-            await project.client.devboxes.shutdown(project.devbox_id)
+            await shutdown_devbox(project.client, project.devbox_id)
         except NotFoundError:
             pass  # already gone
         except Exception as e:
@@ -220,7 +220,7 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
 
         async def _run(t: int | None) -> ExecResult[str]:
             exit_code, stdout, stderr = await compose_exec(
-                self.project, exec_cmd, timeout=t
+                self.project, exec_cmd, timeout=t, raise_on_truncation=True
             )
             return ExecResult(
                 success=exit_code == 0,
@@ -289,7 +289,7 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
     async def read_file(self, file: str, text: bool = True) -> str | bytes:
         """Two-hop read: docker compose cp from container -> read from VM."""
         file = self._container_file(file)
-        size = await self._verify_read_size(file)
+        await self._verify_read_size(file)
 
         temp = f"/tmp/.inspect-read-{uuid.uuid4().hex}"
         try:
@@ -308,14 +308,16 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
                     f"docker compose cp from {self.service}:{file} failed: {stderr}"
                 )
             data_bytes = await _download_file(
-                self.project.client, self.project.devbox_id, temp, size=size
+                self.project.client, self.project.devbox_id, temp
             )
         finally:
+            # The temp was created by a sudo'd ``docker compose cp``, so it's
+            # root-owned; remove it as root or it leaks in sticky /tmp.
             try:
                 await vm_exec(
                     self.project.client,
                     self.project.devbox_id,
-                    f"rm -f {shlex.quote(temp)}",
+                    f"sudo rm -f {shlex.quote(temp)}",
                     timeout=10,
                 )
             except Exception:
