@@ -5,9 +5,11 @@ uv.lock: the tier-2 opt-in, meridianlabs-ai/agents
 design/executed-paths-residual.md), and Build runs it on every same-repo PR.
 So no Build job that runs anything from the checkout holds a write
 permission or leaves the job token in .git/config; the coverage writes run
-where nothing from the checkout does; the required check names stay as the
-`main` ruleset lists them; and py-build refuses a uv.lock that installs from
-anywhere but PyPI or this repository.
+where nothing from the checkout does; and the required check names stay as
+the `main` ruleset lists them. The main-only `coverage` job holds a write
+token, so it reads no coverage configuration from the checkout (which could
+name a plugin to import) and takes nothing from py-test's artifact but a
+single regular `.coverage` file (which could otherwise carry `.git/config`).
 
 The Claude stubs opt in to tier 2 on every job that calls a reusable workflow
 declaring `allow_build_config`; the reviewer's takes no such input.
@@ -15,6 +17,7 @@ declaring `allow_build_config`; the reviewer's takes no such input.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +29,8 @@ import yaml
 ROOT = Path(__file__).parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 BUILD = WORKFLOWS / "build.yaml"
-LOCK_STEP = "Check uv.lock package sources"
+COVERAGE_ACTION = "py-cov-action/python-coverage-comment-action@"
+TAKE_STEP = "Take only the coverage data file"
 
 # The `main` ruleset's required checks from build.yaml (the other one,
 # `lint / lint`, is pr-title-lint.yml's).
@@ -43,10 +47,23 @@ def _load(path: Path) -> dict[Any, Any]:
 
 
 def _runs_checkout_code(job: dict[str, Any]) -> bool:
-    return any(
-        "run" in step or str(step.get("uses", "")).startswith("./")
-        for step in job.get("steps", [])
-    )
+    """Whether a job runs anything the checkout or a producer job controls.
+
+    A `run` step counts unless it is the artifact filter, whose behaviour the
+    tests below pin; the coverage action counts unless coverage reads no
+    configuration (the checkout's could name a plugin to import).
+    """
+    for step in job.get("steps", []):
+        uses = str(step.get("uses", ""))
+        if uses.startswith("./"):
+            return True
+        if "run" in step and step.get("name") != TAKE_STEP:
+            return True
+        if uses.startswith(COVERAGE_ACTION) and (
+            step.get("env", {}).get("COVERAGE_RCFILE") != "/dev/null"
+        ):
+            return True
+    return False
 
 
 def _writes(permissions: dict[str, str]) -> set[str]:
@@ -98,7 +115,7 @@ def test_coverage_writes_run_nothing_from_the_pr() -> None:
 
     The workflow_run workflow posts the stored comment without a checkout,
     and main's data branch is written by a job that runs only the coverage
-    action.
+    action, on a file taken from outside the checkout.
     """
     build = _load(BUILD)
     py_test = {s.get("id", s.get("name")): s for s in build["jobs"]["py-test"]["steps"]}
@@ -114,15 +131,17 @@ def test_coverage_writes_run_nothing_from_the_pr() -> None:
     assert coverage["if"] == (
         "github.event_name == 'push' && github.ref == 'refs/heads/main'"
     )
-    assert [s["uses"].split("@")[0] for s in coverage["steps"]] == [
+    assert [s.get("uses", s.get("name")).split("@")[0] for s in coverage["steps"]] == [
         "actions/checkout",
         "actions/download-artifact",
+        TAKE_STEP,
         "py-cov-action/python-coverage-comment-action",
     ]
-    assert (
-        coverage["steps"][1]["with"]["name"]
-        == py_test["Store the coverage data"]["with"]["name"]
-    )
+    download = coverage["steps"][1]["with"]
+    assert download["name"] == py_test["Store the coverage data"]["with"]["name"]
+    assert download["path"] == "${{ runner.temp }}/coverage-data"
+    assert coverage["steps"][2]["env"]["ARTIFACT"] == download["path"]
+    assert coverage["steps"][3]["env"] == {"COVERAGE_RCFILE": "/dev/null"}
 
     comment = _load(WORKFLOWS / "coverage-comment.yml")
     # PyYAML reads the `on:` key as True.
@@ -136,68 +155,197 @@ def test_coverage_writes_run_nothing_from_the_pr() -> None:
     assert step["with"]["GITHUB_PR_RUN_ID"] == "${{ github.event.workflow_run.id }}"
 
 
-def _check_lock(tmp_path: Path, lock: str) -> subprocess.CompletedProcess[str]:
-    steps = {s.get("name"): s for s in _load(BUILD)["jobs"]["py-build"]["steps"]}
-    step = steps[LOCK_STEP]
-    assert step["shell"] == "python3 {0}"
-    (tmp_path / "uv.lock").write_text(lock)
+def _coverage_step() -> dict[str, Any]:
+    (step,) = [
+        s
+        for s in _load(BUILD)["jobs"]["coverage"]["steps"]
+        if str(s.get("uses", "")).startswith(COVERAGE_ACTION)
+    ]
+    return step
+
+
+HOSTILE_PLUGIN = """
+import os
+import pathlib
+
+pathlib.Path(os.environ["PROBE_MARKER"]).write_text("imported")
+
+
+def coverage_init(reg, options):
+    pass
+"""
+
+
+def _hostile_checkout(tmp_path: Path) -> Path:
+    """A checkout whose coverage configuration imports a planted plugin."""
+    from coverage import CoverageData
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "pyproject.toml").write_text(
+        '[tool.coverage.run]\nplugins = ["review_probe"]\n'
+    )
+    (checkout / "review_probe.py").write_text(HOSTILE_PLUGIN)
+    (checkout / "mod.py").write_text("x = 1\n")
+    data = CoverageData(basename=str(checkout / ".coverage"))
+    data.add_lines({"mod.py": [1]})
+    data.write()
+    return checkout
+
+
+# The coverage commands the action runs in the checkout (v3's coverage.py).
+ACTION_COVERAGE_COMMANDS = [
+    ["json", "-o", "-"],
+    ["html", "--skip-empty", "--directory", "htmlcov"],
+    ["report", "--format=markdown", "--show-missing"],
+]
+
+
+def _coverage(
+    checkout: Path, args: list[str], env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    # The console script, as the action calls it: `coverage ...` in the checkout.
     return subprocess.run(
-        [sys.executable, "-c", step["run"]],
-        cwd=tmp_path,
+        [str(Path(sys.executable).parent / "coverage"), *args],
+        cwd=checkout,
+        env={**os.environ, **env},
         capture_output=True,
         text=True,
     )
 
 
-def test_lock_source_check_runs_before_the_checkout_code() -> None:
-    steps = _load(BUILD)["jobs"]["py-build"]["steps"]
-    assert steps[0]["uses"].startswith("actions/checkout@")
-    assert steps[1]["name"] == LOCK_STEP
+def test_a_planted_coverage_plugin_would_load_without_the_override(
+    tmp_path: Path,
+) -> None:
+    """The control: the checkout's configuration alone imports the plugin."""
+    checkout = _hostile_checkout(tmp_path)
+    marker = tmp_path / "marker"
+
+    result = _coverage(checkout, ["json", "-o", "-"], {"PROBE_MARKER": str(marker)})
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
 
 
-def test_lock_source_check_passes_this_repository(tmp_path: Path) -> None:
-    result = _check_lock(tmp_path, (ROOT / "uv.lock").read_text())
+@pytest.mark.parametrize("args", ACTION_COVERAGE_COMMANDS, ids=lambda a: a[0])
+def test_the_coverage_writer_imports_no_planted_plugin(
+    tmp_path: Path, args: list[str]
+) -> None:
+    checkout = _hostile_checkout(tmp_path)
+    marker = tmp_path / "marker"
+    env = {**_coverage_step()["env"], "PROBE_MARKER": str(marker)}
+
+    result = _coverage(checkout, args, env)
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    if args[0] == "json":
+        assert "mod.py" in result.stdout
+
+
+def _take(
+    tmp_path: Path, build_artifact: Any
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    steps = {s.get("name"): s for s in _load(BUILD)["jobs"]["coverage"]["steps"]}
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    workspace = tmp_path / "workspace"
+    (workspace / ".git").mkdir(parents=True)
+    (workspace / ".git" / "config").write_text("[core]\n")
+    build_artifact(artifact, workspace)
+    result = subprocess.run(
+        ["bash", "-e", "-c", steps[TAKE_STEP]["run"]],
+        cwd=workspace,
+        env={**os.environ, "ARTIFACT": str(artifact)},
+        capture_output=True,
+        text=True,
+    )
+    return result, workspace
+
+
+def test_the_coverage_writer_takes_a_lone_coverage_file(tmp_path: Path) -> None:
+    def build(artifact: Path, workspace: Path) -> None:
+        (artifact / ".coverage").write_bytes(b"SQLite format 3\x00data")
+
+    result, workspace = _take(tmp_path, build)
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (workspace / ".coverage").read_bytes() == b"SQLite format 3\x00data"
+    assert (workspace / ".git" / "config").read_text() == "[core]\n"
 
 
-PYPI_PACKAGE = """
-[[package]]
-name = "six"
-version = "1.17.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/six-1.17.0.tar.gz", hash = "sha256:ff" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4f" },
-]
-"""
+def test_the_coverage_writer_replaces_a_link_in_the_checkout(tmp_path: Path) -> None:
+    def build(artifact: Path, workspace: Path) -> None:
+        (artifact / ".coverage").write_bytes(b"data")
+        (workspace / ".coverage").symlink_to(".git/config")
+
+    result, workspace = _take(tmp_path, build)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (workspace / ".coverage").is_symlink()
+    assert (workspace / ".coverage").read_bytes() == b"data"
+    assert (workspace / ".git" / "config").read_text() == "[core]\n"
+
+
+def _extra_git_config(artifact: Path, workspace: Path) -> None:
+    (artifact / ".coverage").write_bytes(b"data")
+    (artifact / ".git").mkdir()
+    (artifact / ".git" / "config").write_text(
+        "[core]\n\tfsmonitor = sh ./review-monitor.sh\n"
+    )
+    (artifact / "review-monitor.sh").write_text("touch pwned\n")
+
+
+def _extra_file(artifact: Path, workspace: Path) -> None:
+    (artifact / ".coverage").write_bytes(b"data")
+    (artifact / "review-monitor.sh").write_text("touch pwned\n")
+
+
+def _directory(artifact: Path, workspace: Path) -> None:
+    (artifact / ".coverage").mkdir()
+    (artifact / ".coverage" / "config").write_text("[core]\n")
+
+
+def _link(artifact: Path, workspace: Path) -> None:
+    (artifact / "data").write_bytes(b"data")
+    (artifact / ".coverage").symlink_to("data")
+
+
+def _link_alone(artifact: Path, workspace: Path) -> None:
+    (artifact / ".coverage").symlink_to(workspace / ".git" / "config")
+
+
+def _empty(artifact: Path, workspace: Path) -> None:
+    pass
+
+
+def _other_name(artifact: Path, workspace: Path) -> None:
+    (artifact / "coverage.xml").write_text("<coverage/>")
 
 
 @pytest.mark.parametrize(
-    "package",
+    "build",
     [
-        'source = { registry = "https://example.com/simple" }',
-        'source = { git = "https://github.com/x/y?rev=main#abc" }',
-        'source = { url = "https://example.com/y-1.0.tar.gz" }',
-        'source = { path = "vendor/y-1.0.whl" }',
-        'source = { directory = "vendor/y" }',
-        'source = { editable = "vendor/y" }',
-        'source = { virtual = "." }',
-        "",
-        'source = { registry = "https://pypi.org/simple" }\n'
-        'wheels = [{ url = "https://example.com/y-1.0-py3-none-any.whl", hash = "sha256:00" }]',
-        'source = { registry = "https://pypi.org/simple" }\n'
-        'sdist = { path = "y-1.0.tar.gz", hash = "sha256:00" }',
+        _extra_git_config,
+        _extra_file,
+        _directory,
+        _link,
+        _link_alone,
+        _empty,
+        _other_name,
     ],
+    ids=lambda f: f.__name__.lstrip("_"),
 )
-def test_lock_source_check_refuses_other_sources(tmp_path: Path, package: str) -> None:
-    lock = f'version = 1\n{PYPI_PACKAGE}\n[[package]]\nname = "y"\nversion = "1.0"\n{package}\n'
-
-    result = _check_lock(tmp_path, lock)
+def test_the_coverage_writer_refuses_any_other_artifact(
+    tmp_path: Path, build: Any
+) -> None:
+    result, workspace = _take(tmp_path, build)
 
     assert result.returncode == 1
-    assert result.stdout.count("::error file=uv.lock::y 1.0: ") == 1, result.stdout
-    assert "six" not in result.stdout
+    assert "coverage-data must hold only a regular .coverage file" in result.stdout
+    assert not (workspace / ".coverage").exists()
+    assert not (workspace / "review-monitor.sh").exists()
+    assert (workspace / ".git" / "config").read_text() == "[core]\n"
 
 
 # The agents reusable workflows that declare `allow_build_config`.
