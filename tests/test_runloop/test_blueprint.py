@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -290,6 +291,59 @@ async def test_list_filtered_by_name(tmp_path: Any) -> None:
     list_kwargs = client.blueprints.list.call_args.kwargs
     assert list_kwargs["name"].startswith(BLUEPRINT_NAME_PREFIX)
     assert "status" not in list_kwargs
+
+
+@pytest.mark.asyncio
+async def test_deleted_blueprint_is_not_reused(tmp_path: Any) -> None:
+    """A ``build_complete`` blueprint in state ``deleted`` can't back a devbox.
+
+    Runloop keeps returning it by name, so we must ignore it and rebuild rather
+    than treat it as a cache hit.
+    """
+    df = tmp_path / "Dockerfile"
+    df.write_text("FROM python:3.12\n")
+    deleted = MagicMock()
+    deleted.id = "bp_deleted"
+    deleted.status = "build_complete"
+    deleted.state = "deleted"
+    client = _make_client(list_items=[deleted])
+
+    with _patch_httpx_put():
+        await build_blueprint_for_dockerfile(client, str(df))
+
+    client.blueprints.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_image_builds_create_blueprint_once() -> None:
+    """Concurrent builds of the same blueprint create it once.
+
+    Runloop's ``blueprints.create`` isn't name-idempotent, so without an
+    in-process lock each racing ``sample_init`` would create its own duplicate.
+    """
+    client = _make_client(list_items=[])
+    server: list[Any] = []
+
+    def _list(**_kwargs: Any) -> MagicMock:
+        return _make_paginator(list(server))
+
+    async def _create(**_kwargs: Any) -> MagicMock:
+        bp = MagicMock()
+        bp.id = "bp_new"
+        bp.status = "build_complete"
+        bp.state = "created"
+        server.append(bp)
+        return bp
+
+    client.blueprints.list = MagicMock(side_effect=_list)
+    client.blueprints.create = AsyncMock(side_effect=_create)
+
+    await asyncio.gather(
+        build_blueprint_for_image(client, "python:3.11-locktest"),
+        build_blueprint_for_image(client, "python:3.11-locktest"),
+    )
+
+    client.blueprints.create.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,7 @@ from runloop_api_client import (
     PermissionDeniedError,
     UnprocessableEntityError,
 )
+from runloop_api_client.lib.polling import PollingConfig
 from runloop_api_client.types import DevboxAsyncExecutionDetailView
 from tenacity import (
     retry,
@@ -40,6 +41,11 @@ from tenacity import (
 )
 
 T = TypeVar("T")
+
+# Devbox provisioning (image pull + boot) can exceed the SDK's default poll
+# window (~2 min). Use a longer guardrail so a slow provision doesn't raise
+# PollingTimeout and leak a half-provisioned devbox before it's tracked.
+DEVBOX_CREATE_POLLING_CONFIG = PollingConfig(interval_seconds=2.0, timeout_seconds=300)
 
 _PERMANENT_EXCEPTIONS = (
     NotFoundError,
@@ -64,6 +70,16 @@ standard_retry = retry(
     retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
+
+
+@standard_retry
+async def shutdown_devbox(client: AsyncRunloop, devbox_id: str) -> None:
+    """Shut down a devbox, retrying transient API errors.
+
+    ``NotFoundError`` is permanent (see ``_is_retryable``) so it propagates to
+    the caller, which treats an already-gone devbox as success.
+    """
+    await client.devboxes.shutdown(devbox_id)
 
 
 def _is_retryable_for_exec(exc: BaseException) -> bool:
@@ -156,6 +172,65 @@ async def poll_execution(
             raise TimeoutError(f"Command timed out after {timeout} seconds")
         await _sleep_bounded(interval, deadline)
         interval = min(interval * 2, _POLL_INTERVAL_MAX)
+
+
+# `execute` waits up to this many seconds for the command to finish before
+# returning the still-running execution to poll (Runloop's server-side max).
+# The wait must be non-zero: `optimistic_timeout=0` makes Runloop return HTTP
+# 408 instead of the running execution.
+OPTIMISTIC_TIMEOUT_MAX = 25
+
+
+async def execute_with_poll(
+    client: AsyncRunloop,
+    devbox_id: str,
+    command: str,
+    command_id: str,
+    timeout: int | None,
+    *,
+    last_n: str,
+) -> DevboxAsyncExecutionDetailView:
+    """Submit a command via ``execute`` and return its completed execution.
+
+    ``execute`` waits up to ``optimistic_timeout`` for the command to finish
+    (the command is not killed if it overruns) and then returns the still-
+    running execution, which we poll for the rest of the timeout. The stable
+    ``command_id`` lets a retried submit dedupe rather than double-run.
+
+    An ``APITimeoutError`` propagates uncaught: the caller's retry resubmits
+    under the same ``command_id`` and reattaches to this still-running
+    execution, so killing it here would force a re-run instead.
+    """
+    # Bound the optimistic wait by the timeout so a short one still fires on
+    # schedule; it must stay non-zero (0 => HTTP 408).
+    optimistic_timeout = (
+        OPTIMISTIC_TIMEOUT_MAX
+        if timeout is None
+        else max(1, min(timeout, OPTIMISTIC_TIMEOUT_MAX))
+    )
+
+    @exec_retry
+    async def _submit() -> DevboxAsyncExecutionDetailView:
+        return await client.devboxes.execute(
+            devbox_id,
+            command=command,
+            command_id=command_id,
+            optimistic_timeout=optimistic_timeout,
+            last_n=last_n,
+        )
+
+    start = time.monotonic()
+    response = await _submit()
+    if response.status != "completed":
+        # Deduct the optimistic wait already spent so the total honors the
+        # timeout.
+        remaining = (
+            None if timeout is None else max(0, timeout - int(time.monotonic() - start))
+        )
+        response = await poll_execution(
+            client, devbox_id, response.execution_id, remaining, last_n=last_n
+        )
+    return response
 
 
 async def run_with_timeout_retry(

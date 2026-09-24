@@ -232,6 +232,39 @@ async def test_read_file_two_hop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_file_removes_root_owned_temp_with_sudo() -> None:
+    """Test read_file sudo-removes its temp — the compose-cp temp is root-owned."""
+    env = make_env(service="web")
+    env._is_directory = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    env._get_file_size = AsyncMock(return_value=100)  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "inspect_sandboxes.runloop._dind_env.compose_exec",
+            new_callable=AsyncMock,
+            return_value=(0, "", ""),
+        ),
+        patch(
+            "inspect_sandboxes.runloop._dind_env.vm_exec",
+            new_callable=AsyncMock,
+            return_value=(0, "", ""),
+        ) as mock_vm_exec,
+        patch(
+            "inspect_sandboxes.runloop._dind_env._download_file",
+            new_callable=AsyncMock,
+            return_value=b"data",
+        ),
+    ):
+        await env.read_file("/app/test.txt")
+
+    # The only vm_exec in read_file is the temp cleanup.
+    await_args = mock_vm_exec.await_args
+    assert await_args is not None
+    cleanup_cmd = await_args.args[2]
+    assert cleanup_cmd.startswith("sudo rm -f ")
+
+
+@pytest.mark.asyncio
 async def test_read_file_not_found() -> None:
     env = make_env()
     env._is_directory = AsyncMock(return_value=False)  # type: ignore[method-assign]

@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
-from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService, OutputLimitExceededError
 from inspect_sandboxes.runloop._dind_project import (
     RunloopDinDProject,
     _dind_blueprint_name,
@@ -20,18 +21,25 @@ from inspect_sandboxes.runloop._dind_project import (
     destroy_dind_project,
     vm_exec,
 )
-from inspect_sandboxes.runloop._single_env import LARGE_FILE_THRESHOLD
-from runloop_api_client import APIConnectionError
+from runloop_api_client import APIConnectionError, BadRequestError
 
 
 def _make_execution(
-    *, stdout: str = "", stderr: str = "", exit_status: int = 0
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    exit_status: int = 0,
+    stdout_truncated: bool = False,
+    stderr_truncated: bool = False,
 ) -> MagicMock:
     execution = MagicMock()
     execution.stdout = stdout
     execution.stderr = stderr
     execution.exit_status = exit_status
     execution.status = "completed"
+    execution.execution_id = "exec-1"
+    execution.stdout_truncated = stdout_truncated
+    execution.stderr_truncated = stderr_truncated
     return execution
 
 
@@ -47,13 +55,18 @@ def make_mock_client() -> MagicMock:
     client = MagicMock()
     client.devboxes = MagicMock()
     completed = _make_execution(stdout="ok")
+    # vm_exec submits via execute; poll_execution then polls executions.retrieve.
+    client.devboxes.execute = AsyncMock(return_value=completed)
     client.devboxes.execute_and_await_completion = AsyncMock(return_value=completed)
-    client.devboxes.execute_async = AsyncMock(return_value=completed)
     client.devboxes.executions = MagicMock()
     client.devboxes.executions.retrieve = AsyncMock(return_value=completed)
     client.devboxes.executions.kill = AsyncMock()
     client.devboxes.create_and_await_running = AsyncMock()
     client.devboxes.shutdown = AsyncMock()
+    client.devboxes.upload_file = AsyncMock()
+    download_response = MagicMock()
+    download_response.read = AsyncMock(return_value=b"")
+    client.devboxes.download_file = AsyncMock(return_value=download_response)
     client.blueprints = MagicMock()
     client.blueprints.list = MagicMock(return_value=_async_iter([]))
     created_bp = MagicMock()
@@ -80,7 +93,7 @@ def make_mock_project(client: MagicMock | None = None) -> RunloopDinDProject:
 async def test_vm_exec_wraps_with_sh_c() -> None:
     client = make_mock_client()
     await vm_exec(client, "dbx-1", "echo hello", timeout=10)
-    call_kwargs = client.devboxes.execute_async.await_args.kwargs
+    call_kwargs = client.devboxes.execute.await_args.kwargs
     assert call_kwargs["command"] == "sh -c 'echo hello'"
 
 
@@ -88,7 +101,7 @@ async def test_vm_exec_wraps_with_sh_c() -> None:
 async def test_vm_exec_returns_exit_code_and_output() -> None:
     client = make_mock_client()
     completed = _make_execution(stdout="hello", stderr="warn", exit_status=0)
-    client.devboxes.executions.retrieve = AsyncMock(return_value=completed)
+    client.devboxes.execute = AsyncMock(return_value=completed)
     exit_code, stdout, stderr = await vm_exec(client, "dbx-1", "echo hello")
     assert exit_code == 0
     assert stdout == "hello"
@@ -99,8 +112,8 @@ async def test_vm_exec_returns_exit_code_and_output() -> None:
 async def test_vm_exec_polls_without_resubmitting() -> None:
     """A transient error mid-poll is tolerated: the command is submitted once."""
     client = make_mock_client()
-    client.devboxes.execute_async = AsyncMock(
-        return_value=MagicMock(execution_id="exec-1")
+    client.devboxes.execute = AsyncMock(
+        return_value=MagicMock(execution_id="exec-1", status="running")
     )
     client.devboxes.executions.retrieve = AsyncMock(
         side_effect=[
@@ -112,8 +125,24 @@ async def test_vm_exec_polls_without_resubmitting() -> None:
     exit_code, _, _ = await vm_exec(client, "dbx-1", "echo hi", timeout=60)
 
     assert exit_code == 0
-    assert client.devboxes.execute_async.await_count == 1
+    assert client.devboxes.execute.await_count == 1
     assert client.devboxes.executions.retrieve.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_vm_exec_raises_on_truncation_only_when_requested() -> None:
+    """User-facing exec surfaces truncation; internal callers tolerate it."""
+    client = make_mock_client()
+    truncated = _make_execution(stdout="tail", exit_status=0, stdout_truncated=True)
+    client.devboxes.execute = AsyncMock(return_value=truncated)
+
+    # Internal callers (default) tolerate a truncated log (e.g. docker build).
+    exit_code, _, _ = await vm_exec(client, "dbx-1", "docker build .")
+    assert exit_code == 0
+
+    # The user-facing exec path raises instead of silently dropping output.
+    with pytest.raises(OutputLimitExceededError):
+        await vm_exec(client, "dbx-1", "cat big.txt", raise_on_truncation=True)
 
 
 @pytest.mark.asyncio
@@ -152,81 +181,62 @@ async def test_compose_exec_inlines_env_vars() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upload_file_large_uses_object_api() -> None:
-    """Files at/above LARGE_FILE_THRESHOLD route through the Objects API."""
+async def test_upload_file_creates_parent_dir() -> None:
+    """_upload_file mkdirs the parent, then sends the bytes via the SDK upload_file."""
     client = make_mock_client()
-    obj = MagicMock(id="obj-up", upload_url="https://upload.example/put")
-    download = MagicMock(download_url="https://download.example/get")
-    client.objects = MagicMock()
-    client.objects.create = AsyncMock(return_value=obj)
-    client.objects.complete = AsyncMock()
-    client.objects.download = AsyncMock(return_value=download)
-    client.objects.delete = AsyncMock()
+    payload = b"\x00" * (8 * 1024 * 1024)  # any size — no argv/base64 cap
+    with patch(
+        "inspect_sandboxes.runloop._dind_project.vm_exec",
+        new_callable=AsyncMock,
+        return_value=(0, "", ""),
+    ) as mock_vm:
+        await _upload_file(client, "dbx-1", "/home/user/dir/big.bin", payload)
 
-    big = b"\x00" * LARGE_FILE_THRESHOLD
-    with (
-        patch(
-            "inspect_sandboxes.runloop._dind_project.vm_exec",
-            new_callable=AsyncMock,
-            return_value=(0, "", ""),
-        ) as mock_vm,
-        patch(
-            "inspect_sandboxes.runloop._dind_project.httpx.AsyncClient"
-        ) as mock_http_cls,
-    ):
-        http = mock_http_cls.return_value.__aenter__.return_value
-        http.put = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
-        await _upload_file(client, "dbx-1", "/tmp/big.bin", big)
-
-    client.objects.create.assert_awaited_once()
-    http.put.assert_awaited_once_with("https://upload.example/put", content=big)
-    client.objects.complete.assert_awaited_once_with("obj-up")
-    cmd = mock_vm.call_args[0][2]
-    assert "curl" in cmd
-    assert "https://download.example/get" in cmd
-    assert "/tmp/big.bin" in cmd
-    client.objects.delete.assert_awaited_once_with("obj-up")
+    assert mock_vm.call_args[0][2] == "mkdir -p /home/user/dir"
+    upload_args = client.devboxes.upload_file.await_args
+    assert upload_args is not None
+    assert upload_args.kwargs["path"] == "/home/user/dir/big.bin"
+    assert upload_args.kwargs["file"] == payload
 
 
 @pytest.mark.asyncio
-async def test_download_file_large_uses_object_api() -> None:
-    """Files at/above LARGE_FILE_THRESHOLD route through the Objects API."""
+async def test_download_file_returns_bytes() -> None:
+    """_download_file streams the whole file back via the SDK download_file."""
     client = make_mock_client()
-    obj = MagicMock(id="obj-dn", upload_url="https://upload.example/put")
-    download = MagicMock(download_url="https://download.example/get")
-    client.objects = MagicMock()
-    client.objects.create = AsyncMock(return_value=obj)
-    client.objects.complete = AsyncMock()
-    client.objects.download = AsyncMock(return_value=download)
-    client.objects.delete = AsyncMock()
+    payload = b"\xff" * (8 * 1024 * 1024)
+    response = MagicMock()
+    response.read = AsyncMock(return_value=payload)
+    client.devboxes.download_file = AsyncMock(return_value=response)
 
-    payload = b"\xff" * LARGE_FILE_THRESHOLD
+    result = await _download_file(client, "dbx-1", "/tmp/big.bin")
+
+    assert result == payload
+    download_args = client.devboxes.download_file.await_args
+    assert download_args is not None
+    assert download_args.kwargs["path"] == "/tmp/big.bin"
+
+
+@pytest.mark.asyncio
+async def test_upload_file_maps_permission_error() -> None:
+    """A permission-denied 400 surfaces as PermissionError, not bare RuntimeError."""
+    client = make_mock_client()
+    http_response = httpx.Response(400, request=httpx.Request("POST", "https://x"))
+    client.devboxes.upload_file = AsyncMock(
+        side_effect=BadRequestError(
+            "bad",
+            response=http_response,
+            body={"message": "Permission denied: Permission denied (os error 13)"},
+        )
+    )
     with (
         patch(
             "inspect_sandboxes.runloop._dind_project.vm_exec",
             new_callable=AsyncMock,
             return_value=(0, "", ""),
-        ) as mock_vm,
-        patch(
-            "inspect_sandboxes.runloop._dind_project.httpx.AsyncClient"
-        ) as mock_http_cls,
+        ),
+        pytest.raises(PermissionError),
     ):
-        http = mock_http_cls.return_value.__aenter__.return_value
-        http.get = AsyncMock(
-            return_value=MagicMock(content=payload, raise_for_status=MagicMock())
-        )
-        result = await _download_file(
-            client, "dbx-1", "/tmp/big.bin", size=LARGE_FILE_THRESHOLD
-        )
-
-    assert result == payload
-    cmd = mock_vm.call_args[0][2]
-    assert "curl" in cmd
-    assert "--upload-file" in cmd
-    assert "/tmp/big.bin" in cmd
-    assert "https://upload.example/put" in cmd
-    http.get.assert_awaited_once_with("https://download.example/get")
-    client.objects.delete.assert_awaited_once_with("obj-dn")
+        await _upload_file(client, "dbx-1", "/root/denied", b"x")
 
 
 @pytest.mark.asyncio
