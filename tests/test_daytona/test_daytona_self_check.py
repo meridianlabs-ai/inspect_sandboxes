@@ -34,27 +34,8 @@ SANDBOX_CONFIGS = [
         id="single",
         config=None,
         xfails={
-            "test_exec_stderr": XFail(
-                "Daytona merges stdout+stderr; stderr always empty"
-            ),
-            "test_exec_stderr_utf": XFail(
-                "Daytona merges stdout+stderr; stderr always empty"
-            ),
             "test_exec_permission_error": XFail(
                 "exit code 126, not translated to PermissionError"
-            ),
-            "test_exec_output": XFail("Daytona strips trailing newline from output"),
-            "test_exec_env_vars": XFail(
-                "trailing newline stripped (env vars themselves work)"
-            ),
-            "test_write_text_file_without_permissions": XFail(
-                "Daytona returns 400, not 403 for write permission errors"
-            ),
-            "test_write_binary_file_without_permissions": XFail(
-                "Daytona returns 400, not 403 for write permission errors"
-            ),
-            "test_exec_as_user": XFail(
-                "adduser/useradd may not be available in default snapshot"
             ),
         },
     ),
@@ -62,23 +43,18 @@ SANDBOX_CONFIGS = [
         id="dind",
         config=dind_config(),
         xfails={
-            "test_exec_stderr": XFail(
-                "DinD routes through compose exec; stderr merged"
-            ),
-            "test_exec_stderr_utf": XFail(
-                "DinD routes through compose exec; stderr merged"
-            ),
             "test_exec_permission_error": XFail(
                 "exit code 126, not translated to PermissionError"
             ),
-            "test_exec_output": XFail("trailing newline stripped by compose exec"),
-            "test_exec_env_vars": XFail("trailing newline stripped"),
             "test_write_text_file_without_permissions": XFail("root user in container"),
             "test_write_binary_file_without_permissions": XFail(
                 "root user in container"
             ),
             "test_read_file_not_allowed": XFail("root user"),
-            "test_exec_as_user": XFail("adduser/useradd may not be available"),
+            "test_exec_large_command": XFail(
+                "vm_exec passes the whole VM command to sh -c as one argument,"
+                " capped at 128 KiB (MAX_ARG_STRLEN)"
+            ),
         },
     ),
 ]
