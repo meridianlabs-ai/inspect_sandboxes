@@ -614,3 +614,71 @@ async def test_connection_surfaces_declared_port(
     host = port.mappings[0]
     assert isinstance(host.host_ip, str) and host.host_ip, "expected a real host"
     assert host.host_port > 0
+
+
+@pytest.mark.asyncio
+async def test_multi_service_compose_skips_native_validation(
+    mock_client: MagicMock,
+    tmp_path: Any,
+) -> None:
+    """DinD runs Compose itself, so fields the native converter rejects must pass through."""
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("""
+services:
+  web:
+    image: python:3.12
+    volumes:
+      - ./data:/data
+    cap_drop:
+      - ALL
+  helper:
+    image: alpine:3.20
+""")
+    mock_dind_project = MagicMock()
+    mock_dind_project.sandbox.id = "sb-dind-123"
+    mock_envs = {
+        "web": DaytonaDinDServiceEnvironment(mock_dind_project, "web", "/app"),
+        "helper": DaytonaDinDServiceEnvironment(mock_dind_project, "helper", "/"),
+    }
+
+    with (
+        patch(
+            "inspect_sandboxes.daytona._daytona.AsyncDaytona", return_value=mock_client
+        ),
+        patch.object(
+            DaytonaDinDServiceEnvironment,
+            "sample_init_dind",
+            new_callable=AsyncMock,
+            return_value=mock_envs,
+        ) as mock_init_dind,
+    ):
+        await DaytonaSandboxEnvironment.task_init("test_task", None)
+        envs = await DaytonaSandboxEnvironment.sample_init(
+            "test_task", str(compose_file), {}
+        )
+
+    mock_init_dind.assert_called_once()
+    assert set(envs) == {"web", "helper"}
+
+
+@pytest.mark.asyncio
+async def test_single_service_compose_rejects_unsupported_fields(
+    mock_client: MagicMock,
+    tmp_path: Any,
+) -> None:
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("""
+services:
+  default:
+    image: python:3.12
+    volumes:
+      - ./data:/data
+""")
+    with patch(
+        "inspect_sandboxes.daytona._daytona.AsyncDaytona", return_value=mock_client
+    ):
+        await DaytonaSandboxEnvironment.task_init("test_task", None)
+        with pytest.raises(ValueError, match=r"services\.default\.volumes"):
+            await DaytonaSandboxEnvironment.sample_init(
+                "test_task", str(compose_file), {}
+            )
