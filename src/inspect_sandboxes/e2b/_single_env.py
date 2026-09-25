@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import errno
 import shlex
-import uuid
 from logging import getLogger
 from typing import Literal, overload
 
@@ -31,6 +30,12 @@ from inspect_ai.util._sandbox.environment import (
 )
 from typing_extensions import override
 
+from ._command import (
+    exceeds_inline_limit,
+    remove_files_command,
+    source_script_command,
+    temp_file_path,
+)
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
 
 logger = getLogger(__name__)
@@ -93,16 +98,51 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         E2B's commands.run() doesn't expose stdin in foreground mode, so we
         write *input* to a temp file inside the sandbox and pipe it via shell
         redirection — same approach Daytona uses.
-        """
-        stdin_file: str | None = None
-        if input is not None:
-            data = input.encode("utf-8") if isinstance(input, str) else input
-            stdin_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
-            await self._write_file_content(stdin_file, data)
-            command = self._build_stdin_command(cmd, stdin_file, cleanup=user is None)
-        else:
-            command = shlex.join(cmd)
 
+        commands.run() also passes the whole command line as a single
+        ``bash -l -c`` argument, which the kernel caps at 128 KiB, so a longer
+        command is staged in a temp script and sourced (see ``_command``).
+        Temp files are removed afterwards, as root, in the ``finally`` below.
+        """
+        temp_files: list[str] = []
+        try:
+            if input is not None:
+                data = input.encode("utf-8") if isinstance(input, str) else input
+                stdin_file = temp_file_path("stdin")
+                temp_files.append(stdin_file)
+                await self._write_file_content(stdin_file, data)
+                command = f"{shlex.join(cmd)} < {shlex.quote(stdin_file)}"
+            else:
+                command = shlex.join(cmd)
+
+            if exceeds_inline_limit(command):
+                script_file = temp_file_path("cmd")
+                temp_files.append(script_file)
+                await self._write_file_content(script_file, command.encode("utf-8"))
+                command = source_script_command(script_file)
+
+            return await self._run_command(
+                command,
+                cwd=cwd,
+                env=env,
+                user=user,
+                timeout=timeout,
+                timeout_retry=timeout_retry,
+            )
+        finally:
+            if temp_files:
+                await self._remove_temp_files(temp_files)
+
+    async def _run_command(
+        self,
+        command: str,
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        user: str | None,
+        timeout: int | None,
+        timeout_retry: bool,
+    ) -> ExecResult[str]:
         @exec_retry
         async def _run(t: int | None) -> ExecResult[str]:
             # E2B's commands.run raises CommandExitException on non-zero exit;
@@ -131,18 +171,17 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
                 stderr=result.stderr,
             )
 
+        return await run_with_timeout_retry(_run, timeout, timeout_retry)
+
+    async def _remove_temp_files(self, files: list[str]) -> None:
+        # Written as root (see _write_file_content), so removed as root; the
+        # exec user may not be allowed to delete them in sticky /tmp.
         try:
-            return await run_with_timeout_retry(_run, timeout, timeout_retry)
-        finally:
-            # When running as a non-default user, shell redirection runs in
-            # that user's context and may not be able to delete the temp file.
-            if stdin_file is not None and user is not None:
-                try:
-                    await self.sandbox.commands.run(
-                        f"rm -f {shlex.quote(stdin_file)}", timeout=10
-                    )
-                except SandboxException:
-                    pass
+            await self.sandbox.commands.run(
+                remove_files_command(files), user="root", timeout=10
+            )
+        except Exception as e:
+            trace_message(logger, "e2b", f"Could not remove temp files {files}: {e}")
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
@@ -219,14 +258,6 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             ports=ports,
             container=self.sandbox.sandbox_id,
         )
-
-    @staticmethod
-    def _build_stdin_command(cmd: list[str], stdin_file: str, *, cleanup: bool) -> str:
-        quoted = shlex.quote(stdin_file)
-        base = f"{shlex.join(cmd)} < {quoted}"
-        if cleanup:
-            return f"{base}; _ec=$?; rm -f {quoted}; exit $_ec"
-        return f"{base}; _ec=$?; exit $_ec"
 
     @staticmethod
     @standard_retry
