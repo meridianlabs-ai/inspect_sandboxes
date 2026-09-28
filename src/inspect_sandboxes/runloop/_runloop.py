@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import uuid
+from collections.abc import Iterable
 from contextvars import ContextVar
 from logging import getLogger
 from typing import Any
@@ -27,17 +29,51 @@ from typing_extensions import override
 
 from inspect_sandboxes._util.naming import make_sandbox_name
 
-from ._blueprint import build_blueprint_for_dockerfile, build_blueprint_for_image
+from ._blueprint import (
+    build_blueprint_for_dockerfile,
+    build_blueprint_for_image,
+    reset_blueprint_name_cache,
+)
 from ._compose import (
     RunloopSingleServiceParams,
     resolve_single_service_params,
 )
-from ._retry import DEVBOX_CREATE_POLLING_CONFIG
+from ._dind_project import dind_snapshot_ids, reset_dind_snapshot_cache
+from ._retry import DEVBOX_CREATE_POLLING_CONFIG, shutdown_devbox
 from ._single_env import RunloopSingleServiceEnvironment
 
 logger = getLogger(__name__)
 
 INSPECT_SANDBOX_METADATA = {"created_by": "inspect-ai"}
+
+# Bound on concurrent devbox shutdowns during cleanup. Large enough to drain a
+# big backlog quickly, small enough not to burst the API into rate limits.
+_CLEANUP_CONCURRENCY = 10
+
+
+async def _shutdown_all(
+    client: AsyncRunloop, devbox_ids: Iterable[str]
+) -> list[tuple[str, Exception]]:
+    """Shut down devboxes concurrently (bounded), returning per-id failures.
+
+    Each shutdown goes through the retried ``shutdown_devbox``; a
+    ``NotFoundError`` means the devbox is already gone and is not a failure.
+    """
+    semaphore = asyncio.Semaphore(_CLEANUP_CONCURRENCY)
+    failures: list[tuple[str, Exception]] = []
+
+    async def _one(devbox_id: str) -> None:
+        async with semaphore:
+            try:
+                await shutdown_devbox(client, devbox_id)
+            except NotFoundError:
+                pass  # already gone
+            except Exception as e:  # noqa: BLE001 — collected, not swallowed
+                failures.append((devbox_id, e))
+
+    await asyncio.gather(*(_one(devbox_id) for devbox_id in devbox_ids))
+    return failures
+
 
 # Page size for paginated list responses.
 _LIST_PAGE_LIMIT = 100
@@ -57,6 +93,8 @@ _run_id: ContextVar[str] = ContextVar("runloop_run_id")
 def _init_context() -> None:
     _running_sandboxes.set([])
     _run_id.set(uuid.uuid4().hex)
+    reset_blueprint_name_cache()
+    reset_dind_snapshot_cache()
 
 
 def _run_metadata(task_name: str | None = None) -> dict[str, str]:
@@ -303,61 +341,37 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
         if client is None:
             return
 
-        failed_ids: list[str] = []
-        deleted_ids: set[str] = set()
+        # First pass: tracked devboxes, shut down concurrently.
+        tracked = list(_running_sandboxes.get())
+        failures = await _shutdown_all(client, tracked)
+        attempted = set(tracked)
 
-        # First pass: tracked devboxes.
-        for devbox_id in _running_sandboxes.get().copy():
-            try:
-                await client.devboxes.shutdown(devbox_id)
-                deleted_ids.add(devbox_id)
-                trace_message(logger, "runloop", f"Shut down devbox {devbox_id}")
-            except NotFoundError:
-                # Already shut down (e.g. by sample_cleanup) — nothing to do.
-                deleted_ids.add(devbox_id)
-                trace_message(
-                    logger,
-                    "runloop",
-                    f"Devbox {devbox_id} already shut down, skipping.",
-                )
-            except Exception as e:
-                failed_ids.append(devbox_id)
-                logger.error(f"Failed to shut down devbox {devbox_id}: {e}")
-
-        # Second pass: orphans by run metadata.
-        try:
-            run_id = _run_id.get()
-        except LookupError:
-            run_id = ""
+        # Second pass: orphans by run metadata (skip ones already attempted).
+        run_id = _run_id.get("")
         if run_id:
             try:
                 orphans = await list_devboxes(client, {"inspect_run_id": run_id})
-                for devbox in orphans:
-                    if devbox.id in deleted_ids:
-                        continue
-                    try:
-                        await client.devboxes.shutdown(devbox.id)
-                        deleted_ids.add(devbox.id)
-                        trace_message(
-                            logger,
-                            "runloop",
-                            f"Shut down orphaned devbox {devbox.id}",
-                        )
-                    except NotFoundError:
-                        deleted_ids.add(devbox.id)
-                    except Exception as e:
-                        failed_ids.append(devbox.id)
-                        logger.error(
-                            f"Failed to shut down orphaned devbox {devbox.id}: {e}"
-                        )
+                orphan_ids = [d.id for d in orphans if d.id not in attempted]
+                failures += await _shutdown_all(client, orphan_ids)
             except Exception as e:
                 logger.warning(f"Failed to list devboxes for cleanup: {e}")
 
-        if failed_ids:
+        for devbox_id, error in failures:
+            logger.error(f"Failed to shut down devbox {devbox_id}: {error}")
+        if failures:
+            failed_ids = [devbox_id for devbox_id, _ in failures]
             logger.warning(
                 f"Failed to cleanup {len(failed_ids)} devbox(es). "
                 f"Failed IDs: {', '.join(failed_ids)}"
             )
+
+        # Delete the DinD stack snapshots built this run so they don't
+        # accumulate against the account's snapshot cap.
+        for snapshot_id in dind_snapshot_ids():
+            try:
+                await client.devboxes.delete_disk_snapshot(snapshot_id)
+            except Exception as e:  # noqa: BLE001 — best-effort cleanup
+                logger.warning(f"Failed to delete snapshot {snapshot_id}: {e}")
 
         _running_sandboxes.get().clear()
         await client.close()
@@ -406,21 +420,16 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
                     print("Cancelled.")
                     return
 
-            success_count = 0
-            failure_count = 0
-            for devbox in devboxes:
-                try:
-                    await client.devboxes.shutdown(devbox.id)
-                    success_count += 1
-                except Exception as e:
-                    print(
-                        f"[yellow]Error shutting down devbox {devbox.id}: {e}[/yellow]"
-                    )
-                    failure_count += 1
+            failures = await _shutdown_all(client, [devbox.id for devbox in devboxes])
+            for devbox_id, error in failures:
+                print(
+                    f"[yellow]Error shutting down devbox {devbox_id}: {error}[/yellow]"
+                )
 
+            success_count = len(devboxes) - len(failures)
             print(f"\n[green]Successfully shut down: {success_count}[/green]")
-            if failure_count > 0:
-                print(f"[red]Failed to shut down: {failure_count}[/red]")
+            if failures:
+                print(f"[red]Failed to shut down: {len(failures)}[/red]")
                 sys.exit(1)
             else:
                 print("Complete.")

@@ -36,6 +36,7 @@ import os
 import tarfile
 import tempfile
 from collections.abc import AsyncIterator, Iterator
+from contextvars import ContextVar
 from logging import getLogger
 from pathlib import Path
 from typing import IO
@@ -68,8 +69,11 @@ _BLUEPRINT_POLLING_CONFIG = PollingConfig(
 
 # Best-effort exclusions when hashing/tarring a build context. These mirror
 # the entries most ``.dockerignore`` files include; we don't parse
-# ``.dockerignore`` itself yet.
-_IGNORED_DIR_NAMES = {".git", "__pycache__"}
+# ``.dockerignore`` itself yet. ``logs`` matters most: Inspect's default log
+# dir is ``./logs`` in the cwd, so every eval writes a new ``.eval`` there —
+# without excluding it the context hash changes each run and the blueprint
+# cache never hits.
+_IGNORED_DIR_NAMES = {".git", "__pycache__", "logs", ".venv"}
 _IGNORED_FILE_NAMES = {".DS_Store"}
 
 
@@ -95,6 +99,46 @@ def blueprint_build_lock(name: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _blueprint_build_locks[name] = lock
     return lock
+
+
+# Per-run cache of resolved blueprint names, keyed by build inputs. task_init
+# resolves (and builds) a blueprint once; every later sample_init with the same
+# inputs then reuses the name without re-hashing the context (CPU that blocks
+# the event loop) or re-listing (an API call). Reset per run by task_init via
+# reset_blueprint_name_cache(); when unset (e.g. a direct unit-test call), the
+# helpers below no-op so behavior is unchanged.
+_blueprint_name_cache: ContextVar[dict[str, str]] = ContextVar(
+    "runloop_blueprint_name_cache"
+)
+
+
+def reset_blueprint_name_cache() -> None:
+    """Start a fresh per-run blueprint-name cache."""
+    _blueprint_name_cache.set({})
+
+
+def _cached_blueprint_name(key: str) -> str | None:
+    cache = _blueprint_name_cache.get(None)
+    return cache.get(key) if cache is not None else None
+
+
+def _cache_blueprint_name(key: str, name: str) -> None:
+    cache = _blueprint_name_cache.get(None)
+    if cache is not None:  # unset when there was no task_init — skip
+        cache[key] = name
+
+
+def _cache_key(
+    kind: str, identifier: str, launch_parameters: LaunchParameters | None
+) -> str:
+    return json.dumps(
+        {
+            "kind": kind,
+            "id": identifier,
+            "launch_parameters": _launch_params_for_hash(launch_parameters),
+        },
+        sort_keys=True,
+    )
 
 
 def _is_ignored_context_path(rel_path: Path) -> bool:
@@ -167,7 +211,8 @@ async def _upload_build_context(client: AsyncRunloop, context_dir: Path) -> str:
             "Runloop did not return an upload URL for the build-context Object."
         )
     with tempfile.NamedTemporaryFile(suffix=".tgz") as tmp:
-        _write_context_tarball(context_dir, tmp)
+        # tar+gzip of the whole context is blocking CPU/IO; keep it off the loop.
+        await asyncio.to_thread(_write_context_tarball, context_dir, tmp)
         tmp.flush()
         size = os.fstat(tmp.fileno()).st_size
 
@@ -280,12 +325,21 @@ async def build_blueprint_for_dockerfile(
 
     Returns the blueprint name.
     """
-    name = blueprint_name_for_dockerfile(
-        dockerfile_path, launch_parameters=launch_parameters
+    key = _cache_key("dockerfile", dockerfile_path, launch_parameters)
+    cached = _cached_blueprint_name(key)
+    if cached is not None:
+        return cached
+
+    # Hashing the build context is blocking CPU; keep it off the event loop.
+    name = await asyncio.to_thread(
+        blueprint_name_for_dockerfile,
+        dockerfile_path,
+        launch_parameters=launch_parameters,
     )
     async with blueprint_build_lock(name):
         if await _find_or_await_blueprint(client, name):
             trace_message(logger, "runloop", f"Blueprint {name} cached, reusing")
+            _cache_blueprint_name(key, name)
             return name
 
         path = Path(dockerfile_path)
@@ -318,6 +372,7 @@ async def build_blueprint_for_dockerfile(
                 await client.objects.delete(object_id)
             except Exception:
                 pass
+    _cache_blueprint_name(key, name)
     return name
 
 
@@ -328,21 +383,27 @@ async def build_blueprint_for_image(
     launch_parameters: LaunchParameters | None = None,
 ) -> str:
     """Build (or reuse cached) Runloop blueprint from a base image."""
+    key = _cache_key("image", image, launch_parameters)
+    cached = _cached_blueprint_name(key)
+    if cached is not None:
+        return cached
+
     name = blueprint_name_for_image(image, launch_parameters=launch_parameters)
     async with blueprint_build_lock(name):
         if await _find_or_await_blueprint(client, name):
             trace_message(logger, "runloop", f"Blueprint {name} cached, reusing")
+            _cache_blueprint_name(key, name)
             return name
 
         dockerfile = f"FROM {image}\n"
         trace_message(
             logger, "runloop", f"Building blueprint {name} from image {image}"
         )
-        # POST without SDK retries: Runloop's blueprint create is not
-        # idempotent, so retries spawn duplicate blueprints (and blow the
-        # account cap). `idempotency_key` is also sent, but Runloop doesn't
-        # currently honor it for this endpoint. Polling uses the default
-        # client so transient retrieve errors are still retried.
+        # POST without SDK retries: Runloop's blueprint create is not idempotent,
+        # so retries spawn duplicate blueprints (and blow the account cap).
+        # `idempotency_key` is also sent, but Runloop doesn't currently honor it
+        # for this endpoint. Polling uses the default client so transient
+        # retrieve errors are still retried.
         blueprint = await client.with_options(max_retries=0).blueprints.create(
             name=name,
             dockerfile=dockerfile,
@@ -352,4 +413,5 @@ async def build_blueprint_for_image(
         await client.blueprints.await_build_complete(
             blueprint.id, polling_config=_BLUEPRINT_POLLING_CONFIG
         )
+    _cache_blueprint_name(key, name)
     return name

@@ -2,30 +2,36 @@
 
 Runloop devboxes don't run a Docker daemon by default — there's no init
 system, so ``service docker status`` reports "not running". For
-multi-service compose, we:
+multi-service compose, we build the stack once and snapshot it, then create a
+devbox per sample from that snapshot:
 
 1. Build (or reuse) a cached DinD blueprint that installs a pinned
    ``docker-ce`` from Docker's official apt repo on top of Ubuntu.
-2. Create a devbox from that blueprint.
-3. ``sudo nohup dockerd > /tmp/dockerd.log 2>&1 &`` to start the daemon.
-4. Poll ``sudo docker info`` until the daemon is up (≤60 s).
-5. Upload build contexts + the compose file.
-6. ``docker compose build`` then ``docker compose up --wait``.
-7. Verify services are running.
+2. The first sample for a given compose content-hash creates a devbox from the
+   blueprint, starts dockerd, uploads the build contexts + compose file,
+   ``docker compose build``, and ``snapshot_disk``s the result — then keeps that
+   devbox for its own ``compose up``.
+3. Every later sample with the same content-hash creates a devbox from the
+   snapshot (docker images already built) and runs only ``docker compose up``,
+   skipping the upload and build.
 
-Each compose service is then exposed as a ``RunloopDinDServiceEnvironment``.
+A per-``compose``-hash lock serializes the one-time build; a fixed project name
+keeps the pre-built image tags matching. Each compose service is then exposed as
+a ``RunloopDinDServiceEnvironment``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import shlex
+import tempfile
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from logging import getLogger
 from pathlib import Path
+from typing import IO
 
 from inspect_ai.util import ComposeConfig
 from runloop_api_client import AsyncRunloop, BadRequestError
@@ -42,13 +48,16 @@ from ._blueprint import (
     _BLUEPRINT_POLLING_CONFIG,
     BLUEPRINT_NAME_PREFIX,
     _find_or_await_blueprint,
+    _hash_build_context,
     _hash_inputs,
     _launch_params_for_hash,
+    _write_context_tarball,
     blueprint_build_lock,
 )
 from ._retry import (
     DEVBOX_CREATE_POLLING_CONFIG,
     execute_with_poll,
+    shutdown_devbox,
     standard_retry,
 )
 from ._single_env import (
@@ -63,6 +72,12 @@ logger = getLogger(__name__)
 COMPOSE_DIR = "/home/user/inspect/compose"
 BUILD_CONTEXT_DIR = "/home/user/inspect/contexts"
 BUILD_TIMEOUT = 600
+
+# Fixed compose project name. `docker compose build` tags a build-only service's
+# image as ``<project>-<service>``, so the build (done once, into the snapshot)
+# and every per-sample ``compose up`` must share a project name for the pre-built
+# image to be reused. Each sample runs on its own devbox, so a constant is safe.
+_PROJECT_NAME = "inspect"
 
 _DAEMON_POLL_INTERVAL = 2
 _DAEMON_TIMEOUT = 60
@@ -282,29 +297,51 @@ async def _download_file(
     return await response.read()
 
 
+@standard_retry
+async def _upload_tarball(
+    client: AsyncRunloop, devbox_id: str, remote_path: str, fileobj: IO[bytes]
+) -> None:
+    """Upload an already-written tarball (a file object, streamed not buffered)."""
+    fileobj.seek(0)
+    await client.devboxes.upload_file(
+        devbox_id, path=remote_path, file=fileobj, timeout=FILE_REQUEST_TIMEOUT
+    )
+
+
 async def _upload_directory(
     client: AsyncRunloop,
     devbox_id: str,
     local_dir: str | Path,
     remote_dir: str,
 ) -> None:
-    """Upload a local directory to the devbox recursively."""
+    """Tar the local dir once, upload the archive, and extract it on the devbox.
+
+    Shipping a single archive turns an O(files) sequence of per-file uploads
+    into a constant handful of API calls, and reuses the blueprint context's
+    ignore rules (``.git``, ``logs``, ``.venv``, …) so a compose ``build:``
+    context is filtered the same way as a Dockerfile context.
+    """
     local_dir = Path(local_dir)
-    count = 0
-    for root, _, files in os.walk(local_dir):
-        for filename in files:
-            local_path = Path(root) / filename
-            if not local_path.is_file():
-                continue
-            if not os.access(local_path, os.R_OK):
-                continue
-            rel_path = local_path.relative_to(local_dir)
-            remote_path = f"{remote_dir}/{rel_path.as_posix()}"
-            data = local_path.read_bytes()
-            await _upload_file(client, devbox_id, remote_path, data)
-            count += 1
-    if count:
-        logger.debug("Uploaded %d files from %s to %s", count, local_dir, remote_dir)
+    remote_tar = f"/tmp/.inspect-ctx-{uuid.uuid4().hex}.tgz"
+    with tempfile.NamedTemporaryFile(suffix=".tgz") as tmp:
+        # tar+gzip of the whole dir is blocking CPU/IO; keep it off the loop.
+        await asyncio.to_thread(_write_context_tarball, local_dir, tmp)
+        tmp.flush()
+        # Pass the underlying io object (the SDK rejects the tempfile wrapper).
+        await _upload_tarball(client, devbox_id, remote_tar, tmp.file)
+    exit_code, _, stderr = await vm_exec(
+        client,
+        devbox_id,
+        f"mkdir -p {shlex.quote(remote_dir)} "
+        f"&& tar -xzf {shlex.quote(remote_tar)} -C {shlex.quote(remote_dir)} "
+        f"&& rm -f {shlex.quote(remote_tar)}",
+        timeout=FILE_REQUEST_TIMEOUT,
+    )
+    if exit_code != 0:
+        raise RuntimeError(
+            f"Failed to unpack build context into {remote_dir}: "
+            f"exit={exit_code} stderr={stderr!r}"
+        )
 
 
 async def _upload_build_contexts(
@@ -384,6 +421,186 @@ async def _ensure_dind_blueprint(
     return name
 
 
+@dataclass
+class _DinDSnapshotInfo:
+    """The reusable product of building a compose stack once."""
+
+    snapshot_id: str
+    compose_remote_path: str
+    expected_services: list[str]
+
+
+# Per-run cache of built compose-stack snapshots, keyed by
+# hash(compose dir + build contexts + launch params). The first sample builds
+# the stack once and snapshots it; the rest create devboxes from the snapshot
+# and skip the upload + `compose build` entirely. Reset per run by task_init via
+# reset_dind_snapshot_cache().
+_dind_snapshot_cache: ContextVar[dict[str, _DinDSnapshotInfo]] = ContextVar(
+    "runloop_dind_snapshot_cache"
+)
+# Serialize the build+snapshot for a given key so concurrent first samples don't
+# each build (Runloop snapshots, like blueprints, aren't name-deduped).
+_snapshot_build_locks: dict[str, asyncio.Lock] = {}
+
+
+def reset_dind_snapshot_cache() -> None:
+    """Start a fresh per-run DinD snapshot cache."""
+    _dind_snapshot_cache.set({})
+
+
+def _cached_dind_snapshot(key: str) -> _DinDSnapshotInfo | None:
+    cache = _dind_snapshot_cache.get(None)
+    return cache.get(key) if cache is not None else None
+
+
+def _cache_dind_snapshot(key: str, info: _DinDSnapshotInfo) -> None:
+    cache = _dind_snapshot_cache.get(None)
+    if cache is not None:  # unset when there was no task_init — skip
+        cache[key] = info
+
+
+def dind_snapshot_ids() -> list[str]:
+    """Snapshot ids created this run, for task_cleanup to delete."""
+    cache = _dind_snapshot_cache.get(None)
+    return [info.snapshot_id for info in cache.values()] if cache is not None else []
+
+
+def _snapshot_build_lock(key: str) -> asyncio.Lock:
+    lock = _snapshot_build_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _snapshot_build_locks[key] = lock
+    return lock
+
+
+def _dind_snapshot_key(
+    config: ComposeConfig,
+    compose_file: str,
+    launch_parameters: LaunchParameters | None,
+) -> str:
+    """Content hash of everything the compose build depends on.
+
+    Includes the compose directory and every build context (so a changed
+    ``requirements.txt`` invalidates the snapshot even if the compose file is
+    unchanged) plus launch parameters. Blocking file I/O — call via to_thread.
+    """
+    compose_dir = Path(compose_file).parent
+    context_map, _ = discover_build_contexts(config, compose_dir, BUILD_CONTEXT_DIR)
+    h = _hash_inputs(
+        {
+            "kind": "dind-snapshot",
+            "compose_dir": _hash_build_context(compose_dir),
+            "contexts": {path: _hash_build_context(Path(path)) for path in context_map},
+            "launch_parameters": _launch_params_for_hash(launch_parameters),
+        }
+    )
+    return f"inspect-snap-{h}"
+
+
+async def _start_dind_dockerd(client: AsyncRunloop, devbox_id: str) -> None:
+    """Start dockerd (no init system on Runloop devboxes) and wait for it."""
+    await vm_exec(
+        client, devbox_id, "sudo nohup dockerd > /tmp/dockerd.log 2>&1 &", timeout=10
+    )
+    await _wait_for_docker_daemon(client, devbox_id)
+
+
+def _dind_create_kwargs(
+    *,
+    name: str | None,
+    metadata: dict[str, str],
+    launch_parameters: LaunchParameters | None,
+    environment_variables: dict[str, str] | None,
+    timeout: float | None,
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "metadata": metadata,
+        "polling_config": DEVBOX_CREATE_POLLING_CONFIG,
+    }
+    if name is not None:
+        kwargs["name"] = name
+    if launch_parameters is not None:
+        kwargs["launch_parameters"] = launch_parameters
+    if environment_variables:
+        kwargs["environment_variables"] = environment_variables
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return kwargs
+
+
+async def _build_dind_snapshot(
+    client: AsyncRunloop,
+    key: str,
+    config: ComposeConfig,
+    compose_file: str,
+    *,
+    name: str | None,
+    metadata: dict[str, str],
+    launch_parameters: LaunchParameters | None,
+    environment_variables: dict[str, str] | None,
+    timeout: float | None,
+) -> tuple[str, _DinDSnapshotInfo]:
+    """Build the compose stack on a fresh devbox and snapshot it for reuse.
+
+    Returns ``(devbox_id, info)``. The devbox is left running (dockerd up, images
+    built) so the caller can reuse it for its own sample instead of creating a
+    second devbox from the snapshot.
+    """
+    blueprint_name = await _ensure_dind_blueprint(
+        client, launch_parameters=launch_parameters
+    )
+    create_kwargs = _dind_create_kwargs(
+        name=name,
+        metadata=metadata,
+        launch_parameters=launch_parameters,
+        environment_variables=environment_variables,
+        timeout=timeout,
+    )
+    create_kwargs["blueprint_name"] = blueprint_name
+    devbox = await client.devboxes.create_and_await_running(**create_kwargs)  # type: ignore[arg-type]
+    logger.debug("Building DinD snapshot on devbox %s", devbox.id)
+    try:
+        await _start_dind_dockerd(client, devbox.id)
+        compose_remote_path = await _upload_build_contexts(
+            client, devbox.id, config, compose_file
+        )
+        project = RunloopDinDProject(
+            client=client,
+            devbox_id=devbox.id,
+            project_name=_PROJECT_NAME,
+            compose_path=compose_remote_path,
+        )
+        exit_code, stdout, stderr = await compose_exec(
+            project, ["build"], timeout=BUILD_TIMEOUT
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"docker compose build failed:\nstdout: {stdout}\nstderr: {stderr}"
+            )
+        # Flush the built image layers to disk before snapshotting.
+        await vm_exec(client, devbox.id, "sudo sync", timeout=30)
+        snapshot = await client.devboxes.snapshot_disk(
+            devbox.id, name=key, metadata=metadata
+        )
+    except BaseException:
+        try:
+            await shutdown_devbox(client, devbox.id)
+        except Exception as cleanup_err:
+            logger.warning(
+                "Failed to shut down DinD build devbox %s: %s", devbox.id, cleanup_err
+            )
+        raise
+
+    info = _DinDSnapshotInfo(
+        snapshot_id=snapshot.id,
+        compose_remote_path=compose_remote_path,
+        expected_services=list(config.services.keys()),
+    )
+    _cache_dind_snapshot(key, info)
+    logger.debug("Snapshotted DinD stack %s -> %s", key, snapshot.id)
+    return devbox.id, info
+
+
 async def create_dind_project(
     client: AsyncRunloop,
     config: ComposeConfig,
@@ -395,7 +612,12 @@ async def create_dind_project(
     environment_variables: dict[str, str] | None = None,
     timeout: float | None = None,
 ) -> RunloopDinDProject:
-    """Create a DinD devbox, start dockerd, and bring up compose services.
+    """Create a DinD devbox with the compose services running.
+
+    The compose stack is built (and its images snapshotted) only once per unique
+    content hash: the first sample builds it on its own devbox and keeps that
+    devbox; every later sample creates a devbox from the snapshot and skips the
+    upload + ``compose build``, running only ``compose up``.
 
     Args:
         client: Runloop client.
@@ -410,68 +632,58 @@ async def create_dind_project(
         timeout: Per-request HTTP timeout forwarded to
             ``devboxes.create_and_await_running``.
     """
-    project_name = f"inspect-{uuid.uuid4().hex[:8]}"
-
-    # 1. Ensure DinD blueprint exists.
-    blueprint_name = await _ensure_dind_blueprint(
-        client, launch_parameters=launch_parameters
+    key = await asyncio.to_thread(
+        _dind_snapshot_key, config, compose_file, launch_parameters
     )
 
-    # 2. Create devbox from blueprint.
-    create_kwargs: dict[str, object] = {
-        "blueprint_name": blueprint_name,
-        "metadata": metadata,
-        "polling_config": DEVBOX_CREATE_POLLING_CONFIG,
-    }
-    if name is not None:
-        create_kwargs["name"] = name
-    if launch_parameters is not None:
-        create_kwargs["launch_parameters"] = launch_parameters
-    if environment_variables:
-        create_kwargs["environment_variables"] = environment_variables
-    if timeout is not None:
-        create_kwargs["timeout"] = timeout
+    # Resolve (or build once, under a lock) the snapshot for this stack. When we
+    # perform the build, we keep the build devbox and reuse it for this sample.
+    info = _cached_dind_snapshot(key)
+    built_devbox_id: str | None = None
+    if info is None:
+        async with _snapshot_build_lock(key):
+            info = _cached_dind_snapshot(key)
+            if info is None:
+                built_devbox_id, info = await _build_dind_snapshot(
+                    client,
+                    key,
+                    config,
+                    compose_file,
+                    name=name,
+                    metadata=metadata,
+                    launch_parameters=launch_parameters,
+                    environment_variables=environment_variables,
+                    timeout=timeout,
+                )
 
-    devbox = await client.devboxes.create_and_await_running(**create_kwargs)  # type: ignore[arg-type]
-    logger.debug("Created DinD devbox %s", devbox.id)
+    if built_devbox_id is not None:
+        devbox_id = built_devbox_id  # reuse: dockerd already up, images built
+    else:
+        create_kwargs = _dind_create_kwargs(
+            name=name,
+            metadata=metadata,
+            launch_parameters=launch_parameters,
+            environment_variables=environment_variables,
+            timeout=timeout,
+        )
+        create_kwargs["snapshot_id"] = info.snapshot_id
+        devbox = await client.devboxes.create_and_await_running(**create_kwargs)  # type: ignore[arg-type]
+        logger.debug(
+            "Created DinD devbox %s from snapshot %s", devbox.id, info.snapshot_id
+        )
+        await _start_dind_dockerd(client, devbox.id)
+        devbox_id = devbox.id
 
+    project = RunloopDinDProject(
+        client=client,
+        devbox_id=devbox_id,
+        project_name=_PROJECT_NAME,
+        compose_path=info.compose_remote_path,
+        services=info.expected_services,
+    )
     try:
-        # 3. Start Docker daemon. Runloop devboxes have no init system.
-        await vm_exec(
-            client,
-            devbox.id,
-            "sudo nohup dockerd > /tmp/dockerd.log 2>&1 &",
-            timeout=10,
-        )
-
-        # 4. Wait for daemon.
-        await _wait_for_docker_daemon(client, devbox.id)
-
-        # 5. Upload build contexts and compose file.
-        compose_remote_path = await _upload_build_contexts(
-            client, devbox.id, config, compose_file
-        )
-
-        project = RunloopDinDProject(
-            client=client,
-            devbox_id=devbox.id,
-            project_name=project_name,
-            compose_path=compose_remote_path,
-        )
-
-        # 6. Build compose services.
-        logger.debug("Building compose services in DinD devbox %s...", devbox.id)
-        exit_code, stdout, stderr = await compose_exec(
-            project, ["build"], timeout=BUILD_TIMEOUT
-        )
-        if exit_code != 0:
-            raise RuntimeError(
-                f"docker compose build failed:\nstdout: {stdout}\nstderr: {stderr}"
-            )
-
-        # 7. Start services.
         healthcheck_timeout = compute_healthcheck_timeout(config.services)
-        logger.debug("Starting compose services in DinD devbox %s...", devbox.id)
+        logger.debug("Starting compose services in DinD devbox %s...", devbox_id)
         exit_code, stdout, stderr = await compose_exec(
             project,
             [
@@ -488,21 +700,17 @@ async def create_dind_project(
                 f"docker compose up failed:\nstdout: {stdout}\nstderr: {stderr}"
             )
 
-        # 8. Verify all expected services are running.
-        expected_services = list(config.services.keys())
         await _wait_for_services(
-            project, expected_services, timeout=healthcheck_timeout
+            project, info.expected_services, timeout=healthcheck_timeout
         )
-        project.services = expected_services
-
         return project
 
     except BaseException:
         try:
-            await client.devboxes.shutdown(devbox.id)
+            await shutdown_devbox(client, devbox_id)
         except Exception as cleanup_err:
             logger.warning(
-                "Failed to shut down DinD devbox %s: %s", devbox.id, cleanup_err
+                "Failed to shut down DinD devbox %s: %s", devbox_id, cleanup_err
             )
         raise
 

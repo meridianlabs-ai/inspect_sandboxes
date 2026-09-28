@@ -280,19 +280,14 @@ async def test_read_file_not_found() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sample_cleanup_destroys_and_shuts_down() -> None:
+async def test_sample_cleanup_shuts_down() -> None:
+    """Cleanup shuts the devbox down."""
     client = make_mock_client()
-    project = make_mock_project(client)
-    env = make_env(project)
-    with patch(
-        "inspect_sandboxes.runloop._dind_env.destroy_dind_project",
-        new_callable=AsyncMock,
-    ) as mock_destroy:
-        await RunloopDinDServiceEnvironment.sample_cleanup(
-            "task", None, {"web": env}, False
-        )
+    env = make_env(make_mock_project(client))
+    await RunloopDinDServiceEnvironment.sample_cleanup(
+        "task", None, {"web": env}, False
+    )
 
-    mock_destroy.assert_awaited_once_with(project)
     client.devboxes.shutdown.assert_awaited_once_with("dbx-dind-123")
 
 
@@ -300,15 +295,8 @@ async def test_sample_cleanup_destroys_and_shuts_down() -> None:
 async def test_sample_cleanup_skips_when_interrupted() -> None:
     client = make_mock_client()
     env = make_env(make_mock_project(client))
-    with patch(
-        "inspect_sandboxes.runloop._dind_env.destroy_dind_project",
-        new_callable=AsyncMock,
-    ) as mock_destroy:
-        await RunloopDinDServiceEnvironment.sample_cleanup(
-            "task", None, {"web": env}, True
-        )
+    await RunloopDinDServiceEnvironment.sample_cleanup("task", None, {"web": env}, True)
 
-    mock_destroy.assert_not_called()
     client.devboxes.shutdown.assert_not_called()
 
 

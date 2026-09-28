@@ -10,10 +10,12 @@ import httpx
 import pytest
 from inspect_sandboxes.runloop._blueprint import (
     BLUEPRINT_NAME_PREFIX,
+    _hash_build_context,
     blueprint_name_for_dockerfile,
     blueprint_name_for_image,
     build_blueprint_for_dockerfile,
     build_blueprint_for_image,
+    reset_blueprint_name_cache,
 )
 
 
@@ -71,6 +73,12 @@ def _patch_httpx_put() -> Any:
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_blueprint_name_cache() -> None:
+    """Isolate the per-run blueprint-name cache between tests."""
+    reset_blueprint_name_cache()
+
+
 def test_dockerfile_name_is_content_derived(tmp_path: Any) -> None:
     """Identical content + launch params → identical name; differing content → different."""
     df1 = tmp_path / "Dockerfile1"
@@ -126,6 +134,33 @@ def test_dockerfile_and_image_names_differ_for_same_content(tmp_path: Any) -> No
     assert blueprint_name_for_dockerfile(str(df)) != blueprint_name_for_image(
         "python:3.12"
     )
+
+
+def test_context_hash_ignores_churn_dirs(tmp_path: Any) -> None:
+    """logs/, .venv/ etc. don't affect the context hash, so evals stay cached."""
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
+    before = _hash_build_context(tmp_path)
+
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "run.eval").write_text("hello world\n")
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "marker").write_text("hello world\n")
+
+    assert _hash_build_context(tmp_path) == before
+
+
+@pytest.mark.asyncio
+async def test_blueprint_name_cache_reuses_resolved_name() -> None:
+    """Once resolved this run, a repeated build reuses the name without re-listing."""
+    bp = MagicMock(status="build_complete", state="created")
+    client = _make_client(list_items=[bp])
+
+    name1 = await build_blueprint_for_image(client, "python:3.12")
+    name2 = await build_blueprint_for_image(client, "python:3.12")
+
+    assert name1 == name2
+    # Second call hit the process-local cache — no second blueprints.list.
+    client.blueprints.list.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -415,7 +415,7 @@ async def test_write_file_raises_for_directory(client: MagicMock) -> None:
     """Test write_file raises IsADirectoryError when path is a directory."""
     env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
-        return_value=_make_execution(exit_status=0)  # is_directory: yes
+        return_value=_make_execution(exit_status=0)  # _is_directory (test -d): yes
     )
 
     with pytest.raises(IsADirectoryError):
@@ -469,10 +469,7 @@ async def test_read_file_text(client: MagicMock) -> None:
     """Test read_file in text mode downloads and decodes the bytes."""
     env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
-        side_effect=[
-            _make_execution(exit_status=1),  # is_directory: no
-            _make_execution(stdout="13", exit_status=0),  # stat -c %s
-        ]
+        return_value=_make_execution(stdout="13", exit_status=0)  # size probe
     )
     response = MagicMock()
     response.read = AsyncMock(return_value=b"file contents")
@@ -492,10 +489,7 @@ async def test_read_file_binary(client: MagicMock) -> None:
     env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     payload = b"\xff\xfe\x00"
     client.devboxes.execute_and_await_completion = AsyncMock(
-        side_effect=[
-            _make_execution(exit_status=1),  # is_directory: no
-            _make_execution(stdout=str(len(payload)), exit_status=0),  # stat -c %s
-        ]
+        return_value=_make_execution(stdout=str(len(payload)), exit_status=0)
     )
     response = MagicMock()
     response.read = AsyncMock(return_value=payload)
@@ -510,11 +504,7 @@ async def test_read_file_not_found(client: MagicMock) -> None:
     """Test read_file raises FileNotFoundError when file doesn't exist."""
     env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
-        side_effect=[
-            _make_execution(exit_status=1),  # is_directory: no
-            _make_execution(stderr="No such file or directory", exit_status=1),  # stat
-            _make_execution(exit_status=1),  # test -e: missing
-        ]
+        return_value=_make_execution(stdout="MISSING", exit_status=0)  # probe
     )
 
     with pytest.raises(FileNotFoundError):
@@ -525,12 +515,9 @@ async def test_read_file_not_found(client: MagicMock) -> None:
 async def test_read_file_maps_missing_from_download(client: MagicMock) -> None:
     """A "File does not exist" 400 from download_file surfaces as FileNotFoundError."""
     env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
-    # Pass the size checks so the download is actually attempted.
+    # Pass the size probe so the download is actually attempted.
     client.devboxes.execute_and_await_completion = AsyncMock(
-        side_effect=[
-            _make_execution(exit_status=1),  # is_directory: no
-            _make_execution(stdout="10", exit_status=0),  # stat -c %s
-        ]
+        return_value=_make_execution(stdout="10", exit_status=0)
     )
     response = httpx.Response(400, request=httpx.Request("POST", "https://example"))
     client.devboxes.download_file = AsyncMock(
@@ -550,11 +537,23 @@ async def test_read_file_is_directory(client: MagicMock) -> None:
     """Test read_file raises IsADirectoryError for directories."""
     env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     client.devboxes.execute_and_await_completion = AsyncMock(
-        return_value=_make_execution(exit_status=0)  # is_directory: yes
+        return_value=_make_execution(stdout="DIR", exit_status=0)  # probe
     )
 
     with pytest.raises(IsADirectoryError):
         await env.read_file("/tmp")
+
+
+@pytest.mark.asyncio
+async def test_read_file_permission_denied(client: MagicMock) -> None:
+    """Test read_file raises PermissionError when the file isn't readable."""
+    env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
+    client.devboxes.execute_and_await_completion = AsyncMock(
+        return_value=_make_execution(stdout="UNREADABLE", exit_status=0)  # probe
+    )
+
+    with pytest.raises(PermissionError):
+        await env.read_file("/tmp/locked.txt")
 
 
 @pytest.mark.asyncio
@@ -563,10 +562,7 @@ async def test_read_file_size_limit(client: MagicMock) -> None:
     env = RunloopSingleServiceEnvironment(client, "dbx-test-123")
     huge = 200 * 1024 * 1024  # 200 MiB, above 100 MiB read cap
     client.devboxes.execute_and_await_completion = AsyncMock(
-        side_effect=[
-            _make_execution(exit_status=1),  # is_directory: no
-            _make_execution(stdout=str(huge), exit_status=0),  # stat -c %s
-        ]
+        return_value=_make_execution(stdout=str(huge), exit_status=0)
     )
 
     with pytest.raises(OutputLimitExceededError):
@@ -584,7 +580,8 @@ async def test_exec_timeout_path_polls_without_resubmitting(client: MagicMock) -
     client.devboxes.executions.retrieve = AsyncMock(
         side_effect=[
             APIConnectionError(request=MagicMock()),  # transient blip mid-poll
-            _make_execution(stdout="ok", exit_status=0),  # then completes
+            _make_execution(stdout="ok", exit_status=0),  # status poll: completes
+            _make_execution(stdout="ok", exit_status=0),  # full-output re-fetch
         ]
     )
 
@@ -592,7 +589,7 @@ async def test_exec_timeout_path_polls_without_resubmitting(client: MagicMock) -
 
     assert result.success
     assert client.devboxes.execute.await_count == 1
-    assert client.devboxes.executions.retrieve.await_count == 2
+    assert client.devboxes.executions.retrieve.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -661,7 +658,8 @@ async def test_poll_execution_tolerates_transient_error_in_place() -> None:
     retrieve = AsyncMock(
         side_effect=[
             APIConnectionError(request=MagicMock()),
-            _execution("completed"),
+            _execution("completed"),  # status poll (tiny last_n)
+            _execution("completed"),  # full-output re-fetch on completion
         ]
     )
     client = _poll_client(retrieve)
@@ -669,7 +667,10 @@ async def test_poll_execution_tolerates_transient_error_in_place() -> None:
         client, "dbx-1", "exec-1", timeout=None, last_n="9999"
     )
     assert result.status == "completed"
-    assert retrieve.await_count == 2
+    assert retrieve.await_count == 3
+    # Status polls use a tiny last_n; the full output is fetched once at the end.
+    assert retrieve.await_args_list[0].kwargs["last_n"] == "1"
+    assert retrieve.await_args_list[-1].kwargs["last_n"] == "9999"
 
 
 @pytest.mark.asyncio

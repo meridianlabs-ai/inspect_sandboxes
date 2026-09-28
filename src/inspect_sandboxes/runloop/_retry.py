@@ -98,13 +98,18 @@ exec_retry = retry(
 )
 
 
-# Polling backoff for async executions: start fast, back off to a modest cap so
-# long-running commands don't hammer the API. Transient retrieve errors are
-# tolerated in place (bounded) so we keep polling the *same* execution instead
-# of re-submitting the command.
+# Polling backoff for async executions: start fast, back off to a ~1 s cap so a
+# command that finishes mid-interval is observed promptly (a larger cap adds
+# dead time proportional to the cap). Transient retrieve errors are tolerated in
+# place (bounded) so we keep polling the *same* execution instead of
+# re-submitting the command.
 _POLL_INTERVAL_INITIAL = 0.5
-_POLL_INTERVAL_MAX = 5.0
+_POLL_INTERVAL_MAX = 1.0
 _POLL_MAX_TRANSIENT_ERRORS = 5
+# Intermediate polls only need the status, so they fetch a tiny tail; the full
+# output is fetched once on completion with the caller's last_n. Polling with
+# the full last_n would re-transfer (and discard) the whole stream every poll.
+_POLL_LAST_N = "1"
 
 
 async def _sleep_bounded(interval: float, deadline: float | None) -> None:
@@ -137,11 +142,12 @@ async def poll_execution(
     """Poll a devbox execution until it completes, then return it.
 
     Polls ``devboxes.executions.retrieve`` for ``execution_id``, backing off
-    from 0.5 s to 5 s between polls. A transient (retryable) API error is
-    swallowed and retried in place — we keep polling the same execution rather
-    than re-running the command — up to ``_POLL_MAX_TRANSIENT_ERRORS``
-    consecutive failures, after which it propagates. Non-retryable errors
-    propagate immediately.
+    from 0.5 s to 1 s between polls with a tiny ``last_n``, then re-fetches the
+    full output (the caller's ``last_n``) once on completion. A transient
+    (retryable) API error is swallowed and retried in place — we keep polling
+    the same execution rather than re-running the command — up to
+    ``_POLL_MAX_TRANSIENT_ERRORS`` consecutive failures, after which it
+    propagates. Non-retryable errors propagate immediately.
 
     Raises ``TimeoutError`` if ``timeout`` seconds elapse first, after a
     best-effort kill of the execution.
@@ -152,7 +158,7 @@ async def poll_execution(
     while True:
         try:
             execution = await client.devboxes.executions.retrieve(
-                execution_id, devbox_id=devbox_id, last_n=last_n
+                execution_id, devbox_id=devbox_id, last_n=_POLL_LAST_N
             )
             transient = 0
         except Exception as exc:  # noqa: BLE001 — reraised unless retryable
@@ -166,7 +172,9 @@ async def poll_execution(
             continue
 
         if execution.status == "completed":
-            return execution
+            return await client.devboxes.executions.retrieve(
+                execution_id, devbox_id=devbox_id, last_n=last_n
+            )
         if deadline is not None and time.monotonic() >= deadline:
             await _kill_execution(client, devbox_id, execution_id)
             raise TimeoutError(f"Command timed out after {timeout} seconds")

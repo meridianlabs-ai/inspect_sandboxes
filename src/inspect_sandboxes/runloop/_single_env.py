@@ -227,32 +227,6 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
         return f"{base}; _ec=$?; exit $_ec"
 
     @standard_retry
-    async def _get_file_size(self, file: str) -> int:
-        """Return file size in bytes. Raises FileNotFoundError if missing."""
-        quoted = shlex.quote(file)
-        # stat -c %s works on GNU coreutils + busybox; -f %z is the BSD fallback.
-        result = await self.client.devboxes.execute_and_await_completion(
-            self.devbox_id,
-            command=f"stat -c %s {quoted} 2>/dev/null || stat -f %z {quoted} 2>/dev/null",
-        )
-        if (result.exit_status or 0) == 0:
-            try:
-                return int((result.stdout or "0").strip())
-            except ValueError as e:
-                raise RuntimeError(
-                    f"Failed to parse file size for {file}: {result.stdout!r}"
-                ) from e
-
-        test = await self.client.devboxes.execute_and_await_completion(
-            self.devbox_id, command=f"test -e {quoted}"
-        )
-        if (test.exit_status or 0) != 0:
-            raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
-        raise PermissionError(
-            errno.EACCES, "Cannot stat (likely permission denied)", file
-        )
-
-    @standard_retry
     async def _is_directory(self, file: str) -> bool:
         result = await self.client.devboxes.execute_and_await_completion(
             self.devbox_id,
@@ -260,10 +234,44 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
         )
         return (result.exit_status or 0) == 0
 
+    @standard_retry
     async def _verify_read_size(self, file: str) -> int:
-        if await self._is_directory(file):
+        """Classify the path and return its size in a single exec.
+
+        The probe echoes a token for each failure mode so a read needs one
+        round-trip instead of separate ``test -d`` and ``stat`` probes:
+        ``DIR``/``MISSING``/``UNREADABLE``; otherwise stdout is the size.
+        ``stat -c %s`` covers GNU coreutils + busybox, ``-f %z`` is the BSD
+        fallback.
+        """
+        script = (
+            'if [ -d "$1" ]; then echo DIR; exit 0; fi\n'
+            'if [ ! -e "$1" ]; then echo MISSING; exit 0; fi\n'
+            'if [ ! -r "$1" ]; then echo UNREADABLE; exit 0; fi\n'
+            'stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null\n'
+        )
+        result = await self.client.devboxes.execute_and_await_completion(
+            self.devbox_id,
+            command=f"sh -c {shlex.quote(script)} _ {shlex.quote(file)}",
+        )
+        stdout = (result.stdout or "").strip()
+        if stdout == "DIR":
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
-        size = await self._get_file_size(file)
+        if stdout == "MISSING":
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
+        if stdout == "UNREADABLE":
+            raise PermissionError(errno.EACCES, "Permission denied", file)
+        if (result.exit_status or 0) != 0:
+            raise RuntimeError(
+                f"Failed to stat {file}: exit={result.exit_status} "
+                f"stderr={result.stderr!r}"
+            )
+        try:
+            size = int(stdout)
+        except ValueError as e:
+            raise RuntimeError(
+                f"Failed to parse file size for {file}: {stdout!r}"
+            ) from e
         if size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
             raise OutputLimitExceededError(
                 limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,

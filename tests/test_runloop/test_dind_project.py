@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +21,7 @@ from inspect_sandboxes.runloop._dind_project import (
     compose_exec,
     create_dind_project,
     destroy_dind_project,
+    reset_dind_snapshot_cache,
     vm_exec,
 )
 from runloop_api_client import APIConnectionError, BadRequestError
@@ -63,6 +66,8 @@ def make_mock_client() -> MagicMock:
     client.devboxes.executions.kill = AsyncMock()
     client.devboxes.create_and_await_running = AsyncMock()
     client.devboxes.shutdown = AsyncMock()
+    client.devboxes.snapshot_disk = AsyncMock(return_value=MagicMock(id="snp-test"))
+    client.devboxes.delete_disk_snapshot = AsyncMock()
     client.devboxes.upload_file = AsyncMock()
     download_response = MagicMock()
     download_response.read = AsyncMock(return_value=b"")
@@ -75,6 +80,12 @@ def make_mock_client() -> MagicMock:
     client.blueprints.await_build_complete = AsyncMock()
     client.with_options = MagicMock(return_value=client)
     return client
+
+
+@pytest.fixture(autouse=True)
+def _reset_dind_snapshot_cache() -> None:
+    """Isolate the per-run DinD snapshot cache between tests."""
+    reset_dind_snapshot_cache()
 
 
 def make_mock_project(client: MagicMock | None = None) -> RunloopDinDProject:
@@ -118,7 +129,8 @@ async def test_vm_exec_polls_without_resubmitting() -> None:
     client.devboxes.executions.retrieve = AsyncMock(
         side_effect=[
             APIConnectionError(request=MagicMock()),  # transient blip mid-poll
-            _make_execution(stdout="ok", exit_status=0),  # then completes
+            _make_execution(stdout="ok", exit_status=0),  # status poll: completes
+            _make_execution(stdout="ok", exit_status=0),  # full-output re-fetch
         ]
     )
 
@@ -126,7 +138,7 @@ async def test_vm_exec_polls_without_resubmitting() -> None:
 
     assert exit_code == 0
     assert client.devboxes.execute.await_count == 1
-    assert client.devboxes.executions.retrieve.await_count == 2
+    assert client.devboxes.executions.retrieve.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -327,22 +339,18 @@ async def test_ensure_dind_blueprint_invokes_sdk() -> None:
     client.with_options.assert_called_once_with(max_retries=0)
 
 
-@pytest.mark.asyncio
-async def test_create_dind_project_full_sequence() -> None:
-    """Test create_dind_project executes the full startup sequence."""
-    config = ComposeConfig(services={"web": ComposeService(image="python:3.12")})
-
-    devbox = MagicMock()
-    devbox.id = "dbx-dind-123"
-    client = make_mock_client()
-    client.devboxes.create_and_await_running = AsyncMock(return_value=devbox)
-
-    ps_output = '{"Service":"web"}\n'
+@contextmanager
+def _patch_dind_build() -> Iterator[None]:
+    """Patch the DinD build helpers (blueprint, snapshot key, exec, waits)."""
     with (
         patch(
             "inspect_sandboxes.runloop._dind_project._ensure_dind_blueprint",
             new_callable=AsyncMock,
             return_value="inspect-dind-xyz",
+        ),
+        patch(
+            "inspect_sandboxes.runloop._dind_project._dind_snapshot_key",
+            return_value="inspect-snap-test",
         ),
         patch(
             "inspect_sandboxes.runloop._dind_project.vm_exec",
@@ -361,28 +369,71 @@ async def test_create_dind_project_full_sequence() -> None:
         patch(
             "inspect_sandboxes.runloop._dind_project.compose_exec",
             new_callable=AsyncMock,
-            return_value=(0, ps_output, ""),
+            return_value=(0, '{"Service":"web"}\n', ""),
         ),
         patch(
             "inspect_sandboxes.runloop._dind_project._wait_for_services",
             new_callable=AsyncMock,
         ),
     ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_create_dind_project_builds_snapshots_and_starts() -> None:
+    """The first sample builds the stack, snapshots it, and brings it up."""
+    config = ComposeConfig(services={"web": ComposeService(image="python:3.12")})
+    devbox = MagicMock(id="dbx-dind-123")
+    client = make_mock_client()
+    client.devboxes.create_and_await_running = AsyncMock(return_value=devbox)
+
+    with _patch_dind_build():
         project = await create_dind_project(
             client, config, "/local/compose.yaml", metadata={"created_by": "test"}
         )
 
     assert project.devbox_id == "dbx-dind-123"
+    assert project.project_name == "inspect"
     assert project.services == ["web"]
+    # Built the stack once and snapshotted it (reusing the build devbox).
+    client.devboxes.snapshot_disk.assert_awaited_once()
+    assert (
+        client.devboxes.snapshot_disk.await_args.kwargs["name"] == "inspect-snap-test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_dind_project_reuses_snapshot() -> None:
+    """A second sample creates from the snapshot and skips the build."""
+    config = ComposeConfig(services={"web": ComposeService(image="python:3.12")})
+    client = make_mock_client()
+    client.devboxes.create_and_await_running = AsyncMock(
+        side_effect=[MagicMock(id="dbx-build"), MagicMock(id="dbx-reuse")]
+    )
+
+    with _patch_dind_build():
+        first = await create_dind_project(
+            client, config, "/local/compose.yaml", metadata={"created_by": "test"}
+        )
+        second = await create_dind_project(
+            client, config, "/local/compose.yaml", metadata={"created_by": "test"}
+        )
+
+    assert first.devbox_id == "dbx-build"  # first reuses the build devbox
+    assert second.devbox_id == "dbx-reuse"  # second is created from the snapshot
+    # Only the first sample built + snapshotted.
+    client.devboxes.snapshot_disk.assert_awaited_once()
+    # The second create passed snapshot_id, not blueprint_name.
+    reuse_call = client.devboxes.create_and_await_running.await_args_list[1]
+    assert reuse_call.kwargs["snapshot_id"] == "snp-test"
+    assert "blueprint_name" not in reuse_call.kwargs
 
 
 @pytest.mark.asyncio
 async def test_create_dind_project_cleans_up_on_failure() -> None:
-    """Test create_dind_project shuts down devbox when startup fails."""
+    """create_dind_project shuts the build devbox down when startup fails."""
     config = ComposeConfig(services={"web": ComposeService(image="python:3.12")})
-
-    devbox = MagicMock()
-    devbox.id = "dbx-dind-123"
+    devbox = MagicMock(id="dbx-dind-123")
     client = make_mock_client()
     client.devboxes.create_and_await_running = AsyncMock(return_value=devbox)
 
@@ -391,6 +442,10 @@ async def test_create_dind_project_cleans_up_on_failure() -> None:
             "inspect_sandboxes.runloop._dind_project._ensure_dind_blueprint",
             new_callable=AsyncMock,
             return_value="inspect-dind-xyz",
+        ),
+        patch(
+            "inspect_sandboxes.runloop._dind_project._dind_snapshot_key",
+            return_value="inspect-snap-test",
         ),
         patch(
             "inspect_sandboxes.runloop._dind_project.vm_exec",

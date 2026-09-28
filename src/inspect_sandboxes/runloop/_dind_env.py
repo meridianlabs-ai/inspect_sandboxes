@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import shlex
 import shutil
@@ -36,7 +37,6 @@ from ._dind_project import (
     _upload_file,
     compose_exec,
     create_dind_project,
-    destroy_dind_project,
     discover_working_dir,
     vm_exec,
 )
@@ -136,12 +136,17 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
             if tmp_dir is not None:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        # Build per-service environments with default first.
+        # Build per-service environments with default first. Discover the
+        # services' working dirs concurrently — each is an independent compose
+        # exec, so serial awaits would add ~one round-trip per service.
         default_name, _ = find_default_service(config)
-        environments: dict[str, SandboxEnvironment] = {}
-        for svc_name in project.services:
-            wd = await discover_working_dir(project, svc_name)
-            environments[svc_name] = cls(project, svc_name, wd)
+        working_dirs = await asyncio.gather(
+            *(discover_working_dir(project, svc) for svc in project.services)
+        )
+        environments: dict[str, SandboxEnvironment] = {
+            svc: cls(project, svc, wd)
+            for svc, wd in zip(project.services, working_dirs, strict=True)
+        }
 
         default_env = environments.pop(default_name)
         return {default_name: default_env, **environments}
@@ -161,7 +166,9 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
         any_env = next(iter(environments.values())).as_type(cls)
         project = any_env.project
         try:
-            await destroy_dind_project(project)
+            # Shutting the devbox down reclaims the whole VM (docker daemon and
+            # every container), so a graceful `docker compose down` first would
+            # only add latency and API calls to a devbox about to be destroyed.
             await shutdown_devbox(project.client, project.devbox_id)
         except NotFoundError:
             pass  # already gone
