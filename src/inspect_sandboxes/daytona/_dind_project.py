@@ -13,7 +13,7 @@ from logging import getLogger
 from pathlib import Path
 from typing import Any
 
-from daytona_sdk import (
+from daytona import (
     AsyncDaytona,
     AsyncSandbox,
     CreateSandboxFromImageParams,
@@ -75,16 +75,12 @@ async def vm_exec(
     return response.exit_code, response.result
 
 
-async def compose_exec(
+def compose_command(
     project: DaytonaDinDProject,
     subcommand: list[str],
     env: dict[str, str] | None = None,
-    timeout: int | None = 60,
-) -> tuple[int, str]:
-    """Run a ``docker compose`` subcommand on the DinD sandbox.
-
-    Returns (exit_code, output).
-    """
+) -> str:
+    """The shell command running a ``docker compose`` subcommand on the DinD VM."""
     parts = [
         "docker",
         "compose",
@@ -103,6 +99,20 @@ async def compose_exec(
         prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
         cmd = f"{prefix} {cmd}"
 
+    return cmd
+
+
+async def compose_exec(
+    project: DaytonaDinDProject,
+    subcommand: list[str],
+    env: dict[str, str] | None = None,
+    timeout: int | None = 60,
+) -> tuple[int, str]:
+    """Run a ``docker compose`` subcommand on the DinD sandbox.
+
+    Returns (exit_code, output).
+    """
+    cmd = compose_command(project, subcommand, env)
     return await vm_exec(project.sandbox, cmd, timeout=timeout)
 
 

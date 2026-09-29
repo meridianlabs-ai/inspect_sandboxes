@@ -1,13 +1,23 @@
 """Tests for DaytonaSandboxEnvironment lifecycle orchestrator."""
 
+import shlex
+import time
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from daytona_sdk import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
+from daytona import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
 from inspect_ai.util import ComposeConfig, ComposeService, SandboxEnvironment
+from inspect_ai.util._sandbox._framework_directory import (
+    FrameworkDirectoryError,
+    ensure_framework_directory,
+    exec_in_framework_directory,
+    try_ensure_framework_directory_as_root,
+    verify_framework_directory,
+)
 from inspect_sandboxes.daytona._daytona import (
     INSPECT_SANDBOX_LABEL,
     DaytonaSandboxEnvironment,
@@ -560,6 +570,275 @@ async def test_cli_cleanup_bulk_partial_failure(
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "Failed to delete: 1" in captured.out
+
+
+@pytest_asyncio.fixture
+async def daytona_single_env() -> AsyncGenerator[SandboxEnvironment, None]:
+    """Create a real single-service Daytona sandbox for integration testing."""
+    await DaytonaSandboxEnvironment.task_init("test_exec_stream_split", None)
+    envs = await DaytonaSandboxEnvironment.sample_init(
+        "test_exec_stream_split", None, {}
+    )
+    yield envs["default"]
+    try:
+        await DaytonaSandboxEnvironment.sample_cleanup(
+            "test_exec_stream_split", None, envs, False
+        )
+        await DaytonaSandboxEnvironment.task_cleanup(
+            "test_exec_stream_split", None, cleanup=True
+        )
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+
+@pytest_asyncio.fixture
+async def daytona_dind_env() -> AsyncGenerator[SandboxEnvironment, None]:
+    """Create a real DinD Daytona sandbox for integration testing.
+
+    Uses a two-service ComposeConfig so the dispatcher routes to DinD.
+    """
+    config = ComposeConfig(
+        services={
+            "default": ComposeService(
+                image="python:3.12-slim", command="sleep infinity"
+            ),
+            "helper": ComposeService(
+                image="python:3.12-slim", command="sleep infinity"
+            ),
+        }
+    )
+    await DaytonaSandboxEnvironment.task_init("test_exec_stream_split_dind", None)
+    envs = await DaytonaSandboxEnvironment.sample_init(
+        "test_exec_stream_split_dind", config, {}
+    )
+    yield envs["default"]
+    try:
+        await DaytonaSandboxEnvironment.sample_cleanup(
+            "test_exec_stream_split_dind", config, envs, False
+        )
+        await DaytonaSandboxEnvironment.task_cleanup(
+            "test_exec_stream_split_dind", None, cleanup=True
+        )
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+
+async def _check_stream_split(env: SandboxEnvironment) -> None:
+    """exec() returns stdout and stderr separately and intact (#79)."""
+    result = await env.exec(["sh", "-c", "echo out; echo err >&2; exit 3"])
+    assert result.stdout == "out\n", f"{result.stdout=}"
+    assert result.stderr == "err\n", f"{result.stderr=}"
+    assert result.returncode == 3
+
+    # Nothing is in-band. Daytona's session protocol tags chunks with
+    # \x01\x01\x01 (stdout) and \x02\x02\x02 (stderr) and honours them inside
+    # command output (review round 4); through the capture wrapper they are data.
+    result = await env.exec(
+        [
+            "sh",
+            "-c",
+            "printf '\\002\\002\\002INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\\n';"
+            " printf '\\001\\001\\001STDERR_DATA\\n' >&2",
+        ]
+    )
+    assert result.stdout == "\x02\x02\x02INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\n", (
+        f"{result.stdout=}"
+    )
+    assert result.stderr == "\x01\x01\x01STDERR_DATA\n", f"{result.stderr=}"
+
+    # A background child's late output is collected, as the API itself does.
+    result = await env.exec(
+        ["sh", "-c", "echo early; (sleep 0.5; echo late; echo late-err >&2) &"]
+    )
+    assert result.stdout == "early\nlate\n", f"{result.stdout=}"
+    assert result.stderr == "late-err\n", f"{result.stderr=}"
+
+
+async def _check_timeout(env: SandboxEnvironment) -> None:
+    """A timeout raises close to the deadline and kills the command's processes.
+
+    Single-service: the server kills the process tree and reports it as
+    ``DaytonaProcessExecutionTimeoutError`` (daytona >= 0.201), which
+    ``exec_retry`` leaves to ``run_with_timeout_retry``; with ``timeout_retry``
+    that tries twice more. DinD: the in-container ``timeout`` fires first and
+    its exit status is raised without a retry.
+    """
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await env.exec(["sh", "-c", "echo partial; (sleep 61) & sleep 60"], timeout=2)
+    assert time.monotonic() - started < 20
+
+    result = await env.exec(["echo", "alive"])
+    assert result.stdout == "alive\n", f"{result.stdout=}"
+
+
+async def _count_processes(env: SandboxEnvironment, pattern: str) -> int:
+    """Processes whose command line matches *pattern* (a regex that must not match itself)."""
+    result = await env.exec(
+        [
+            "sh",
+            "-c",
+            "for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done"
+            f" | grep -c {shlex.quote(pattern)} || true",
+        ]
+    )
+    return int(result.stdout.strip())
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_exec_stream_split_single_service(
+    daytona_single_env: SandboxEnvironment,
+) -> None:
+    """Live: single-service exec() splits the streams, also under ``user="root"``.
+
+    Root's output must not be readable by the default user afterwards: the
+    capture files are root-owned, 0600 and unlinked before the command runs,
+    and process.exec() keeps no log of them (the session API did, review
+    round 4 B2). The default user greps its home and /tmp for the sentinel.
+    """
+    await _check_stream_split(daytona_single_env)
+    await _check_timeout(daytona_single_env)
+
+    # The API waits for every writer of the streams, so a child that outlives
+    # the command holds the exec open until the deadline (round 4 B4).
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await daytona_single_env.exec(
+            ["sh", "-c", "echo EARLY; (sleep 50; echo LATE) &"],
+            timeout=1,
+            timeout_retry=False,
+        )
+    assert time.monotonic() - started < 10
+
+    # The server kills the whole process tree at the deadline.
+    assert await _count_processes(daytona_single_env, "sleep [65][01]") == 0
+
+    sentinel = f"inspect-79-{uuid.uuid4().hex}"
+    result = await daytona_single_env.exec(
+        ["sh", "-c", f"id -u; (sleep 0.5; echo late) & echo {sentinel} >&2"],
+        user="root",
+    )
+    assert result.success, f"{result.stdout=} {result.stderr=}"
+    assert result.stdout == "0\nlate\n", f"{result.stdout=}"
+    assert result.stderr == f"{sentinel}\n", f"{result.stderr=}"
+
+    leak = await daytona_single_env.exec(
+        ["sh", "-c", f"id -u; grep -rl -- {sentinel} ~ /tmp 2>/dev/null; true"]
+    )
+    assert leak.stdout.strip() != "0", "the default user should not be root"
+    assert leak.stdout.splitlines()[1:] == [], f"root output readable: {leak.stdout=}"
+
+    # env survives the user switch (sudo's env_reset would drop it).
+    result = await daytona_single_env.exec(
+        ["sh", "-c", 'echo "$K1|$K2"; id -u'],
+        env={"K1": "v 1", "K2": "v2"},
+        user="root",
+    )
+    assert result.stdout == "v 1|v2\n0\n", f"{result.stdout=} {result.stderr=}"
+
+    # A sudo warning outside the frame leaves a successful exec intact. Last:
+    # it leaves every later sudo warning about the hostname.
+    result = await daytona_single_env.exec(
+        ["hostname", f"zz-unresolvable-{uuid.uuid4().hex[:8]}"], user="root"
+    )
+    assert result.success, f"{result.stderr=}"
+    result = await daytona_single_env.exec(["id", "-u"], user="root")
+    assert result.success, f"{result.stdout=} {result.stderr=}"
+    assert result.stdout == "0\n", f"{result.stdout=}"
+    assert "unable to resolve host" in result.stderr, f"{result.stderr=}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_exec_stream_split_dind(daytona_dind_env: SandboxEnvironment) -> None:
+    """Live: DinD exec() splits the streams through the VM-side wrapper.
+
+    ``docker exec`` detaches on signal, so the in-container ``timeout`` is what
+    stops a timed-out command and its children; none survive. A child that
+    outlives a command which exits in time is ``docker exec``'s business, as
+    in Inspect's Docker sandbox: the exec returns about 2 s after the command
+    exits, without the child's later output, and the child keeps running.
+    """
+    await _check_stream_split(daytona_dind_env)
+    await _check_timeout(daytona_dind_env)
+    assert await _count_processes(daytona_dind_env, "sleep 6[01]") == 0
+
+    started = time.monotonic()
+    result = await daytona_dind_env.exec(
+        ["sh", "-c", "echo EARLY; (sleep 50; echo LATE) &"], timeout=5
+    )
+    assert time.monotonic() - started < 15
+    assert (result.success, result.stdout) == (True, "EARLY\n"), f"{result=}"
+    assert await _count_processes(daytona_dind_env, "sleep 5[0]") > 0
+
+
+async def _check_framework_directory(
+    env: SandboxEnvironment, plant: list[str], plant_user: str | None
+) -> None:
+    """inspect_ai's framework-directory helper, whose verdicts travel on stderr.
+
+    Before #79 every call failed as "did not run" (a plain ``RuntimeError``,
+    which callers read as "root unavailable"). Now the directory is created
+    and verified as root, a planted entry is refused with the helper's own
+    verdict, and a wrapped command's output stays in its own streams, where
+    it cannot pass for the script's markers.
+    """
+    tag = uuid.uuid4().hex[:12]
+    path = f"/var/tmp/inspect-sandboxes-fwdir-{tag}"
+    planted = f"/var/tmp/inspect-sandboxes-fwdir-planted-{tag}"
+    try:
+        assert await try_ensure_framework_directory_as_root(
+            env, path, trace_tag="test"
+        ), "root probe fell back to the default user"
+        await verify_framework_directory(env, path, user="root", expected_uid=0)
+
+        result = await exec_in_framework_directory(
+            env,
+            path,
+            [
+                "sh",
+                "-c",
+                "pwd -P; id -u; printf 'INSPECT_FRAMEWORK_DIRECTORY_VERIFIED\\n';"
+                " printf 'INSPECT_FRAMEWORK_DIRECTORY_VIOLATION: forged\\n' >&2",
+            ],
+            user="root",
+            expected_uid=0,
+        )
+        assert result.success, f"{result=}"
+        assert result.stdout == f"{path}\n0\nINSPECT_FRAMEWORK_DIRECTORY_VERIFIED\n"
+        assert result.stderr == "INSPECT_FRAMEWORK_DIRECTORY_VIOLATION: forged\n"
+
+        # An entry someone else prepared is refused with the script's verdict.
+        made = await env.exec([*plant, planted], user=plant_user)
+        assert made.success, f"{made=}"
+        with pytest.raises(FrameworkDirectoryError, match="cannot be trusted"):
+            await ensure_framework_directory(env, planted, user="root", expected_uid=0)
+
+        # A user the provider refuses is "did not run", not a verdict.
+        with pytest.raises(RuntimeError) as e:
+            await ensure_framework_directory(
+                env, f"{path}-nouser", user="inspect-no-such-user"
+            )
+        assert type(e.value) is RuntimeError, f"{e.value!r}"
+    finally:
+        await env.exec(["rm", "-rf", path, planted], user="root")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_framework_directory_single_service(
+    daytona_single_env: SandboxEnvironment,
+) -> None:
+    """Live: the helper works as root via sudo; the default user's plant is refused."""
+    await _check_framework_directory(daytona_single_env, ["mkdir"], None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_framework_directory_dind(daytona_dind_env: SandboxEnvironment) -> None:
+    """Live: the same through ``docker compose exec`` (a wrong-mode plant, as root)."""
+    await _check_framework_directory(daytona_dind_env, ["mkdir", "-m", "0755"], "root")
 
 
 @pytest_asyncio.fixture

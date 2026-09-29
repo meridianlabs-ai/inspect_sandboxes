@@ -9,9 +9,14 @@ on:
       - main
   workflow_dispatch:
 
+# Read-only for every job that runs code from the checkout: an agent may land
+# build and dependency configuration (pyproject.toml, uv.lock; the tier-2
+# opt-in, meridianlabs-ai/agents design/executed-paths-residual.md), and these
+# jobs run it. The coverage writes happen where no checkout code runs: the PR
+# comment from coverage-comment.yml (workflow_run), the data branch from the
+# `coverage` job below.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   py-lint:
@@ -21,6 +26,8 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -41,6 +48,8 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -54,6 +63,9 @@ jobs:
 
   py-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # the coverage action reads the PR diff
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
@@ -61,6 +73,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -71,8 +84,73 @@ jobs:
         run: uv sync
       - name: Run tests with coverage
         run: uv run pytest -m "not integration" --cov=inspect_sandboxes --cov-report=term --cov-report=xml --cov-branch
+      # The action's PR mode with a read-only token: it cannot post, so it
+      # writes the comment to a file, which coverage-comment.yml posts (the
+      # action's documented two-workflow split). One matrix entry, so the
+      # comment and the data come from a single run.
       - name: Coverage comment
+        id: coverage_comment
+        if: matrix.python-version == '3.12' && github.event_name == 'pull_request'
         uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          MINIMUM_GREEN: 95
+          MINIMUM_ORANGE: 90
+      - name: Store the coverage comment
+        if: steps.coverage_comment.outputs.COMMENT_FILE_WRITTEN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          # coverage-comment.yml's action reads these default names.
+          name: python-coverage-comment-action
+          path: python-coverage-comment-action.txt
+      - name: Store the coverage data
+        if: matrix.python-version == '3.12' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # Main's coverage data, on the action's data branch. Runs nothing from the
+  # checkout: the action's own container reads the .coverage file py-test
+  # stored and the source it covers. v3 pushes with the credentials
+  # actions/checkout persists (v4.1 and later take the token instead).
+  coverage:
+    needs: py-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # py-test ran the checkout's code, so its artifact may hold anything:
+      # it lands outside the checkout, and only a single regular .coverage
+      # file is copied in (never a link, a directory, .git/config or any
+      # other member).
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-data
+          path: ${{ runner.temp }}/coverage-data
+      - name: Take only the coverage data file
+        env:
+          ARTIFACT: ${{ runner.temp }}/coverage-data
+        run: |
+          members=$(cd "$ARTIFACT" && find . -mindepth 1)
+          if [ "$members" != "./.coverage" ] || [ -L "$ARTIFACT/.coverage" ] || [ ! -f "$ARTIFACT/.coverage" ]; then
+            echo "::error::coverage-data must hold only a regular .coverage file; it holds: $members"
+            exit 1
+          fi
+          rm -f -- .coverage
+          cp -- "$ARTIFACT/.coverage" .coverage
+      - name: Coverage data
+        uses: py-cov-action/python-coverage-comment-action@v3
+        env:
+          # The action runs `coverage json/html/report` in the checkout, which
+          # would read the checkout's coverage configuration and import any
+          # plugins it names. An agent may land pyproject.toml (tier 2), so
+          # coverage reads no configuration here: only this empty file.
+          COVERAGE_RCFILE: /dev/null
         with:
           GITHUB_TOKEN: ${{ github.token }}
           MINIMUM_GREEN: 95
@@ -85,6 +163,8 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:

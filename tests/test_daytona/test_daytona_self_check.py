@@ -34,12 +34,6 @@ SANDBOX_CONFIGS = [
         id="single",
         config=None,
         xfails={
-            "test_exec_stderr": XFail(
-                "Daytona merges stdout+stderr; stderr always empty"
-            ),
-            "test_exec_stderr_utf": XFail(
-                "Daytona merges stdout+stderr; stderr always empty"
-            ),
             "test_exec_permission_error": XFail(
                 "exit code 126, not translated to PermissionError"
             ),
@@ -49,12 +43,6 @@ SANDBOX_CONFIGS = [
         id="dind",
         config=dind_config(),
         xfails={
-            "test_exec_stderr": XFail(
-                "DinD routes through compose exec; stderr merged"
-            ),
-            "test_exec_stderr_utf": XFail(
-                "DinD routes through compose exec; stderr merged"
-            ),
             "test_exec_permission_error": XFail(
                 "exit code 126, not translated to PermissionError"
             ),
