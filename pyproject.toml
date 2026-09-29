@@ -135,6 +135,10 @@ convention = "google"
 
 [tool.coverage.run]
 relative_files = true
+# hatch-vcs writes this at install time and it is gitignored, so the
+# `coverage` job in build.yaml (a bare checkout, nothing installed) has no
+# source for it and `coverage json` fails.
+omit = ["src/inspect_sandboxes/_version.py"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
