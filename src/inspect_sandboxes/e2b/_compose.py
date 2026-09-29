@@ -14,11 +14,116 @@ from inspect_sandboxes._util.compose import (
     parse_service_ports,
     resolve_dockerfile_path,
 )
+from inspect_sandboxes._util.compose_support import (
+    ComposeSupport,
+    ignored,
+    partial,
+    rejected,
+    supported,
+    validate_compose_support,
+)
 
 logger = getLogger(__name__)
 
 DEFAULT_CPU_COUNT = 2
 DEFAULT_MEMORY_MB = 1024
+
+# Every x-e2b key this provider reads (see extract_x_e2b).
+_E2B_EXTENSION_KEYS = frozenset(
+    {"template", "timeout", "cpu_count", "memory_mb", "envs", "user", "metadata"}
+)
+
+_NOT_EXECUTED = (
+    "E2B sandboxes run envd; the Compose process is not started, so a "
+    "keep-alive such as `sleep infinity` is unnecessary."
+)
+
+# How the single-service converter treats each Compose field. Validated (and
+# rendered in docs/e2b.qmd) by validate_compose_support; see
+# _util/compose_support.py. The DinD path runs Compose itself and is exempt.
+E2B_COMPOSE_SUPPORT = ComposeSupport(
+    provider="E2B",
+    service={
+        "image": supported(
+            "A template is built from the image; ignored when `x-e2b.template` is set."
+        ),
+        "build": partial(
+            "`context` and `dockerfile` locate the Dockerfile, but the Dockerfile's own directory is the build context, so `COPY` sources differ from Compose when the Dockerfile is not directly inside `context`. Ignored when `x-e2b.template` is set."
+        ),
+        "command": ignored(_NOT_EXECUTED),
+        "entrypoint": ignored(_NOT_EXECUTED),
+        "working_dir": ignored(
+            "Commands start in the sandbox user's home; pass `cwd=` to `exec()`."
+        ),
+        "environment": supported(
+            "Set on the sandbox at creation; `x-e2b.envs` adds to (and overrides) these."
+        ),
+        "env_file": ignored(
+            "Files are not read; put the variables under `environment` or `x-e2b.envs`."
+        ),
+        "user": rejected(
+            "Compose `user` is not applied on E2B yet (issue #85), so commands would run as root; pass `user=` to `exec()` instead."
+        ),
+        "healthcheck": ignored("The sandbox is ready once creation returns."),
+        "ports": partial(
+            "Container ports are surfaced as E2B host URLs through `connection()`. Host bindings are dropped; UDP entries and port ranges are dropped with a warning."
+        ),
+        "expose": ignored(
+            "`expose` ports are host-private and have no E2B equivalent; use `ports` to get a host URL."
+        ),
+        "volumes": rejected(
+            "Bind mounts and named volumes cannot be attached; ship files with `Sample.files` / `write_file()`."
+        ),
+        "devices": ignored("Host devices cannot be mapped into a E2B sandbox."),
+        "networks": ignored("Single service; there is no network to join."),
+        "network_mode": partial(
+            "Values other than `none` match E2B's default (network allowed). `none` is rejected: this provider does not block internet access yet (issue #86), so the service would run unisolated."
+        ),
+        "hostname": ignored("The hostname is assigned by E2B."),
+        "runtime": ignored("The runtime is chosen by E2B; there are no GPUs."),
+        "init": ignored("E2B has no init-process option."),
+        "privileged": ignored("E2B sandboxes always run unprivileged."),
+        "shm_size": ignored("`/dev/shm` size is fixed by E2B."),
+        "ulimits": ignored("Resource limits cannot be set at creation."),
+        "depends_on": ignored("Single service; nothing to depend on."),
+        "pull_policy": ignored("E2B pulls the image when it builds the template."),
+        "platform": ignored(
+            "E2B templates are `linux/amd64` only; there is no architecture selection."
+        ),
+        "extra_hosts": ignored("`/etc/hosts` entries cannot be added at creation."),
+        "cap_add": ignored(
+            "Capabilities cannot be granted beyond the sandbox defaults."
+        ),
+        "cap_drop": rejected(
+            "Capabilities cannot be dropped, so the sandbox would run with more privilege than the file requests."
+        ),
+        "security_opt": rejected(
+            "seccomp, AppArmor and no-new-privileges options cannot be applied, so the sandbox would be less confined than the file requests."
+        ),
+        "tmpfs": ignored("tmpfs mounts cannot be declared at creation."),
+        "restart": ignored("Sandboxes are never restarted."),
+        "stdin_open": ignored("`exec()` supplies stdin per command."),
+        "tty": ignored("Commands run without a pseudo-TTY."),
+        "deploy": partial(
+            "`cpus` round up to whole cores without warning and `memory` is taken in MiB, both baked into the template; limits win over reservations; GPU `devices` are dropped with a warning. `x-e2b.cpu_count` / `memory_mb` override; all of it is ignored when `x-e2b.template` is set."
+        ),
+        "mem_limit": supported(
+            "Baked into the template; ignored when `x-e2b.template` is set."
+        ),
+        "mem_reservation": ignored("E2B has no memory reservation."),
+        "memswap_limit": ignored("Swap cannot be configured."),
+        "cpus": partial(
+            "Rounded up to whole cores and baked into the template; ignored when `x-e2b.template` is set."
+        ),
+        "x_default": supported("Selects the service to run."),
+    },
+    top_level={
+        "volumes": ignored("Named volume definitions have no E2B mapping."),
+        "networks": ignored("Network definitions have no E2B mapping."),
+    },
+    extension="x-e2b",
+    extension_keys=_E2B_EXTENSION_KEYS,
+)
 
 
 class E2BSingleServiceParams(NamedTuple):
@@ -54,10 +159,18 @@ def resolve_single_service_params(
         config: Parsed compose configuration.
         compose_path: Path to the compose file for resolving relative
             Dockerfile paths. Pass ``None`` for an in-memory ``ComposeConfig``.
+
+    Raises:
+        ValueError: If the config uses a Compose field E2B cannot honor (see
+            ``E2B_COMPOSE_SUPPORT``), ``network_mode: none`` (issue #86) or
+            ``x-e2b.user`` (issue #85), neither of which this provider applies
+            yet.
     """
+    validate_compose_support(config, E2B_COMPOSE_SUPPORT)
     _, service = find_default_service(config)
-    compose_dir = Path(compose_path).parent if compose_path else Path.cwd()
     extensions = extract_x_e2b(config.extensions)
+    _reject_unapplied_settings(service, extensions)
+    compose_dir = Path(compose_path).parent if compose_path else Path.cwd()
 
     template: str | None = extensions.get("template")
     dockerfile_path: Path | None = None
@@ -106,6 +219,36 @@ def resolve_single_service_params(
     )
 
 
+def _reject_unapplied_settings(
+    service: ComposeService, extensions: dict[str, Any]
+) -> None:
+    """Fail on settings this provider documents but does not apply yet.
+
+    Both change identity or isolation, so silently continuing is worse than
+    an error: ``network_mode: none`` would run with E2B's default internet
+    access (issue #86) and ``x-e2b.user`` would run commands as root
+    (issue #85). Service-level ``user`` is rejected by the declaration.
+    """
+    problems: list[str] = []
+    if service.network_mode == "none":
+        problems.append(
+            "network_mode: none is not applied yet "
+            "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/86); "
+            "the sandbox would keep E2B's default internet access"
+        )
+    if extensions.get("user") is not None:
+        problems.append(
+            "x-e2b.user is not applied yet "
+            "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/85); "
+            "commands would run as root. Pass user= to exec() instead"
+        )
+    if problems:
+        details = "\n".join(f"  - {problem}" for problem in problems)
+        raise ValueError(
+            f"E2B cannot honor the following Compose settings yet:\n{details}"
+        )
+
+
 def service_connection_ports(service: ComposeService) -> list[int]:
     """Return the container ports to surface through ``connection()``.
 
@@ -114,17 +257,10 @@ def service_connection_ports(service: ComposeService) -> list[int]:
     translate ports at creation; we record the container side of each
     ``service.ports`` entry for ``connection()`` to turn into ``get_host`` URLs.
 
-    ``expose`` is host-private and is warned about, never surfaced. Port ranges
-    and UDP entries are warned about and skipped.
+    ``expose`` is host-private and never surfaced; validate_compose_support
+    warns about it (see E2B_COMPOSE_SUPPORT). Port ranges and UDP entries are
+    warned about and skipped.
     """
-    if service.expose:
-        warn_once(
-            logger,
-            "E2B does not surface Compose 'expose' ports. They stay "
-            "host-private (reachable only by sibling services). Use 'ports' to "
-            "get a host URL through connection().",
-        )
-
     if not service.ports:
         return []
 
@@ -213,6 +349,16 @@ def _service_to_resources(
         cpu = int(extensions["cpu_count"])
     if extensions.get("memory_mb") is not None:
         memory_mb = int(extensions["memory_mb"])
+
+    if service.deploy and service.deploy.resources:
+        reservations = service.deploy.resources.reservations
+        devices = (reservations.devices if reservations else None) or []
+        if any(d.capabilities and "gpu" in d.capabilities for d in devices):
+            warn_once(
+                logger,
+                "E2B has no GPU allocation; ignoring the GPU reservation in "
+                "deploy.resources.reservations.devices.",
+            )
 
     if (
         (cpu is None or memory_mb is None)

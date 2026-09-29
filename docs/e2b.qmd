@@ -130,7 +130,7 @@ The top-level `x-e2b` key on a compose file passes settings to the E2B sandbox.
 | `memory_mb` | int | `1024` (single-service) / `4096` (DinD) | Memory in MiB. Takes precedence over compose `deploy.resources` and service-level `mem_limit`. |
 | `timeout` | float (seconds) | `3600` | Sandbox lifetime. E2B caps this at 3600 (Hobby) or 86400 (Pro). |
 | `envs` | dict | `{}` | Extra env vars. Single-service: merged with service `environment` (x-e2b wins). DinD: passed to the Devbox VM. |
-| `user` | str | `None` | OS user for commands. Overrides the service-level `user` field. |
+| `user` | str | `None` | OS user for commands. Not applied yet ([#85](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/85)): setting it raises a `ValueError` until then; pass `user=` to `exec()` instead. |
 | `metadata` | dict | `{}` | Custom metadata, merged with the run's tracking metadata (which takes precedence for `created_by`, `inspect_run_id`, `task`, `name`). |
 :::
 
@@ -146,6 +146,71 @@ x-e2b:
   metadata:
     project: alpha
 ```
+
+## Compose support {#e2b-compose-support}
+
+For single-service Compose files the E2B converter maps the service onto an E2B template and sandbox, and every populated field is checked against the tables below before the sandbox is created. Multi-service files run under Docker-in-Docker, where Compose itself handles every field, so this check does not apply to them. The Compose `command` and `entrypoint` are never started on E2B: the sandbox only runs what you pass to `exec()`, so a service that is expected to serve something (for example `command: python server.py` plus `ports`) will not.
+
+- **supported**: translated.
+- **partial**: translated with caveats; the note says what is dropped (some conversions warn about it, some do not).
+- **ignored**: dropped with a warning (once per process).
+- **rejected**: `ValueError` before sandbox creation, because dropping the field would change the sandbox's identity, isolation or data.
+
+A populated field missing from these tables (for example one added by a newer `inspect_ai`) is warned about rather than silently dropped, and unknown `x-e2b` keys warn too. The `x-e2b` settings themselves are listed under [Configuration](#configuration).
+
+### Service fields
+
+::: {tbl-colwidths="[18,12,70]"}
+| Field | Support | Notes |
+|---|---|---|
+| `image` | supported | A template is built from the image; ignored when `x-e2b.template` is set. |
+| `build` | partial | `context` and `dockerfile` locate the Dockerfile, but the Dockerfile's own directory is the build context, so `COPY` sources differ from Compose when the Dockerfile is not directly inside `context`. Ignored when `x-e2b.template` is set. |
+| `command` | ignored | E2B sandboxes run envd; the Compose process is not started, so a keep-alive such as `sleep infinity` is unnecessary. |
+| `entrypoint` | ignored | E2B sandboxes run envd; the Compose process is not started, so a keep-alive such as `sleep infinity` is unnecessary. |
+| `working_dir` | ignored | Commands start in the sandbox user's home; pass `cwd=` to `exec()`. |
+| `environment` | supported | Set on the sandbox at creation; `x-e2b.envs` adds to (and overrides) these. |
+| `env_file` | ignored | Files are not read; put the variables under `environment` or `x-e2b.envs`. |
+| `user` | rejected | Compose `user` is not applied on E2B yet (issue #85), so commands would run as root; pass `user=` to `exec()` instead. |
+| `healthcheck` | ignored | The sandbox is ready once creation returns. |
+| `ports` | partial | Container ports are surfaced as E2B host URLs through `connection()`. Host bindings are dropped; UDP entries and port ranges are dropped with a warning. |
+| `expose` | ignored | `expose` ports are host-private and have no E2B equivalent; use `ports` to get a host URL. |
+| `volumes` | rejected | Bind mounts and named volumes cannot be attached; ship files with `Sample.files` / `write_file()`. |
+| `devices` | ignored | Host devices cannot be mapped into a E2B sandbox. |
+| `networks` | ignored | Single service; there is no network to join. |
+| `network_mode` | partial | Values other than `none` match E2B's default (network allowed). `none` is rejected: this provider does not block internet access yet (issue #86), so the service would run unisolated. |
+| `hostname` | ignored | The hostname is assigned by E2B. |
+| `runtime` | ignored | The runtime is chosen by E2B; there are no GPUs. |
+| `init` | ignored | E2B has no init-process option. |
+| `privileged` | ignored | E2B sandboxes always run unprivileged. |
+| `shm_size` | ignored | `/dev/shm` size is fixed by E2B. |
+| `ulimits` | ignored | Resource limits cannot be set at creation. |
+| `depends_on` | ignored | Single service; nothing to depend on. |
+| `pull_policy` | ignored | E2B pulls the image when it builds the template. |
+| `platform` | ignored | E2B templates are `linux/amd64` only; there is no architecture selection. |
+| `extra_hosts` | ignored | `/etc/hosts` entries cannot be added at creation. |
+| `cap_add` | ignored | Capabilities cannot be granted beyond the sandbox defaults. |
+| `cap_drop` | rejected | Capabilities cannot be dropped, so the sandbox would run with more privilege than the file requests. |
+| `security_opt` | rejected | seccomp, AppArmor and no-new-privileges options cannot be applied, so the sandbox would be less confined than the file requests. |
+| `tmpfs` | ignored | tmpfs mounts cannot be declared at creation. |
+| `restart` | ignored | Sandboxes are never restarted. |
+| `stdin_open` | ignored | `exec()` supplies stdin per command. |
+| `tty` | ignored | Commands run without a pseudo-TTY. |
+| `deploy` | partial | `cpus` round up to whole cores without warning and `memory` is taken in MiB, both baked into the template; limits win over reservations; GPU `devices` are dropped with a warning. `x-e2b.cpu_count` / `memory_mb` override; all of it is ignored when `x-e2b.template` is set. |
+| `mem_limit` | supported | Baked into the template; ignored when `x-e2b.template` is set. |
+| `mem_reservation` | ignored | E2B has no memory reservation. |
+| `memswap_limit` | ignored | Swap cannot be configured. |
+| `cpus` | partial | Rounded up to whole cores and baked into the template; ignored when `x-e2b.template` is set. |
+| `x-default` | supported | Selects the service to run. |
+:::
+
+### Top-level fields
+
+::: {tbl-colwidths="[18,12,70]"}
+| Field | Support | Notes |
+|---|---|---|
+| `volumes` | ignored | Named volume definitions have no E2B mapping. |
+| `networks` | ignored | Network definitions have no E2B mapping. |
+:::
 
 ## Finding sandboxes
 

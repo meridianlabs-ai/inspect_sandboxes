@@ -645,11 +645,48 @@ def test_service_connection_ports_malformed_value_warns_neutrally(
     assert "port range or malformed" in messages
 
 
-def test_service_connection_ports_expose_warns_not_surfaced(
+def test_expose_warns_and_is_not_surfaced(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Expose is host-private: the converter warns (via DAYTONA_COMPOSE_SUPPORT)."""
     service = ComposeService(image="x", expose=["5432"])
+    config = ComposeConfig(services={"default": service})
     with caplog.at_level("WARNING"):
-        ports = service_connection_ports(service)
-    assert ports == []
+        create_single_service_params(config, None, {})
+    assert service_connection_ports(service) == []
     assert any("expose" in r.message for r in caplog.records)
+
+
+def test_create_single_service_params_rejects_compose_volumes() -> None:
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", volumes=["./data:/data"])}
+    )
+    with pytest.raises(ValueError, match=r"services\.default\.volumes"):
+        create_single_service_params(config, None, {})
+
+
+def test_create_single_service_params_warns_for_ignored_command(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The Compose command is never started on Daytona; say so once."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", command="sleep infinity")}
+    )
+    with caplog.at_level("WARNING"):
+        create_single_service_params(config, None, {})
+    assert any("services.default.command" in r.message for r in caplog.records)
+
+
+def test_unknown_x_daytona_key_warns(caplog: pytest.LogCaptureFixture) -> None:
+    config = ComposeConfig.model_validate(
+        {
+            "services": {"default": {"image": "x"}},
+            "x-daytona": {"auto_stop_interval": 10, "volumes": ["data:/data"]},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        params = create_single_service_params(config, None, {})
+    assert params.auto_stop_interval == 10
+    messages = " ".join(r.message for r in caplog.records)
+    assert "x-daytona.volumes" in messages
+    assert "x-daytona.auto_stop_interval" not in messages
