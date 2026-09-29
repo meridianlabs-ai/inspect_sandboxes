@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from logging import getLogger
 
-from daytona_sdk import (
+from daytona import (
     AsyncDaytona,
     AsyncSandbox,
     CreateSandboxFromImageParams,
@@ -25,6 +25,7 @@ from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 
 from inspect_sandboxes._util.naming import _HEX_LEN
 
+from ._exec_capture import build_remove_command
 from ._retry import standard_retry
 
 logger = getLogger(__name__)
@@ -45,10 +46,9 @@ def build_stdin_command(cmd: list[str], stdin_file: str, cleanup: bool = True) -
             Set to False when the caller handles cleanup separately
             (e.g., when running as a different user who can't delete the file).
     """
-    quoted_file = shlex.quote(stdin_file)
-    base = f"{shlex.join(cmd)} < {quoted_file}"
+    base = f"{shlex.join(cmd)} < {shlex.quote(stdin_file)}"
     if cleanup:
-        return f"{base}; _ec=$?; rm -f {quoted_file}; exit $_ec"
+        return f"{base}; _ec=$?; ({build_remove_command([stdin_file])}); exit $_ec"
     return f"{base}; _ec=$?; exit $_ec"
 
 

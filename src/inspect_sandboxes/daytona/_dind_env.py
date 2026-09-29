@@ -6,13 +6,14 @@ import errno
 import shlex
 import shutil
 import tempfile
+import time
 import uuid
 from logging import getLogger
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, overload
 
 import yaml
-from daytona_sdk import AsyncDaytona, Resources
+from daytona import AsyncDaytona, Resources
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
@@ -31,11 +32,18 @@ from ._compose import (
 )
 from ._dind_project import (
     DaytonaDinDProject,
+    compose_command,
     compose_exec,
     create_dind_project,
     destroy_dind_project,
     discover_working_dir,
     vm_exec,
+)
+from ._exec_capture import (
+    ExecCapture,
+    build_capture_command,
+    build_remove_command,
+    captured_exec_result,
 )
 from ._retry import run_with_timeout_retry
 from ._sandbox_utils import (
@@ -48,6 +56,16 @@ from ._sandbox_utils import (
 )
 
 logger = getLogger(__name__)
+
+# Extra seconds on the server's exec deadline, so the in-container timeout
+# (which takes up to timeout + 5 s with its SIGKILL grace) fires first.
+_TIMEOUT_SLACK = 10
+
+# Exit statuses of a command stopped by /usr/bin/timeout: 124 GNU (SIGTERM),
+# 137 after the -k SIGKILL, 143 BusyBox (SIGTERM). A command can exit with any
+# of them itself (124 from its own `timeout`, 137 from an OOM kill), so they
+# count as the timeout only once it has elapsed.
+_TIMEOUT_EXITS = (124, 137, 143)
 
 
 class DaytonaDinDServiceEnvironment(SandboxEnvironment):
@@ -212,10 +230,24 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
-        # Timeout: The Daytona server kills the VM-level process tree on
-        # timeout, which tears down the docker compose exec session and its
-        # in-container processes. No in-container ``timeout`` wrapping needed.
+        """Execute a command in the service container.
 
+        Streams: ``docker compose exec`` runs on the VM inside the capture
+            wrapper (see ``build_capture_command``), which returns stdout and
+            stderr apart in one round trip. As with ``docker exec`` in the
+            Docker sandbox, the exec ends about 2 s after the command exits:
+            a background child's later output is dropped and the child keeps
+            running.
+
+        Timeout: The Daytona server kills the VM-level process tree at its
+            deadline, but ``docker exec`` detaches on signal, so the processes
+            inside the container would survive it. As in the Docker sandbox,
+            the container command runs under ``/usr/bin/timeout -k 5s`` and
+            the server's deadline gets 10 s of slack so the in-container
+            timeout fires first. Its exit status (124, 137 or 143) is raised as
+            ``TimeoutError`` once the deadline has passed; a command that
+            exits with one of them sooner gets its own result.
+        """
         # Resolve working directory
         workdir = cwd if cwd is not None else self._working_dir
         if not PurePosixPath(workdir).is_absolute():
@@ -228,6 +260,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         if env:
             for k, v in env.items():
                 exec_cmd.extend(["-e", f"{k}={v}"])
+        exec_cmd.append(self.service)
 
         # Stdin: two-hop upload (VM temp -> compose cp -> container), then pipe
         stdin_vm_file: str | None = None
@@ -246,29 +279,61 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
                 raise RuntimeError(
                     f"Failed to copy stdin to {self.service}: {cp_output}"
                 )
-            stdin_cmd = build_stdin_command(cmd, stdin_container_file)
-            exec_cmd.extend([self.service, "sh", "-c", stdin_cmd])
-        else:
-            exec_cmd.extend([self.service, *cmd])
+
+        def container_command(t: int | None) -> list[str]:
+            # Absolute path: the timeout wrapper runs as `user` before anything
+            # of the caller's, so it is not resolved through the image PATH.
+            timed = (
+                cmd if t is None else ["/usr/bin/timeout", "-k", "5s", f"{t}s", *cmd]
+            )
+            if stdin_container_file is None:
+                return timed
+            return ["sh", "-c", build_stdin_command(timed, stdin_container_file)]
 
         async def _run(t: int | None) -> ExecResult[str]:
-            exit_code, output = await compose_exec(self.project, exec_cmd, timeout=t)
-            return ExecResult(
-                success=exit_code == 0,
-                returncode=exit_code,
-                stdout=output,
-                stderr="",
+            # Daytona merges stdout and stderr into one output field, so the
+            # compose exec runs inside the capture wrapper on the VM.
+            capture = ExecCapture.new()
+            vm_command = build_capture_command(
+                compose_command(self.project, [*exec_cmd, *container_command(t)]),
+                capture,
             )
+            start = time.monotonic()
+            exit_code, output = await vm_exec(
+                self.project.sandbox,
+                vm_command,
+                timeout=t + _TIMEOUT_SLACK if t is not None else None,
+            )
+            result = captured_exec_result(exit_code, output, capture)
+            if t is not None and _timed_out(
+                result.returncode, time.monotonic() - start, t
+            ):
+                error = TimeoutError(f"Command timed out after {t} seconds")
+                partial_output = result.stdout + result.stderr
+                if partial_output:
+                    # read by inspect_ai's sandbox event wrapper (TimeoutError
+                    # has no such attribute to assign)
+                    setattr(error, "truncated_output", partial_output)  # noqa: B010
+                raise error
+            return result
 
         try:
             return await run_with_timeout_retry(_run, timeout, timeout_retry)
         finally:
             if stdin_vm_file is not None:
-                await vm_exec(
-                    self.project.sandbox,
-                    f"rm -f {shlex.quote(stdin_vm_file)}",
-                    timeout=10,
-                )
+                await self._remove_vm_files([stdin_vm_file])
+
+    async def _remove_vm_files(self, files: list[str]) -> None:
+        """Best-effort removal of temp files on the DinD VM."""
+        try:
+            await vm_exec(self.project.sandbox, build_remove_command(files), timeout=10)
+        except Exception as e:
+            trace_message(
+                logger,
+                "daytona",
+                f"Could not remove temp files {files} from sandbox "
+                f"{self.project.sandbox.id}: {e}",
+            )
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
@@ -373,3 +438,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         )
         if exit_code != 0:
             raise RuntimeError(f"Failed to create directory {path}: {output}")
+
+
+def _timed_out(returncode: int, elapsed: float, timeout: int) -> bool:
+    return returncode in _TIMEOUT_EXITS and elapsed >= timeout
