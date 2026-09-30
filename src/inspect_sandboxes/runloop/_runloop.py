@@ -1,0 +1,437 @@
+"""Runloop sandbox provider."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import uuid
+from collections.abc import Iterable
+from contextvars import ContextVar
+from logging import getLogger
+from typing import Any
+
+from inspect_ai.util import (
+    ComposeConfig,
+    SandboxEnvironment,
+    SandboxEnvironmentConfigType,
+    is_compose_yaml,
+    is_dockerfile,
+    parse_compose_yaml,
+    sandboxenv,
+    trace_message,
+)
+from rich import box, print
+from rich.prompt import Confirm
+from rich.table import Table
+from runloop_api_client import AsyncRunloop, NotFoundError
+from typing_extensions import override
+
+from inspect_sandboxes._util.naming import make_sandbox_name
+
+from ._blueprint import (
+    build_blueprint_for_dockerfile,
+    build_blueprint_for_image,
+    reset_blueprint_name_cache,
+)
+from ._compose import (
+    RunloopSingleServiceParams,
+    resolve_single_service_params,
+)
+from ._dind_project import dind_snapshot_ids, reset_dind_snapshot_cache
+from ._retry import DEVBOX_CREATE_POLLING_CONFIG, shutdown_devbox
+from ._single_env import RunloopSingleServiceEnvironment
+
+logger = getLogger(__name__)
+
+INSPECT_SANDBOX_METADATA = {"created_by": "inspect-ai"}
+
+# Bound on concurrent devbox shutdowns during cleanup. Large enough to drain a
+# big backlog quickly, small enough not to burst the API into rate limits.
+_CLEANUP_CONCURRENCY = 10
+
+
+async def _shutdown_all(
+    client: AsyncRunloop, devbox_ids: Iterable[str]
+) -> list[tuple[str, Exception]]:
+    """Shut down devboxes concurrently (bounded), returning per-id failures.
+
+    Each shutdown goes through the retried ``shutdown_devbox``; a
+    ``NotFoundError`` means the devbox is already gone and is not a failure.
+    """
+    semaphore = asyncio.Semaphore(_CLEANUP_CONCURRENCY)
+    failures: list[tuple[str, Exception]] = []
+
+    async def _one(devbox_id: str) -> None:
+        async with semaphore:
+            try:
+                await shutdown_devbox(client, devbox_id)
+            except NotFoundError:
+                pass  # already gone
+            except Exception as e:  # noqa: BLE001 — collected, not swallowed
+                failures.append((devbox_id, e))
+
+    await asyncio.gather(*(_one(devbox_id) for devbox_id in devbox_ids))
+    return failures
+
+
+# Page size for paginated list responses.
+_LIST_PAGE_LIMIT = 100
+
+# Devbox statuses that are already terminal — excluded from cleanup listing so
+# we don't try to reclaim them. Every other status (provisioning, suspended,
+# etc.) is still alive and billable, so it must be reclaimable.
+_TERMINAL_DEVBOX_STATUSES = {"shutdown", "failure"}
+
+_runloop_client: ContextVar[AsyncRunloop | None] = ContextVar(
+    "runloop_client", default=None
+)
+_running_sandboxes: ContextVar[list[str]] = ContextVar("runloop_running_sandboxes")
+_run_id: ContextVar[str] = ContextVar("runloop_run_id")
+
+
+def _init_context() -> None:
+    _running_sandboxes.set([])
+    _run_id.set(uuid.uuid4().hex)
+    reset_blueprint_name_cache()
+    reset_dind_snapshot_cache()
+
+
+def _run_metadata(task_name: str | None = None) -> dict[str, str]:
+    metadata = {**INSPECT_SANDBOX_METADATA, "inspect_run_id": _run_id.get()}
+    if task_name:
+        metadata["task"] = task_name
+    return metadata
+
+
+async def list_devboxes(client: AsyncRunloop, metadata: dict[str, str]) -> list[Any]:
+    """List non-terminal devboxes whose metadata matches *all* key/value pairs.
+
+    Runloop's ``devboxes.list`` API doesn't accept a metadata filter, so we
+    paginate and filter client-side. We keep every non-terminal devbox (not just
+    ``running``) so provisioning/suspended ones are still reclaimed by cleanup.
+    """
+    matches: list[Any] = []
+    async for devbox in client.devboxes.list(limit=_LIST_PAGE_LIMIT):
+        if getattr(devbox, "status", None) in _TERMINAL_DEVBOX_STATUSES:
+            continue
+        meta = getattr(devbox, "metadata", None) or {}
+        if all(meta.get(k) == v for k, v in metadata.items()):
+            matches.append(devbox)
+    return matches
+
+
+@sandboxenv(name="runloop")
+class RunloopSandboxEnvironment(SandboxEnvironment):
+    """Runloop sandbox provider.
+
+    Owns all lifecycle class methods. ``sample_init`` returns instances of
+    ``RunloopSingleServiceEnvironment`` or ``RunloopDinDServiceEnvironment``.
+    """
+
+    @classmethod
+    def config_files(cls) -> list[str]:
+        return [
+            "compose.yaml",
+            "compose.yml",
+            "docker-compose.yaml",
+            "docker-compose.yml",
+            "Dockerfile",
+        ]
+
+    @classmethod
+    def is_docker_compatible(cls) -> bool:
+        return True
+
+    @override
+    @classmethod
+    async def task_init(
+        cls,
+        task_name: str,
+        config: SandboxEnvironmentConfigType | None,
+    ) -> None:
+        _init_context()
+        client = AsyncRunloop()
+        _runloop_client.set(client)
+
+        # Warm the blueprint cache once, before samples fan out. Otherwise every
+        # sample's sample_init races to build the same blueprint concurrently,
+        # each issuing its own blueprints.create — spawning duplicate blueprints
+        # that can blow the account's blueprint cap. sample_init re-resolves from
+        # each sample's own config (which may differ from the task's) and hits
+        # this cache. DinD blueprints stay lazy (built in sample_init_dind),
+        # mirroring E2B.
+        if config is None:
+            return
+        if is_dockerfile(config):
+            await build_blueprint_for_dockerfile(client, str(config))
+            return
+        if is_compose_yaml(config) or isinstance(config, ComposeConfig):
+            if isinstance(config, ComposeConfig):
+                compose_config, compose_path = config, None
+            else:
+                compose_config = parse_compose_yaml(config, multiple_services=True)
+                compose_path = config
+            if len(compose_config.services) > 1:
+                return
+            params = resolve_single_service_params(compose_config, compose_path)
+            await cls._build_blueprint(client, params)
+
+    @override
+    @classmethod
+    async def sample_init(
+        cls,
+        task_name: str,
+        config: SandboxEnvironmentConfigType | None,
+        metadata: dict[str, str],
+    ) -> dict[str, SandboxEnvironment]:
+        client = _runloop_client.get()
+        if client is None:
+            raise RuntimeError(
+                "Runloop client not initialized. task_init must be called first."
+            )
+
+        sandbox_name = make_sandbox_name(task_name, metadata)
+        run_metadata = _run_metadata(task_name)
+
+        if config is None:
+            devbox = await client.devboxes.create_and_await_running(
+                name=sandbox_name,
+                metadata=run_metadata,
+                polling_config=DEVBOX_CREATE_POLLING_CONFIG,
+            )
+        elif is_dockerfile(config):
+            blueprint_name = await build_blueprint_for_dockerfile(client, str(config))
+            devbox = await client.devboxes.create_and_await_running(
+                name=sandbox_name,
+                blueprint_name=blueprint_name,
+                metadata=run_metadata,
+                polling_config=DEVBOX_CREATE_POLLING_CONFIG,
+            )
+        elif is_compose_yaml(config) or isinstance(config, ComposeConfig):
+            if isinstance(config, ComposeConfig):
+                compose_config, compose_path = config, None
+            else:
+                compose_config = parse_compose_yaml(config, multiple_services=True)
+                compose_path = config
+            if len(compose_config.services) > 1:
+                # Deferred import to avoid pulling in DinD machinery for single-service.
+                from ._dind_env import RunloopDinDServiceEnvironment
+
+                envs = await RunloopDinDServiceEnvironment.sample_init_dind(
+                    client,
+                    compose_config,
+                    compose_path,
+                    name=sandbox_name,
+                    metadata=run_metadata,
+                )
+                any_env = next(iter(envs.values())).as_type(
+                    RunloopDinDServiceEnvironment
+                )
+                _running_sandboxes.get().append(any_env.project.devbox_id)
+                return envs
+
+            params = resolve_single_service_params(compose_config, compose_path)
+            blueprint_name = await cls._build_blueprint(client, params)
+            extra_metadata = dict(params.metadata)
+            run_metadata = {**extra_metadata, **run_metadata}
+
+            create_kwargs: dict[str, object] = {
+                "name": sandbox_name,
+                "metadata": run_metadata,
+                "polling_config": DEVBOX_CREATE_POLLING_CONFIG,
+            }
+            if blueprint_name is not None:
+                create_kwargs["blueprint_name"] = blueprint_name
+            if params.blueprint_id is not None:
+                create_kwargs["blueprint_id"] = params.blueprint_id
+            if params.snapshot_id is not None:
+                create_kwargs["snapshot_id"] = params.snapshot_id
+            if params.environment_variables:
+                create_kwargs["environment_variables"] = params.environment_variables
+            if params.launch_parameters is not None:
+                create_kwargs["launch_parameters"] = params.launch_parameters
+            if params.timeout is not None:
+                create_kwargs["timeout"] = params.timeout
+
+            devbox = await client.devboxes.create_and_await_running(**create_kwargs)  # type: ignore[arg-type]
+        else:
+            raise ValueError(
+                f"Unrecognized config: {config}. "
+                "Expected a compose file (*.yaml/*.yml), Dockerfile, "
+                "ComposeConfig object, or None."
+            )
+
+        _running_sandboxes.get().append(devbox.id)
+        trace_message(
+            logger,
+            "runloop",
+            f"Created devbox {devbox.id} for task '{task_name}'",
+        )
+        return {"default": RunloopSingleServiceEnvironment(client, devbox.id)}
+
+    @classmethod
+    async def _build_blueprint(
+        cls,
+        client: AsyncRunloop,
+        params: RunloopSingleServiceParams,
+    ) -> str | None:
+        """Build (or skip) a blueprint per the resolved params.
+
+        Returns the blueprint name if one was built; otherwise None
+        (e.g. when ``blueprint_id`` or ``snapshot_id`` was specified).
+        """
+        if params.blueprint_id is not None or params.snapshot_id is not None:
+            return None
+        if params.blueprint_name is not None:
+            return params.blueprint_name
+        if params.dockerfile_path is not None:
+            return await build_blueprint_for_dockerfile(
+                client,
+                params.dockerfile_path,
+                launch_parameters=params.launch_parameters,
+            )
+        if params.image is not None:
+            return await build_blueprint_for_image(
+                client,
+                params.image,
+                launch_parameters=params.launch_parameters,
+            )
+        return None
+
+    @override
+    @classmethod
+    async def sample_cleanup(
+        cls,
+        task_name: str,
+        config: SandboxEnvironmentConfigType | None,
+        environments: dict[str, SandboxEnvironment],
+        interrupted: bool,
+    ) -> None:
+        if not environments:
+            return
+        # Deferred import to avoid pulling in DinD machinery for single-service.
+        from ._dind_env import RunloopDinDServiceEnvironment
+
+        any_env = next(iter(environments.values()))
+        if isinstance(any_env, RunloopDinDServiceEnvironment):
+            await RunloopDinDServiceEnvironment.sample_cleanup(
+                task_name, config, environments, interrupted
+            )
+        else:
+            await RunloopSingleServiceEnvironment.sample_cleanup(
+                task_name, config, environments, interrupted
+            )
+        # Devboxes stay tracked in _running_sandboxes until task_cleanup shuts
+        # them down. That pass is idempotent (NotFoundError = already gone), so a
+        # shutdown that failed above is retried there instead of being dropped.
+
+    @override
+    @classmethod
+    async def task_cleanup(
+        cls,
+        task_name: str,
+        config: SandboxEnvironmentConfigType | None,
+        cleanup: bool,
+    ) -> None:
+        if not cleanup:
+            return
+
+        client = _runloop_client.get()
+        if client is None:
+            return
+
+        # First pass: tracked devboxes, shut down concurrently.
+        tracked = list(_running_sandboxes.get())
+        failures = await _shutdown_all(client, tracked)
+        attempted = set(tracked)
+
+        # Second pass: orphans by run metadata (skip ones already attempted).
+        run_id = _run_id.get("")
+        if run_id:
+            try:
+                orphans = await list_devboxes(client, {"inspect_run_id": run_id})
+                orphan_ids = [d.id for d in orphans if d.id not in attempted]
+                failures += await _shutdown_all(client, orphan_ids)
+            except Exception as e:
+                logger.warning(f"Failed to list devboxes for cleanup: {e}")
+
+        for devbox_id, error in failures:
+            logger.error(f"Failed to shut down devbox {devbox_id}: {error}")
+        if failures:
+            failed_ids = [devbox_id for devbox_id, _ in failures]
+            logger.warning(
+                f"Failed to cleanup {len(failed_ids)} devbox(es). "
+                f"Failed IDs: {', '.join(failed_ids)}"
+            )
+
+        # Delete the DinD stack snapshots built this run so they don't
+        # accumulate against the account's snapshot cap.
+        for snapshot_id in dind_snapshot_ids():
+            try:
+                await client.devboxes.delete_disk_snapshot(snapshot_id)
+            except Exception as e:  # noqa: BLE001 — best-effort cleanup
+                logger.warning(f"Failed to delete snapshot {snapshot_id}: {e}")
+
+        _running_sandboxes.get().clear()
+        await client.close()
+        _runloop_client.set(None)
+
+    @override
+    @classmethod
+    async def cli_cleanup(cls, id: str | None) -> None:
+        client = AsyncRunloop()
+        try:
+            if id is not None:
+                try:
+                    await client.devboxes.shutdown(id)
+                    print(f"Successfully shut down devbox {id}")
+                except Exception as e:
+                    print(f"[red]Error shutting down devbox {id}: {e}[/red]")
+                    sys.exit(1)
+                return
+
+            # Bulk cleanup.
+            devboxes = await list_devboxes(client, INSPECT_SANDBOX_METADATA)
+
+            if not devboxes:
+                print("No Runloop devboxes found to clean up.")
+                return
+
+            table = Table(
+                box=box.SQUARE,
+                show_lines=False,
+                title_style="bold",
+                title_justify="left",
+            )
+            table.add_column("Devbox ID")
+            for devbox in devboxes:
+                table.add_row(devbox.id)
+            print(table)
+
+            is_interactive = sys.stdin.isatty()
+            is_ci = "CI" in os.environ
+            is_pytest = "PYTEST_CURRENT_TEST" in os.environ
+
+            if is_interactive and not is_ci and not is_pytest:
+                if not Confirm.ask(
+                    f"Are you sure you want to shut down ALL {len(devboxes)} devbox(es) above?"
+                ):
+                    print("Cancelled.")
+                    return
+
+            failures = await _shutdown_all(client, [devbox.id for devbox in devboxes])
+            for devbox_id, error in failures:
+                print(
+                    f"[yellow]Error shutting down devbox {devbox_id}: {error}[/yellow]"
+                )
+
+            success_count = len(devboxes) - len(failures)
+            print(f"\n[green]Successfully shut down: {success_count}[/green]")
+            if failures:
+                print(f"[red]Failed to shut down: {len(failures)}[/red]")
+                sys.exit(1)
+            else:
+                print("Complete.")
+        finally:
+            await client.close()

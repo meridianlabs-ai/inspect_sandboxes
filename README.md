@@ -1,6 +1,6 @@
 # Inspect Sandboxes
 
-The `inspect-sandboxes` Python package provides cloud sandbox environments for [Inspect AI](https://inspect.aisi.org.uk/) evaluations. Each sample runs in a managed sandbox on your provider of choice (Daytona, E2B, or Modal) while the Inspect process runs locally on your machine.
+The `inspect-sandboxes` Python package provides cloud sandbox environments for [Inspect AI](https://inspect.aisi.org.uk/) evaluations. Each sample runs in a managed sandbox on your provider of choice (Daytona, E2B, Modal, or Runloop) while the Inspect process runs locally on your machine.
 
 This lets you run evaluations without a local Docker daemon or your own Kubernetes cluster, and scale to many concurrent samples beyond what fits on a single machine.
 

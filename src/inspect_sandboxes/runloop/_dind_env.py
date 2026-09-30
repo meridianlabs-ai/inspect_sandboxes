@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import shlex
 import shutil
@@ -15,43 +16,47 @@ import yaml
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
+    OutputLimitExceededError,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
+    SandboxEnvironmentLimits,
     trace_message,
 )
+from runloop_api_client import AsyncRunloop, NotFoundError
 from typing_extensions import override
 
-from inspect_sandboxes._util.compose import find_default_service
-from inspect_sandboxes._util.sandbox import (
-    build_stdin_command,
-    decode_file_content,
-    verify_file_size,
-)
+from inspect_sandboxes._util.sandbox import build_stdin_command, decode_file_content
 
+from ._compose import (
+    extract_runloop_timeout,
+    extract_x_runloop,
+    find_default_service,
+    normalize_launch_parameters,
+)
 from ._dind_project import (
-    DEFAULT_DIND_CPU,
-    DEFAULT_DIND_MEMORY_MB,
-    E2BDinDProject,
+    RunloopDinDProject,
+    _download_file,
+    _upload_file,
     compose_exec,
     create_dind_project,
-    destroy_dind_project,
     discover_working_dir,
     vm_exec,
 )
-from ._retry import run_with_timeout_retry
-from ._single_env import FILE_REQUEST_TIMEOUT
+from ._retry import run_with_timeout_retry, shutdown_devbox
 
 logger = getLogger(__name__)
 
 
-class E2BDinDServiceEnvironment(SandboxEnvironment):
+class RunloopDinDServiceEnvironment(SandboxEnvironment):
     """SandboxEnvironment for a single compose service inside a DinD Devbox.
 
     Routes exec/read/write through ``docker compose exec/cp <service>``
-    inside the shared E2B Devbox.
+    inside the shared Runloop Devbox.
     """
 
-    def __init__(self, project: E2BDinDProject, service: str, working_dir: str) -> None:
+    def __init__(
+        self, project: RunloopDinDProject, service: str, working_dir: str
+    ) -> None:
         super().__init__()
         self.project = project
         self.service = service
@@ -60,31 +65,26 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
     @classmethod
     async def sample_init_dind(
         cls,
+        client: AsyncRunloop,
         config: ComposeConfig,
         compose_file: str | None,
         *,
+        name: str | None = None,
         metadata: dict[str, str],
-        cpu_count: int = DEFAULT_DIND_CPU,
-        memory_mb: int = DEFAULT_DIND_MEMORY_MB,
-        sandbox_timeout: int | float = 3600,
-        sandbox_envs: dict[str, str] | None = None,
     ) -> dict[str, SandboxEnvironment]:
-        """Create DinD sandbox and return per-service environments.
+        """Create DinD devbox and return per-service environments.
 
         Args:
+            client: Runloop SDK client.
             config: Parsed compose configuration with >1 service.
             compose_file: Local path to the compose file.
-            metadata: Metadata to apply to the sandbox.
-            cpu_count: CPUs for the DinD template build.
-            memory_mb: Memory (MiB) for the DinD template build.
-            sandbox_timeout: Devbox lifetime in seconds (from ``x-e2b.timeout``
-                or default). E2B caps at 3600s (Hobby) / 86400s (Pro).
-            sandbox_envs: Environment variables set on the Devbox VM (not on
-                individual compose services).
+            name: Human-readable devbox name to assign.
+            metadata: Metadata to apply to the devbox.
 
         Returns:
             Dict of environments with the default service first.
         """
+        # Serialize an in-memory ComposeConfig to a temp file for build context.
         tmp_dir: Path | None = None
         if compose_file is None:
             try:
@@ -103,24 +103,52 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
                 ) from e
 
         try:
+            ext = extract_x_runloop(config.extensions)
+            launch_parameters = normalize_launch_parameters(
+                ext.get("launch_parameters")
+            )
+            env_vars_raw = ext.get("environment_variables")
+            environment_variables = (
+                {str(k): str(v) for k, v in env_vars_raw.items()}
+                if isinstance(env_vars_raw, dict)
+                else None
+            )
+            # Merge x-runloop.metadata into the run metadata.
+            ext_meta = ext.get("metadata")
+            run_metadata = dict(metadata)
+            if isinstance(ext_meta, dict):
+                run_metadata = {
+                    **{str(k): str(v) for k, v in ext_meta.items()},
+                    **run_metadata,
+                }
+
+            timeout = extract_runloop_timeout(config.extensions)
+
             project = await create_dind_project(
+                client,
                 config,
                 compose_file,
-                metadata=metadata,
-                cpu_count=cpu_count,
-                memory_mb=memory_mb,
-                sandbox_timeout=sandbox_timeout,
-                sandbox_envs=sandbox_envs,
+                name=name,
+                metadata=run_metadata,
+                launch_parameters=launch_parameters,
+                environment_variables=environment_variables,
+                timeout=timeout,
             )
         finally:
             if tmp_dir is not None:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+        # Build per-service environments with default first. Discover the
+        # services' working dirs concurrently — each is an independent compose
+        # exec, so serial awaits would add ~one round-trip per service.
         default_name, _ = find_default_service(config)
-        environments: dict[str, SandboxEnvironment] = {}
-        for svc_name in project.services:
-            wd = await discover_working_dir(project, svc_name)
-            environments[svc_name] = cls(project, svc_name, wd)
+        working_dirs = await asyncio.gather(
+            *(discover_working_dir(project, svc) for svc in project.services)
+        )
+        environments: dict[str, SandboxEnvironment] = {
+            svc: cls(project, svc, wd)
+            for svc, wd in zip(project.services, working_dirs, strict=True)
+        }
 
         default_env = environments.pop(default_name)
         return {default_name: default_env, **environments}
@@ -140,14 +168,18 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         any_env = next(iter(environments.values())).as_type(cls)
         project = any_env.project
         try:
-            await destroy_dind_project(project)
-            await project.sandbox.kill()
+            # Shutting the devbox down reclaims the whole VM (docker daemon and
+            # every container), so a graceful `docker compose down` first would
+            # only add latency and API calls to a devbox about to be destroyed.
+            await shutdown_devbox(project.client, project.devbox_id)
+        except NotFoundError:
+            pass  # already gone
         except Exception as e:
             trace_message(
                 logger,
-                "e2b",
-                f"Error cleaning up DinD sandbox {project.sandbox.sandbox_id} "
-                f"for task '{task_name}': {e}. Will retry in task_cleanup.",
+                "runloop",
+                f"Error cleaning up DinD devbox {project.devbox_id} for task '{task_name}': {e}. "
+                "Will retry in task_cleanup.",
             )
 
     @override
@@ -173,14 +205,15 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
             for k, v in env.items():
                 exec_cmd.extend(["-e", f"{k}={v}"])
 
+        # Stdin: two-hop upload (VM → compose cp → container), then pipe.
         stdin_vm_file: str | None = None
         stdin_container_file: str | None = None
         if input is not None:
             data = input.encode("utf-8") if isinstance(input, str) else input
             stdin_vm_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
             stdin_container_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
-            await self.project.sandbox.files.write(
-                stdin_vm_file, data, request_timeout=FILE_REQUEST_TIMEOUT
+            await _upload_file(
+                self.project.client, self.project.devbox_id, stdin_vm_file, data
             )
             cp_exit, _, cp_err = await compose_exec(
                 self.project,
@@ -196,7 +229,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
 
         async def _run(t: int | None) -> ExecResult[str]:
             exit_code, stdout, stderr = await compose_exec(
-                self.project, exec_cmd, timeout=t
+                self.project, exec_cmd, timeout=t, raise_on_truncation=True
             )
             return ExecResult(
                 success=exit_code == 0,
@@ -211,7 +244,8 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
             if stdin_vm_file is not None:
                 try:
                     await vm_exec(
-                        self.project.sandbox,
+                        self.project.client,
+                        self.project.devbox_id,
                         f"rm -f {shlex.quote(stdin_vm_file)}",
                         timeout=10,
                     )
@@ -220,7 +254,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
-        """Two-hop write: SDK upload to sandbox temp -> docker compose cp to container."""
+        """Two-hop write: VM temp -> docker compose cp to container."""
         file = self._container_file(file)
 
         parent = str(PurePosixPath(file).parent)
@@ -233,9 +267,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         data = contents.encode("utf-8") if isinstance(contents, str) else contents
         temp = f"/tmp/.inspect-write-{uuid.uuid4().hex}"
         try:
-            await self.project.sandbox.files.write(
-                temp, data, request_timeout=FILE_REQUEST_TIMEOUT
-            )
+            await _upload_file(self.project.client, self.project.devbox_id, temp, data)
             exit_code, _, stderr = await compose_exec(
                 self.project,
                 ["cp", temp, f"{self.service}:{file}"],
@@ -248,7 +280,10 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         finally:
             try:
                 await vm_exec(
-                    self.project.sandbox, f"rm -f {shlex.quote(temp)}", timeout=10
+                    self.project.client,
+                    self.project.devbox_id,
+                    f"rm -f {shlex.quote(temp)}",
+                    timeout=10,
                 )
             except Exception:
                 pass
@@ -261,9 +296,9 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:
-        """Two-hop read: docker compose cp from container -> SDK download from sandbox."""
+        """Two-hop read: docker compose cp from container -> read from VM."""
         file = self._container_file(file)
-        await verify_file_size(self._is_directory, self._get_file_size, file)
+        await self._verify_read_size(file)
 
         temp = f"/tmp/.inspect-read-{uuid.uuid4().hex}"
         try:
@@ -281,16 +316,16 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
                 raise RuntimeError(
                     f"docker compose cp from {self.service}:{file} failed: {stderr}"
                 )
-            data = await self.project.sandbox.files.read(
-                temp, format="bytes", request_timeout=FILE_REQUEST_TIMEOUT
+            data_bytes = await _download_file(
+                self.project.client, self.project.devbox_id, temp
             )
-            data_bytes = bytes(data)
         finally:
-            # docker cp writes the temp as root, so the non-root user can't rm
-            # it directly (sticky-bit /tmp). Sudo to avoid leaking into /tmp.
+            # The temp was created by a sudo'd ``docker compose cp``, so it's
+            # root-owned; remove it as root or it leaks in sticky /tmp.
             try:
                 await vm_exec(
-                    self.project.sandbox,
+                    self.project.client,
+                    self.project.devbox_id,
                     f"sudo rm -f {shlex.quote(temp)}",
                     timeout=10,
                 )
@@ -348,6 +383,17 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         raise PermissionError(
             errno.EACCES, "Cannot stat (likely permission denied)", path
         )
+
+    async def _verify_read_size(self, file: str) -> int:
+        if await self._is_directory(file):
+            raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
+        size = await self._get_file_size(file)
+        if size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
+            raise OutputLimitExceededError(
+                limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
+                truncated_output=None,
+            )
+        return size
 
     async def _create_parent_folder(self, path: str) -> None:
         exit_code, _, stderr = await compose_exec(
