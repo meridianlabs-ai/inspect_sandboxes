@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -8,10 +7,13 @@ from inspect_ai.util import ComposeConfig, ComposeService
 from runloop_api_client.types.shared_params import LaunchParameters
 
 from inspect_sandboxes._util.compose import (
+    extract_extension,
+    extract_extension_timeout,
     find_default_service,
+    mib_to_gib,
     parse_environment,
-    parse_memory,
     resolve_dockerfile_path,
+    resolve_service_resources,
 )
 
 
@@ -128,12 +130,7 @@ def extract_x_runloop(extensions: dict[str, Any] | None) -> dict[str, Any]:
       labels (run-level wins for keys it owns: ``created_by``, ``inspect_run_id``,
       ``task``, ``name``).
     """
-    if not extensions:
-        return {}
-    raw = extensions.get("x-runloop")
-    if not isinstance(raw, dict):
-        return {}
-    return raw
+    return extract_extension(extensions, "x-runloop")
 
 
 def extract_runloop_timeout(extensions: dict[str, Any] | None) -> float | None:
@@ -145,15 +142,7 @@ def extract_runloop_timeout(extensions: dict[str, Any] | None) -> float | None:
             ``timeout: "30"`` as the string ``"30"``; we coerce here so the
             SDK receives a proper number.
     """
-    raw = extract_x_runloop(extensions).get("timeout")
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError) as e:
-        raise ValueError(
-            f"x-runloop.timeout must be a number (seconds), got {raw!r}"
-        ) from e
+    return extract_extension_timeout(extensions, "x-runloop")
 
 
 def _service_to_launch_parameters(
@@ -171,27 +160,13 @@ def _service_to_launch_parameters(
     cpu: int | None = ext_launch.get("custom_cpu_cores")
     memory_gb: int | None = ext_launch.get("custom_gb_memory")
 
-    if (
-        (cpu is None or memory_gb is None)
-        and service.deploy
-        and service.deploy.resources
-    ):
-        resources = service.deploy.resources
-        if cpu is None:
-            if resources.limits and resources.limits.cpus:
-                cpu = max(1, math.ceil(float(resources.limits.cpus)))
-            elif resources.reservations and resources.reservations.cpus:
-                cpu = max(1, math.ceil(float(resources.reservations.cpus)))
-        if memory_gb is None:
-            if resources.limits and resources.limits.memory:
-                memory_gb = _mib_to_gib(parse_memory(resources.limits.memory))
-            elif resources.reservations and resources.reservations.memory:
-                memory_gb = _mib_to_gib(parse_memory(resources.reservations.memory))
-
-    if cpu is None and service.cpus:
-        cpu = max(1, math.ceil(service.cpus))
-    if memory_gb is None and service.mem_limit:
-        memory_gb = _mib_to_gib(parse_memory(service.mem_limit))
+    # The x-runloop override wins per axis; fall back to the shared ladder
+    # (MiB) for any axis it leaves unset, converting memory to GiB.
+    ladder_cpu, ladder_mib = resolve_service_resources(service)
+    if cpu is None:
+        cpu = ladder_cpu
+    if memory_gb is None and ladder_mib is not None:
+        memory_gb = mib_to_gib(ladder_mib)
 
     params: dict[str, Any] = dict(ext_launch)
     if cpu is not None:
@@ -221,8 +196,3 @@ def normalize_launch_parameters(
     ):
         params.setdefault("resource_size_request", "CUSTOM_SIZE")
     return params  # type: ignore[return-value]  # plain dict matches TypedDict shape
-
-
-def _mib_to_gib(mib: int) -> int:
-    """Convert MiB to GiB, ceiling-rounded, minimum 1."""
-    return max(1, math.ceil(mib / 1024))

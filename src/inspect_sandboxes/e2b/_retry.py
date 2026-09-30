@@ -26,11 +26,12 @@ from e2b import (
     SandboxException,
     TimeoutException,
 )
-from tenacity import (
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential,
+
+from inspect_sandboxes._util.retry import (
+    make_retry_decorators,
+)
+from inspect_sandboxes._util.retry import (
+    run_with_timeout_retry as _run_with_timeout_retry,
 )
 
 T = TypeVar("T")
@@ -49,15 +50,6 @@ def _is_retryable(exc: BaseException) -> bool:
     return isinstance(exc, SandboxException)
 
 
-# Retry decorator for sandbox lifecycle and file I/O operations.
-standard_retry = retry(
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception(_is_retryable),
-    reraise=True,
-)
-
-
 def _is_retryable_for_exec(exc: BaseException) -> bool:
     # TimeoutException is handled by run_with_timeout_retry below.
     if isinstance(exc, TimeoutException):
@@ -65,12 +57,16 @@ def _is_retryable_for_exec(exc: BaseException) -> bool:
     return _is_retryable(exc)
 
 
-# Retry decorator for exec operations.
-exec_retry = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception(_is_retryable_for_exec),
-    reraise=True,
+def _is_timeout(exc: BaseException) -> bool:
+    # E2B's SDK normally wraps timeouts as TimeoutException, but for short
+    # command timeouts the underlying httpx.ReadTimeout can surface unwrapped.
+    return isinstance(exc, (TimeoutException, httpx.TimeoutException))
+
+
+# standard_retry: sandbox lifecycle + file I/O (5 attempts).
+# exec_retry: exec operations (3 attempts; excludes TimeoutException).
+standard_retry, exec_retry = make_retry_decorators(
+    _is_retryable, _is_retryable_for_exec
 )
 
 
@@ -81,25 +77,9 @@ async def run_with_timeout_retry(
 ) -> T:
     """Execute *run_fn* with decreasing timeout caps on TimeoutException.
 
-    On the first timeout, retries with cap ≤60 s, then ≤30 s.
+    On the first timeout, retries with cap ≤60 s, then ≤30 s. ``_is_timeout``
+    also catches an unwrapped ``httpx.TimeoutException``.
     """
-    if timeout_retry:
-        t1 = min(timeout, 60) if timeout is not None else 60
-        t2 = min(timeout, 30) if timeout is not None else 30
-        attempt_timeouts: list[int | None] = [timeout, t1, t2]
-    else:
-        attempt_timeouts = [timeout]
-
-    # E2B's SDK normally wraps timeouts as TimeoutException, but for short
-    # command timeouts the underlying httpx.ReadTimeout can surface unwrapped.
-    last_timeout_exc: TimeoutException | httpx.TimeoutException | None = None
-    for t in attempt_timeouts:
-        try:
-            return await run_fn(t)
-        except (TimeoutException, httpx.TimeoutException) as e:
-            last_timeout_exc = e
-
-    assert last_timeout_exc is not None
-    raise TimeoutError(
-        f"Command timed out after {timeout} seconds"
-    ) from last_timeout_exc
+    return await _run_with_timeout_retry(
+        run_fn, timeout, timeout_retry, is_timeout=_is_timeout
+    )

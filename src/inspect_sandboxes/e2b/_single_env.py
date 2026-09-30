@@ -18,10 +18,8 @@ from e2b import (
 )
 from inspect_ai.util import (
     ExecResult,
-    OutputLimitExceededError,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
-    SandboxEnvironmentLimits,
     trace_message,
 )
 from inspect_ai.util._sandbox.environment import (
@@ -30,6 +28,8 @@ from inspect_ai.util._sandbox.environment import (
     SandboxConnection,
 )
 from typing_extensions import override
+
+from inspect_sandboxes._util.sandbox import build_stdin_command, verify_file_size
 
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
 
@@ -99,7 +99,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             data = input.encode("utf-8") if isinstance(input, str) else input
             stdin_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
             await self._write_file_content(stdin_file, data)
-            command = self._build_stdin_command(cmd, stdin_file, cleanup=user is None)
+            command = build_stdin_command(cmd, stdin_file, cleanup=user is None)
         else:
             command = shlex.join(cmd)
 
@@ -172,7 +172,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
-        await self._verify_read_size(file)
+        await verify_file_size(self._is_directory, self._get_file_size, file)
 
         try:
             if text:
@@ -221,14 +221,6 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         )
 
     @staticmethod
-    def _build_stdin_command(cmd: list[str], stdin_file: str, *, cleanup: bool) -> str:
-        quoted = shlex.quote(stdin_file)
-        base = f"{shlex.join(cmd)} < {quoted}"
-        if cleanup:
-            return f"{base}; _ec=$?; rm -f {quoted}; exit $_ec"
-        return f"{base}; _ec=$?; exit $_ec"
-
-    @staticmethod
     @standard_retry
     async def _kill_sandbox(sandbox: AsyncSandbox) -> None:
         try:
@@ -253,16 +245,6 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             return info.type == FileType.DIR
         except NotFoundException:
             return False
-
-    async def _verify_read_size(self, file: str) -> None:
-        if await self._is_directory(file):
-            raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
-        size = await self._get_file_size(file)
-        if size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
-            raise OutputLimitExceededError(
-                limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
-                truncated_output=None,
-            )
 
     @standard_retry
     async def _read_file_text(self, file: str) -> str:

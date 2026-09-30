@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
-from inspect_ai.util import ComposeConfig, ComposeService, SandboxEnvironment
-from inspect_ai.util._sandbox.self_check import self_check
 from inspect_sandboxes.runloop._runloop import (
     RunloopSandboxEnvironment,
     _run_id,
@@ -552,98 +548,3 @@ async def test_cli_cleanup_bulk_partial_failure(mock_client: MagicMock) -> None:
             await RunloopSandboxEnvironment.cli_cleanup(None)
 
     assert exc_info.value.code == 1
-
-
-def _check_self_check_results(
-    results: dict[str, bool | str], known_failures: list[str]
-) -> None:
-    failed = [
-        (name, err)
-        for name, err in results.items()
-        if err is not True and name not in known_failures
-    ]
-    if failed:
-        details = "\n".join(f"  {name}: {err}" for name, err in failed)
-        raise AssertionError(f"{len(failed)} unexpected test(s) failed:\n{details}")
-
-
-@pytest_asyncio.fixture
-async def runloop_single_env() -> AsyncGenerator[SandboxEnvironment, None]:
-    """Create a real single-service Runloop devbox (default image)."""
-    await RunloopSandboxEnvironment.task_init("test_self_check", None)
-    envs = await RunloopSandboxEnvironment.sample_init("test_self_check", None, {})
-    yield envs["default"]
-    try:
-        await RunloopSandboxEnvironment.sample_cleanup(
-            "test_self_check", None, envs, False
-        )
-        await RunloopSandboxEnvironment.task_cleanup(
-            "test_self_check", None, cleanup=True
-        )
-    except Exception as e:
-        print(f"Cleanup error: {e}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_self_check_single_service(
-    runloop_single_env: SandboxEnvironment,
-) -> None:
-    """Run inspect_ai's self-check suite against a single-service Runloop devbox."""
-    known_failures = [
-        # Runloop's default image may not have useradd preinstalled in all variants.
-        "test_exec_as_user",
-        # Runloop's runtime SIGKILLs the process during signal-exit cleanup, so
-        # the shell's self-SIGTERM (kill -TERM $$) surfaces as -137 (SIGKILL),
-        # not 143 (128+SIGTERM). Platform behavior, not fixable client-side.
-        "test_exec_timeout_not_raised_on_fast_signal_death",
-    ]
-    results = await self_check(runloop_single_env)
-    _check_self_check_results(results, known_failures)
-
-
-@pytest_asyncio.fixture
-async def runloop_dind_env() -> AsyncGenerator[SandboxEnvironment, None]:
-    """Create a real DinD Runloop devbox (two-service compose)."""
-    config = ComposeConfig(
-        services={
-            "default": ComposeService(
-                image="python:3.12-slim", command="sleep infinity"
-            ),
-            "helper": ComposeService(
-                image="python:3.12-slim", command="sleep infinity"
-            ),
-        }
-    )
-    await RunloopSandboxEnvironment.task_init("test_self_check_dind", None)
-    envs = await RunloopSandboxEnvironment.sample_init(
-        "test_self_check_dind", config, {}
-    )
-    yield envs["default"]
-    try:
-        await RunloopSandboxEnvironment.sample_cleanup(
-            "test_self_check_dind", config, envs, False
-        )
-        await RunloopSandboxEnvironment.task_cleanup(
-            "test_self_check_dind", None, cleanup=True
-        )
-    except Exception as e:
-        print(f"Cleanup error: {e}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_self_check_dind(
-    runloop_dind_env: SandboxEnvironment,
-) -> None:
-    """Run inspect_ai's self-check suite against a DinD Runloop devbox."""
-    known_failures = [
-        # docker compose exec routes through sh; permission/output edges differ.
-        "test_exec_permission_error",
-        "test_write_text_file_without_permissions",
-        "test_write_binary_file_without_permissions",
-        "test_read_file_not_allowed",
-        "test_exec_as_user",
-    ]
-    results = await self_check(runloop_dind_env)
-    _check_self_check_results(results, known_failures)

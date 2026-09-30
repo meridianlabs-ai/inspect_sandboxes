@@ -25,6 +25,8 @@ from inspect_ai.util import (
 from runloop_api_client import AsyncRunloop, NotFoundError
 from typing_extensions import override
 
+from inspect_sandboxes._util.sandbox import build_stdin_command, decode_file_content
+
 from ._compose import (
     extract_runloop_timeout,
     extract_x_runloop,
@@ -220,7 +222,7 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
             )
             if cp_exit != 0:
                 raise RuntimeError(f"Failed to copy stdin to {self.service}: {cp_err}")
-            stdin_cmd = self._build_stdin_command(cmd, stdin_container_file)
+            stdin_cmd = build_stdin_command(cmd, stdin_container_file)
             exec_cmd.extend([self.service, "sh", "-c", stdin_cmd])
         else:
             exec_cmd.extend([self.service, *cmd])
@@ -330,23 +332,7 @@ class RunloopDinDServiceEnvironment(SandboxEnvironment):
             except Exception:
                 pass
 
-        if text:
-            try:
-                return data_bytes.decode("utf-8")
-            except UnicodeDecodeError as e:
-                raise UnicodeDecodeError(
-                    e.encoding,
-                    e.object,
-                    e.start,
-                    e.end,
-                    f"Failed to decode {file}: {e.reason}",
-                ) from e
-        return data_bytes
-
-    @staticmethod
-    def _build_stdin_command(cmd: list[str], stdin_file: str) -> str:
-        quoted = shlex.quote(stdin_file)
-        return f"{shlex.join(cmd)} < {quoted}; _ec=$?; rm -f {quoted}; exit $_ec"
+        return decode_file_content(data_bytes, file, text)
 
     def _container_file(self, file: str) -> str:
         """Resolve relative path against working directory."""

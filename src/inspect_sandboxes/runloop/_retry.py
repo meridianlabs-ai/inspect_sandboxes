@@ -33,11 +33,12 @@ from runloop_api_client import (
 )
 from runloop_api_client.lib.polling import PollingConfig
 from runloop_api_client.types import DevboxAsyncExecutionDetailView
-from tenacity import (
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential,
+
+from inspect_sandboxes._util.retry import (
+    make_retry_decorators,
+)
+from inspect_sandboxes._util.retry import (
+    run_with_timeout_retry as _run_with_timeout_retry,
 )
 
 T = TypeVar("T")
@@ -63,12 +64,24 @@ def _is_retryable(exc: BaseException) -> bool:
     return isinstance(exc, APIError)
 
 
-# Retry decorator for devbox lifecycle and file I/O operations.
-standard_retry = retry(
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception(_is_retryable),
-    reraise=True,
+def _is_retryable_for_exec(exc: BaseException) -> bool:
+    # APITimeoutError is handled by run_with_timeout_retry below.
+    if isinstance(exc, APITimeoutError):
+        return False
+    return _is_retryable(exc)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    # APITimeoutError: the SDK's HTTP-layer timeout (raised directly; no httpx
+    # unwrapping needed, unlike E2B). TimeoutError: our own poll_execution
+    # deadline, when we poll an async execution to enforce a short user timeout.
+    return isinstance(exc, (APITimeoutError, TimeoutError))
+
+
+# standard_retry: devbox lifecycle + file I/O (5 attempts).
+# exec_retry: exec operations (3 attempts; excludes APITimeoutError).
+standard_retry, exec_retry = make_retry_decorators(
+    _is_retryable, _is_retryable_for_exec
 )
 
 
@@ -80,22 +93,6 @@ async def shutdown_devbox(client: AsyncRunloop, devbox_id: str) -> None:
     the caller, which treats an already-gone devbox as success.
     """
     await client.devboxes.shutdown(devbox_id)
-
-
-def _is_retryable_for_exec(exc: BaseException) -> bool:
-    # APITimeoutError is handled by run_with_timeout_retry below.
-    if isinstance(exc, APITimeoutError):
-        return False
-    return _is_retryable(exc)
-
-
-# Retry decorator for exec operations.
-exec_retry = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception(_is_retryable_for_exec),
-    reraise=True,
-)
 
 
 # Polling backoff for async executions: start fast, back off to a ~1 s cap so a
@@ -246,31 +243,12 @@ async def run_with_timeout_retry(
     timeout: int | None,
     timeout_retry: bool,
 ) -> T:
-    """Execute *run_fn* with decreasing timeout caps on APITimeoutError.
+    """Execute *run_fn* with decreasing timeout caps on a timeout.
 
-    On the first timeout, retries with cap ≤60 s, then ≤30 s.
+    On the first timeout, retries with cap ≤60 s, then ≤30 s. Both timeout
+    flavors engage the ladder (``APITimeoutError`` and our own
+    ``poll_execution`` ``TimeoutError``) — see ``_is_timeout``.
     """
-    if timeout_retry:
-        t1 = min(timeout, 60) if timeout is not None else 60
-        t2 = min(timeout, 30) if timeout is not None else 30
-        attempt_timeouts: list[int | None] = [timeout, t1, t2]
-    else:
-        attempt_timeouts = [timeout]
-
-    # Two flavors of timeout can surface from run_fn:
-    #   - APITimeoutError: the SDK's HTTP-layer timeout (raised directly; no
-    #     httpx unwrapping needed, unlike E2B).
-    #   - TimeoutError: our own deadline in poll_execution, when we poll an
-    #     async execution ourselves to enforce a short user timeout exactly.
-    # Both must engage the decreasing-cap retry, so we catch both.
-    last_timeout_exc: BaseException | None = None
-    for t in attempt_timeouts:
-        try:
-            return await run_fn(t)
-        except (APITimeoutError, TimeoutError) as e:
-            last_timeout_exc = e
-
-    assert last_timeout_exc is not None
-    raise TimeoutError(
-        f"Command timed out after {timeout} seconds"
-    ) from last_timeout_exc
+    return await _run_with_timeout_retry(
+        run_fn, timeout, timeout_retry, is_timeout=_is_timeout
+    )

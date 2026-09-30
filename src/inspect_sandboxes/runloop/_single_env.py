@@ -25,6 +25,8 @@ from runloop_api_client.types import DevboxAsyncExecutionDetailView
 from typing_extensions import override
 from uuid_utils import uuid7
 
+from inspect_sandboxes._util.sandbox import build_stdin_command, decode_file_content
+
 from ._retry import (
     execute_with_poll,
     run_with_timeout_retry,
@@ -104,7 +106,7 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
             stdin_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
             # /tmp always exists, so skip _write_file_bytes' parent-dir mkdir.
             await self._upload_file_bytes(stdin_file, data)
-            command = self._build_stdin_command(cmd, stdin_file, cleanup=user is None)
+            command = build_stdin_command(cmd, stdin_file, cleanup=user is None)
         else:
             command = shlex.join(cmd)
 
@@ -205,26 +207,7 @@ class RunloopSingleServiceEnvironment(SandboxEnvironment):
         await self._verify_read_size(file)
 
         data = await self._read_file_bytes(file)
-        if text:
-            try:
-                return data.decode("utf-8")
-            except UnicodeDecodeError as e:
-                raise UnicodeDecodeError(
-                    e.encoding,
-                    e.object,
-                    e.start,
-                    e.end,
-                    f"Failed to decode {file}: {e.reason}",
-                ) from e
-        return data
-
-    @staticmethod
-    def _build_stdin_command(cmd: list[str], stdin_file: str, *, cleanup: bool) -> str:
-        quoted = shlex.quote(stdin_file)
-        base = f"{shlex.join(cmd)} < {quoted}"
-        if cleanup:
-            return f"{base}; _ec=$?; rm -f {quoted}; exit $_ec"
-        return f"{base}; _ec=$?; exit $_ec"
+        return decode_file_content(data, file, text)
 
     @standard_retry
     async def _is_directory(self, file: str) -> bool:

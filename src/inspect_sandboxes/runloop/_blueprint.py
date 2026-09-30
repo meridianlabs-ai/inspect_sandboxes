@@ -48,13 +48,14 @@ from runloop_api_client import AsyncRunloop
 from runloop_api_client.lib.polling import PollingConfig
 from runloop_api_client.types.shared_params import LaunchParameters
 
+from inspect_sandboxes._util.hashing import hash_inputs
+
 from ._single_env import FILE_REQUEST_TIMEOUT
 
 logger = getLogger(__name__)
 
 BLUEPRINT_NAME_PREFIX = "inspect-"
 BLUEPRINT_BUILD_TIMEOUT = 1800
-_HASH_LEN = 12
 
 # Read/stream context files in 1 MiB blocks so a large file is never held in
 # memory whole — for hashing or for building the upload tarball.
@@ -75,11 +76,6 @@ _BLUEPRINT_POLLING_CONFIG = PollingConfig(
 # cache never hits.
 _IGNORED_DIR_NAMES = {".git", "__pycache__", "logs", ".venv"}
 _IGNORED_FILE_NAMES = {".DS_Store"}
-
-
-def _hash_inputs(payload: dict[str, object]) -> str:
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(blob).hexdigest()[:_HASH_LEN]
 
 
 # Serialize same-name blueprint builds within the process. Runloop's
@@ -255,7 +251,7 @@ def blueprint_name_for_dockerfile(
     """Cached blueprint name for a Dockerfile + build context + launch params."""
     content = Path(dockerfile_path).read_bytes().decode("utf-8", errors="replace")
     context_hash = _hash_build_context(Path(dockerfile_path).parent)
-    h = _hash_inputs(
+    h = hash_inputs(
         {
             "kind": "dockerfile",
             "content": content,
@@ -272,7 +268,7 @@ def blueprint_name_for_image(
     launch_parameters: LaunchParameters | None = None,
 ) -> str:
     """Cached blueprint name for a base image + launch parameters."""
-    h = _hash_inputs(
+    h = hash_inputs(
         {
             "kind": "image",
             "image": image,
