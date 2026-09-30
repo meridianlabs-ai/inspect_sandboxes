@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +16,7 @@ from e2b import (
     TimeoutException,
 )
 from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
+from inspect_sandboxes.e2b._command import MAX_INLINE_COMMAND_BYTES
 from inspect_sandboxes.e2b._single_env import E2BSingleServiceEnvironment
 
 
@@ -141,9 +143,11 @@ async def test_exec_with_stdin_string(mock_sandbox: MagicMock) -> None:
     assert call_args[0][1] == b"hello"
     assert stdin_path.startswith("/tmp/.inspect-stdin-")
 
-    exec_command = mock_sandbox.commands.run.call_args[0][0]
-    assert f"< {stdin_path}" in exec_command
-    assert f"rm -f {stdin_path}" in exec_command
+    exec_command, cleanup_command = (
+        c[0][0] for c in mock_sandbox.commands.run.call_args_list
+    )
+    assert exec_command == f"cat < {stdin_path}"
+    assert cleanup_command == f"rm -f {stdin_path}"
 
 
 @pytest.mark.asyncio
@@ -168,21 +172,19 @@ async def test_exec_without_stdin_no_upload(mock_sandbox: MagicMock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_exec_with_stdin_and_user_skips_inline_cleanup(
+async def test_exec_with_stdin_and_user_cleans_up_as_root(
     mock_sandbox: MagicMock,
 ) -> None:
-    """Test that stdin + user defers temp-file cleanup to the finally block."""
+    """The exec runs as the user; the root-written temp file is removed as root."""
     env = E2BSingleServiceEnvironment(mock_sandbox)
     await env.exec(["cat"], input="hello", user="testuser")
 
     calls = mock_sandbox.commands.run.call_args_list
-    # First call: exec with user (no baked-in rm -f)
-    exec_command = calls[0][0][0]
-    assert "rm -f" not in exec_command
-    # Second call: cleanup the temp file
     assert len(calls) == 2
-    cleanup_command = calls[1][0][0]
-    assert "rm -f" in cleanup_command
+    assert calls[0][1]["user"] == "testuser"
+    assert "rm -f" not in calls[0][0][0]
+    assert calls[1][0][0].startswith("rm -f ")
+    assert calls[1][1]["user"] == "root"
 
 
 @pytest.mark.asyncio
@@ -416,3 +418,127 @@ async def test_connection_without_ports_is_empty(mock_sandbox: MagicMock) -> Non
     assert conn.type == "e2b"
     assert conn.ports is None
     assert conn.container == "sb-test-123"
+
+
+def _large_cmd() -> list[str]:
+    """~1 MiB argv: 16 x 64 KiB args, far over the 128 KiB single-arg cap."""
+    chunk = "x" * (64 * 1024)
+    return ["printf", "%s", *([chunk] * 16)]
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_is_sourced_from_script_file(
+    mock_sandbox: MagicMock,
+) -> None:
+    """E2B passes the whole command as ONE argv element of `bash -l -c`.
+
+    The kernel caps a single argv element at MAX_ARG_STRLEN (128 KiB), so a
+    larger command is staged in a temp script in the sandbox and sourced.
+    """
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+    cmd = _large_cmd()
+
+    result = await env.exec(cmd)
+
+    assert result.success
+    mock_sandbox.files.write.assert_awaited_once()
+    path, data = mock_sandbox.files.write.call_args[0]
+    assert path.startswith("/tmp/.inspect-cmd-")
+    assert data == shlex.join(cmd).encode()
+    run_command, cleanup_command = (
+        c[0][0] for c in mock_sandbox.commands.run.call_args_list
+    )
+    assert len(run_command.encode()) <= MAX_INLINE_COMMAND_BYTES
+    assert run_command == f". {shlex.quote(path)}"
+    assert cleanup_command == f"rm -f {shlex.quote(path)}"
+
+
+@pytest.mark.asyncio
+async def test_exec_inline_command_does_not_stage_a_script(
+    mock_sandbox: MagicMock,
+) -> None:
+    """Commands under the cap keep the inline path (no temp file)."""
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    await env.exec(["echo", "hi"])
+
+    mock_sandbox.files.write.assert_not_awaited()
+    mock_sandbox.commands.run.assert_awaited_once()
+    assert mock_sandbox.commands.run.call_args[0][0] == "echo hi"
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_with_stdin_stages_both_files(
+    mock_sandbox: MagicMock,
+) -> None:
+    """Large command + stdin: the script redirects the stdin file; both are removed."""
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+    cmd = _large_cmd()
+
+    await env.exec(cmd, input="hello")
+
+    writes = mock_sandbox.files.write.call_args_list
+    assert len(writes) == 2
+    stdin_path, stdin_data = writes[0][0]
+    script_path, script_data = writes[1][0]
+    assert stdin_path.startswith("/tmp/.inspect-stdin-")
+    assert stdin_data == b"hello"
+    assert script_data.decode() == f"{shlex.join(cmd)} < {shlex.quote(stdin_path)}"
+    run_command, cleanup_command = (
+        c[0][0] for c in mock_sandbox.commands.run.call_args_list
+    )
+    assert run_command == f". {shlex.quote(script_path)}"
+    assert cleanup_command == (
+        f"rm -f {shlex.quote(stdin_path)} {shlex.quote(script_path)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_with_user_runs_as_user_and_cleans_as_root(
+    mock_sandbox: MagicMock,
+) -> None:
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    await env.exec(_large_cmd(), user="agent")
+
+    path, _ = mock_sandbox.files.write.call_args[0]
+    calls = mock_sandbox.commands.run.call_args_list
+    assert len(calls) == 2
+    assert calls[0][1]["user"] == "agent"
+    assert calls[1][0][0] == f"rm -f {shlex.quote(path)}"
+    assert calls[1][1]["user"] == "root"
+
+
+@pytest.mark.asyncio
+async def test_exec_retry_reuses_staged_script(mock_sandbox: MagicMock) -> None:
+    """A transient failure re-runs the same command; the script must still exist."""
+    success = _make_command_result(stdout="ok")
+    mock_sandbox.commands.run = AsyncMock(
+        side_effect=[SandboxException("transient"), success, success]
+    )
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    result = await env.exec(_large_cmd())
+
+    assert result.success
+    mock_sandbox.files.write.assert_awaited_once()
+    commands = [c[0][0] for c in mock_sandbox.commands.run.call_args_list]
+    assert commands[0] == commands[1]  # retried verbatim, file still present
+    assert commands[2].startswith("rm -f ")
+
+
+@pytest.mark.asyncio
+async def test_exec_temp_files_removed_when_run_fails(
+    mock_sandbox: MagicMock,
+) -> None:
+    mock_sandbox.commands.run = AsyncMock(
+        side_effect=[NotFoundException("gone"), _make_command_result()]
+    )
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    with pytest.raises(NotFoundException):
+        await env.exec(["cat"], input="hello")
+
+    path, _ = mock_sandbox.files.write.call_args[0]
+    cleanup = mock_sandbox.commands.run.call_args_list[-1]
+    assert cleanup[0][0] == f"rm -f {shlex.quote(path)}"
