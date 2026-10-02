@@ -369,3 +369,20 @@ def test_claude_stubs_opt_in_to_tier_2() -> None:
         "claude-auto.yml:review-fix": "claude-auto-review.yml",
         "claude-review.yml:review": "claude-review.yml",
     }
+
+
+def test_claude_stubs_pass_only_the_machine_account_secrets() -> None:
+    """The codex jobs authenticate with OIDC, so no stub passes an OpenAI key.
+
+    The calling jobs keep `id-token: write` for that exchange.
+    """
+    for stub in ("claude.yml", "claude-auto.yml", "claude-review.yml"):
+        for name, job in _load(WORKFLOWS / stub)["jobs"].items():
+            if str(job.get("uses", "")).startswith(
+                "meridianlabs-ai/agents/.github/workflows/"
+            ):
+                assert set(job["secrets"]) == {
+                    "MARVIN_APP_CLIENT_ID",
+                    "MARVIN_APP_PRIVATE_KEY",
+                }, f"{stub}:{name}"
+                assert job["permissions"]["id-token"] == "write", f"{stub}:{name}"
