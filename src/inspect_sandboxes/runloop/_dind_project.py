@@ -64,11 +64,10 @@ from ._blueprint import (
 )
 from ._retry import (
     DEVBOX_CREATE_POLLING_CONFIG,
-    create_devbox,
     execute_with_poll,
-    shutdown_devbox,
     standard_retry,
 )
+from ._sandbox_utils import create_devbox, shutdown_devbox
 from ._single_env import (
     EXEC_LAST_N,
     FILE_REQUEST_TIMEOUT,

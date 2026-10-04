@@ -42,7 +42,8 @@ from ._dind_project import (
     discover_working_dir,
     vm_exec,
 )
-from ._retry import run_with_timeout_retry, shutdown_devbox
+from ._retry import run_with_timeout_retry
+from ._sandbox_utils import shutdown_devbox
 
 logger = getLogger(__name__)
 

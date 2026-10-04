@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from inspect_ai.util import OutputLimitExceededError
-from inspect_sandboxes.runloop._retry import poll_execution, shutdown_devbox
+from inspect_sandboxes.runloop._retry import poll_execution
+from inspect_sandboxes.runloop._sandbox_utils import shutdown_devbox
 from inspect_sandboxes.runloop._single_env import RunloopSingleServiceEnvironment
 from runloop_api_client import (
     APIConnectionError,

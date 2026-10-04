@@ -30,9 +30,9 @@ from inspect_sandboxes._util.sandbox import build_stdin_command, decode_file_con
 from ._retry import (
     execute_with_poll,
     run_with_timeout_retry,
-    shutdown_devbox,
     standard_retry,
 )
+from ._sandbox_utils import shutdown_devbox
 
 logger = getLogger(__name__)
 

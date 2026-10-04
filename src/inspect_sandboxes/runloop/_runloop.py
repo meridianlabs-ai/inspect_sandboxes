@@ -9,7 +9,6 @@ import uuid
 from collections.abc import Iterable
 from contextvars import ContextVar
 from logging import getLogger
-from typing import Any
 
 from inspect_ai.util import (
     ComposeConfig,
@@ -39,7 +38,8 @@ from ._compose import (
     resolve_single_service_params,
 )
 from ._dind_project import dind_snapshot_ids, reset_dind_snapshot_cache
-from ._retry import DEVBOX_CREATE_POLLING_CONFIG, create_devbox, shutdown_devbox
+from ._retry import DEVBOX_CREATE_POLLING_CONFIG
+from ._sandbox_utils import create_devbox, list_devboxes, shutdown_devbox
 from ._single_env import RunloopSingleServiceEnvironment
 
 logger = getLogger(__name__)
@@ -75,14 +75,6 @@ async def _shutdown_all(
     return failures
 
 
-# Page size for paginated list responses.
-_LIST_PAGE_LIMIT = 100
-
-# Devbox statuses that are already terminal — excluded from cleanup listing so
-# we don't try to reclaim them. Every other status (provisioning, suspended,
-# etc.) is still alive and billable, so it must be reclaimable.
-_TERMINAL_DEVBOX_STATUSES = {"shutdown", "failure"}
-
 _runloop_client: ContextVar[AsyncRunloop | None] = ContextVar(
     "runloop_client", default=None
 )
@@ -102,23 +94,6 @@ def _run_metadata(task_name: str | None = None) -> dict[str, str]:
     if task_name:
         metadata["task"] = task_name
     return metadata
-
-
-async def list_devboxes(client: AsyncRunloop, metadata: dict[str, str]) -> list[Any]:
-    """List non-terminal devboxes whose metadata matches *all* key/value pairs.
-
-    Runloop's ``devboxes.list`` API doesn't accept a metadata filter, so we
-    paginate and filter client-side. We keep every non-terminal devbox (not just
-    ``running``) so provisioning/suspended ones are still reclaimed by cleanup.
-    """
-    matches: list[Any] = []
-    async for devbox in client.devboxes.list(limit=_LIST_PAGE_LIMIT):
-        if getattr(devbox, "status", None) in _TERMINAL_DEVBOX_STATUSES:
-            continue
-        meta = getattr(devbox, "metadata", None) or {}
-        if all(meta.get(k) == v for k, v in metadata.items()):
-            matches.append(devbox)
-    return matches
 
 
 @sandboxenv(name="runloop")

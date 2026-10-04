@@ -6,13 +6,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from inspect_sandboxes.runloop._retry import create_devbox
 from inspect_sandboxes.runloop._runloop import (
     RunloopSandboxEnvironment,
     _run_id,
     _running_sandboxes,
-    list_devboxes,
 )
+from inspect_sandboxes.runloop._sandbox_utils import create_devbox, list_devboxes
 from inspect_sandboxes.runloop._single_env import RunloopSingleServiceEnvironment
 from runloop_api_client.lib.polling import PollingTimeout
 from runloop_api_client.types import DevboxView

@@ -18,8 +18,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from runloop_api_client import (
     APIError,
@@ -32,8 +31,8 @@ from runloop_api_client import (
     PermissionDeniedError,
     UnprocessableEntityError,
 )
-from runloop_api_client.lib.polling import PollingConfig, PollingTimeout
-from runloop_api_client.types import DevboxAsyncExecutionDetailView, DevboxView
+from runloop_api_client.lib.polling import PollingConfig
+from runloop_api_client.types import DevboxAsyncExecutionDetailView
 
 from inspect_sandboxes._util.retry import (
     make_retry_decorators,
@@ -84,34 +83,6 @@ def _is_timeout(exc: BaseException) -> bool:
 standard_retry, exec_retry = make_retry_decorators(
     _is_retryable, _is_retryable_for_exec
 )
-
-
-@standard_retry
-async def shutdown_devbox(client: AsyncRunloop, devbox_id: str) -> None:
-    """Shut down a devbox, retrying transient API errors.
-
-    ``NotFoundError`` is permanent (see ``_is_retryable``) so it propagates to
-    the caller, which treats an already-gone devbox as success.
-    """
-    await client.devboxes.shutdown(devbox_id)
-
-
-async def create_devbox(client: AsyncRunloop, **create_kwargs: Any) -> DevboxView:
-    """Create a devbox and wait for it to reach running.
-
-    ``create_and_await_running`` creates the devbox and *then* polls, so a
-    ``PollingTimeout`` means the devbox exists but never came up. Shut it down
-    before re-raising rather than leaking it until the task-cleanup orphan
-    sweep — a stranded devbox holds a concurrency slot for the rest of the run.
-    """
-    try:
-        return await client.devboxes.create_and_await_running(**create_kwargs)  # type: ignore[arg-type]
-    except PollingTimeout as e:
-        devbox = e.last_value
-        if isinstance(devbox, DevboxView):
-            with suppress(Exception):
-                await shutdown_devbox(client, devbox.id)
-        raise
 
 
 # Polling backoff for async executions: start fast, back off to a ~1 s cap so a
