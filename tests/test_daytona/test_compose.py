@@ -200,8 +200,6 @@ def test_apply_daytona_extensions_does_not_set_timeout() -> None:
             None,
             1,
         ),
-        # CPU from service-level cpus field
-        ({"cpus": 4.0}, 4, None, None),
     ],
 )
 def test_service_to_resources(

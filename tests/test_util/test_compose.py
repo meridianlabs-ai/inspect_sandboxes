@@ -1,15 +1,17 @@
 """Tests for _util/compose.py utility functions."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
-from inspect_ai.util import ComposeBuild
+from inspect_ai.util import ComposeBuild, ComposeService
 from inspect_sandboxes._util.compose import (
     mib_to_gib,
     parse_environment,
     parse_memory,
     parse_service_ports,
     resolve_dockerfile_path,
+    resolve_service_resources,
 )
 
 
@@ -166,3 +168,60 @@ def test_parse_service_ports_unparseable(ports: list[str | int]) -> None:
     parsed, unparseable = parse_service_ports(ports)
     assert parsed == []
     assert unparseable == [str(p) for p in ports]
+
+
+@pytest.mark.parametrize(
+    ("service_config", "expected"),
+    [
+        # deploy.resources.limits — top of the ladder
+        (
+            {
+                "image": "alpine",
+                "deploy": {"resources": {"limits": {"cpus": "4", "memory": "2g"}}},
+            },
+            (4, 2048),
+        ),
+        # deploy.resources.reservations — used when limits are absent
+        (
+            {
+                "image": "alpine",
+                "deploy": {
+                    "resources": {"reservations": {"cpus": "2", "memory": "512m"}}
+                },
+            },
+            (2, 512),
+        ),
+        # limits win over reservations, per axis
+        (
+            {
+                "image": "alpine",
+                "deploy": {
+                    "resources": {
+                        "limits": {"cpus": "4", "memory": "2g"},
+                        "reservations": {"cpus": "1", "memory": "512m"},
+                    }
+                },
+            },
+            (4, 2048),
+        ),
+        # service-level cpus/mem_limit — bottom of the ladder; cpu ceil-rounded
+        ({"image": "alpine", "cpus": 2.5, "mem_limit": "1g"}, (3, 1024)),
+        # fractional cpu rounds up to a 1-core minimum
+        ({"image": "alpine", "cpus": 0.5}, (1, None)),
+        # axes resolve independently: cpu from deploy, memory from service level
+        (
+            {
+                "image": "alpine",
+                "deploy": {"resources": {"limits": {"cpus": "2"}}},
+                "mem_limit": "1g",
+            },
+            (2, 1024),
+        ),
+        # nothing set at any level
+        ({"image": "alpine"}, (None, None)),
+    ],
+)
+def test_resolve_service_resources(
+    service_config: dict[str, Any], expected: tuple[int | None, int | None]
+) -> None:
+    assert resolve_service_resources(ComposeService(**service_config)) == expected

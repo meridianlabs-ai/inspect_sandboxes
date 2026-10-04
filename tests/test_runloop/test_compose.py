@@ -168,16 +168,6 @@ def test_deploy_resources_to_launch_parameters() -> None:
     assert result.launch_parameters.get("resource_size_request") == "CUSTOM_SIZE"
 
 
-def test_service_level_cpus_mem() -> None:
-    config = ComposeConfig(
-        services={"default": ComposeService(image="alpine", cpus=2.5, mem_limit="4g")}
-    )
-    result = resolve_single_service_params(config, None)
-    assert result.launch_parameters is not None
-    assert result.launch_parameters.get("custom_cpu_cores") == 3  # ceil(2.5)
-    assert result.launch_parameters.get("custom_gb_memory") == 4
-
-
 def test_x_runloop_launch_parameters_take_precedence() -> None:
     config = ComposeConfig(
         services={

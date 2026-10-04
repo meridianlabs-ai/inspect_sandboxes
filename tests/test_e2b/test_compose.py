@@ -89,25 +89,6 @@ def test_extract_e2b_timeout_rejects_non_numeric(bad_value: Any) -> None:
             4,
             2 * 1024,
         ),
-        # deploy.resources.reservations (fallback when limits absent)
-        (
-            {
-                "image": "alpine",
-                "deploy": {
-                    "resources": {"reservations": {"cpus": "2", "memory": "512m"}}
-                },
-            },
-            {},
-            2,
-            512,
-        ),
-        # service-level cpus/mem_limit
-        (
-            {"image": "alpine", "cpus": 2.5, "mem_limit": "1g"},
-            {},
-            3,  # ceil(2.5)
-            1024,
-        ),
         # x-e2b overrides deploy.resources
         (
             {
@@ -224,13 +205,6 @@ def test_convert_compose_missing_dockerfile() -> None:
             resolve_single_service_params(config, "/tmp/compose.yml")
 
 
-def test_default_resources() -> None:
-    config = ComposeConfig(services={"default": ComposeService(image="alpine")})
-    result = resolve_single_service_params(config, None)
-    assert result.cpu_count == DEFAULT_CPU_COUNT
-    assert result.memory_mb == DEFAULT_MEMORY_MB
-
-
 def test_deploy_resources_limits() -> None:
     config = ComposeConfig(
         services={
@@ -245,32 +219,6 @@ def test_deploy_resources_limits() -> None:
     result = resolve_single_service_params(config, None)
     assert result.cpu_count == 4
     assert result.memory_mb == 2 * 1024
-
-
-def test_service_level_cpus_mem() -> None:
-    config = ComposeConfig(
-        services={"default": ComposeService(image="alpine", cpus=2.5, mem_limit="512m")}
-    )
-    result = resolve_single_service_params(config, None)
-    assert result.cpu_count == 3  # ceil(2.5)
-    assert result.memory_mb == 512
-
-
-def test_x_e2b_resources_take_precedence() -> None:
-    config = ComposeConfig(
-        services={
-            "default": ComposeService(
-                image="alpine",
-                deploy={  # type: ignore[arg-type]
-                    "resources": {"limits": {"cpus": "4", "memory": "2g"}}
-                },
-            )
-        },
-        **{"x-e2b": {"cpu_count": 8, "memory_mb": 4096}},
-    )
-    result = resolve_single_service_params(config, None)
-    assert result.cpu_count == 8
-    assert result.memory_mb == 4096
 
 
 def test_service_connection_ports_returns_container_ports() -> None:
