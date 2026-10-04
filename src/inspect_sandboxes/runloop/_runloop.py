@@ -62,7 +62,7 @@ async def _shutdown_all(
     semaphore = asyncio.Semaphore(_CLEANUP_CONCURRENCY)
     failures: list[tuple[str, Exception]] = []
 
-    async def _one(devbox_id: str) -> None:
+    async def _shutdown_one(devbox_id: str) -> None:
         async with semaphore:
             try:
                 await shutdown_devbox(client, devbox_id)
@@ -71,7 +71,7 @@ async def _shutdown_all(
             except Exception as e:  # noqa: BLE001 — collected, not swallowed
                 failures.append((devbox_id, e))
 
-    await asyncio.gather(*(_one(devbox_id) for devbox_id in devbox_ids))
+    await asyncio.gather(*(_shutdown_one(devbox_id) for devbox_id in devbox_ids))
     return failures
 
 
