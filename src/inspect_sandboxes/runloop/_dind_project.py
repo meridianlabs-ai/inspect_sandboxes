@@ -64,6 +64,7 @@ from ._blueprint import (
 )
 from ._retry import (
     DEVBOX_CREATE_POLLING_CONFIG,
+    create_devbox,
     execute_with_poll,
     shutdown_devbox,
     standard_retry,
@@ -502,7 +503,7 @@ async def _build_dind_snapshot(
         timeout=timeout,
     )
     create_kwargs["blueprint_name"] = blueprint_name
-    devbox = await client.devboxes.create_and_await_running(**create_kwargs)  # type: ignore[arg-type]
+    devbox = await create_devbox(client, **create_kwargs)
     logger.debug("Building DinD snapshot on devbox %s", devbox.id)
     try:
         await _start_dind_dockerd(client, devbox.id)
@@ -612,7 +613,7 @@ async def create_dind_project(
             timeout=timeout,
         )
         create_kwargs["snapshot_id"] = info.snapshot_id
-        devbox = await client.devboxes.create_and_await_running(**create_kwargs)  # type: ignore[arg-type]
+        devbox = await create_devbox(client, **create_kwargs)
         logger.debug(
             "Created DinD devbox %s from snapshot %s", devbox.id, info.snapshot_id
         )

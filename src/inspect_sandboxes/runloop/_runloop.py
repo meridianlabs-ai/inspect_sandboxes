@@ -39,7 +39,7 @@ from ._compose import (
     resolve_single_service_params,
 )
 from ._dind_project import dind_snapshot_ids, reset_dind_snapshot_cache
-from ._retry import DEVBOX_CREATE_POLLING_CONFIG, shutdown_devbox
+from ._retry import DEVBOX_CREATE_POLLING_CONFIG, create_devbox, shutdown_devbox
 from ._single_env import RunloopSingleServiceEnvironment
 
 logger = getLogger(__name__)
@@ -195,14 +195,16 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
         run_metadata = _run_metadata(task_name)
 
         if config is None:
-            devbox = await client.devboxes.create_and_await_running(
+            devbox = await create_devbox(
+                client,
                 name=sandbox_name,
                 metadata=run_metadata,
                 polling_config=DEVBOX_CREATE_POLLING_CONFIG,
             )
         elif is_dockerfile(config):
             blueprint_name = await build_blueprint_for_dockerfile(client, str(config))
-            devbox = await client.devboxes.create_and_await_running(
+            devbox = await create_devbox(
+                client,
                 name=sandbox_name,
                 blueprint_name=blueprint_name,
                 metadata=run_metadata,
@@ -254,7 +256,7 @@ class RunloopSandboxEnvironment(SandboxEnvironment):
             if params.timeout is not None:
                 create_kwargs["timeout"] = params.timeout
 
-            devbox = await client.devboxes.create_and_await_running(**create_kwargs)  # type: ignore[arg-type]
+            devbox = await create_devbox(client, **create_kwargs)
         else:
             raise ValueError(
                 f"Unrecognized config: {config}. "

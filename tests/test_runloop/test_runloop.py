@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from inspect_sandboxes.runloop._retry import create_devbox
 from inspect_sandboxes.runloop._runloop import (
     RunloopSandboxEnvironment,
     _run_id,
@@ -13,6 +14,8 @@ from inspect_sandboxes.runloop._runloop import (
     list_devboxes,
 )
 from inspect_sandboxes.runloop._single_env import RunloopSingleServiceEnvironment
+from runloop_api_client.lib.polling import PollingTimeout
+from runloop_api_client.types import DevboxView
 
 
 def make_mock_devbox(devbox_id: str = "dbx-test-123") -> MagicMock:
@@ -548,3 +551,55 @@ async def test_cli_cleanup_bulk_partial_failure(mock_client: MagicMock) -> None:
             await RunloopSandboxEnvironment.cli_cleanup(None)
 
     assert exc_info.value.code == 1
+
+
+@pytest.mark.asyncio
+async def test_create_devbox_shuts_down_on_polling_timeout() -> None:
+    """A devbox that never reaches running is reclaimed, not leaked.
+
+    create_and_await_running creates the devbox then polls, so a PollingTimeout
+    leaves a live devbox behind; create_devbox shuts it down before re-raising.
+    """
+    devbox = DevboxView.model_construct(id="dbx-stuck")
+    client = MagicMock()
+    client.devboxes = MagicMock()
+    client.devboxes.create_and_await_running = AsyncMock(
+        side_effect=PollingTimeout("timed out", devbox)
+    )
+    client.devboxes.shutdown = AsyncMock()
+
+    with pytest.raises(PollingTimeout):
+        await create_devbox(client, name="x")
+
+    client.devboxes.shutdown.assert_awaited_once_with("dbx-stuck")
+
+
+@pytest.mark.asyncio
+async def test_create_devbox_polling_timeout_without_devbox_reraises() -> None:
+    """No last_value (nothing to reclaim) still re-raises without crashing."""
+    client = MagicMock()
+    client.devboxes = MagicMock()
+    client.devboxes.create_and_await_running = AsyncMock(
+        side_effect=PollingTimeout("timed out", None)
+    )
+    client.devboxes.shutdown = AsyncMock()
+
+    with pytest.raises(PollingTimeout):
+        await create_devbox(client, name="x")
+
+    client.devboxes.shutdown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_devbox_returns_running_devbox() -> None:
+    """The happy path returns the devbox and never shuts anything down."""
+    devbox = DevboxView.model_construct(id="dbx-ok")
+    client = MagicMock()
+    client.devboxes = MagicMock()
+    client.devboxes.create_and_await_running = AsyncMock(return_value=devbox)
+    client.devboxes.shutdown = AsyncMock()
+
+    result = await create_devbox(client, name="x")
+
+    assert result is devbox
+    client.devboxes.shutdown.assert_not_awaited()
