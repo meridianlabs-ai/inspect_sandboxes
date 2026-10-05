@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.6.0...v0.6.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* Daytona exec returns stderr separately from stdout ([#80](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/80)) ([d18bbc2](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/d18bbc2e3bc9051a1d53c1b79513f9f39b3a50e0))
+* run oversized Modal exec commands via a staged script ([#82](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/82)) ([e6a9afa](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/e6a9afaeb1dd2fcc69a23f58d7abad544b383115))
+* stream large stdin to Modal exec in drained chunks ([#83](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/83)) ([9223208](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/9223208ad4821373b895520214cf496c620c2fcb))
+
 ## [0.6.0](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.5.0...v0.6.0) (2026-09-21)
 
 
