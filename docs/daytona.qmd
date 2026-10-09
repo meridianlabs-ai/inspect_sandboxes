@@ -162,6 +162,71 @@ x-daytona:
 
 Unsupported Daytona parameters: `volumes`.
 
+## Compose support {#daytona-compose-support}
+
+For single-service Compose files the Daytona converter maps the service onto Daytona sandbox parameters, and every populated field is checked against the tables below before the sandbox is created. Multi-service files run under Docker-in-Docker, where Compose itself handles every field, so this check does not apply to them. The Compose `command` and `entrypoint` are never started on Daytona: the sandbox only runs what you pass to `exec()`, so a service that is expected to serve something (for example `command: python server.py` plus `ports`) will not.
+
+- **supported**: translated.
+- **partial**: translated with caveats; the note says what is dropped (some conversions warn about it, some do not).
+- **ignored**: dropped with a warning (once per process).
+- **rejected**: `ValueError` before sandbox creation, because dropping the field would change the sandbox's identity, isolation or data.
+
+A populated field missing from these tables (for example one added by a newer `inspect_ai`) is warned about rather than silently dropped, and unknown `x-daytona` keys warn too. The `x-daytona` settings themselves are listed under [Configuration](#configuration).
+
+### Service fields
+
+::: {tbl-colwidths="[18,12,70]"}
+| Field | Support | Notes |
+|---|---|---|
+| `image` | supported | Ignored when `x-daytona.snapshot` is set. |
+| `build` | partial | `context` and `dockerfile` locate the Dockerfile, but the Dockerfile's own directory is the build context, so `COPY` sources differ from Compose when the Dockerfile is not directly inside `context`. Ignored when `x-daytona.snapshot` is set. |
+| `command` | ignored | Daytona sandboxes run the Daytona daemon; the Compose process is not started, so a keep-alive such as `sleep infinity` is unnecessary. |
+| `entrypoint` | ignored | Daytona sandboxes run the Daytona daemon; the Compose process is not started, so a keep-alive such as `sleep infinity` is unnecessary. |
+| `working_dir` | ignored | Commands start in the sandbox user's home; pass `cwd=` to `exec()`. |
+| `environment` | supported | `x-daytona.env_vars` adds to (and overrides) these. |
+| `env_file` | ignored | Files are not read; put the variables under `environment` or `x-daytona.env_vars`. |
+| `user` | supported | Becomes the sandbox OS user; `x-daytona.os_user` overrides. |
+| `healthcheck` | ignored | The sandbox is ready once creation returns. |
+| `ports` | partial | Container ports are surfaced as HTTPS preview URLs through `connection()`. Host bindings are dropped; UDP entries and port ranges are dropped with a warning. |
+| `expose` | ignored | `expose` ports are host-private and have no Daytona equivalent; use `ports` to get a preview URL. |
+| `volumes` | rejected | Bind mounts and named volumes cannot be attached; ship files with `Sample.files` / `write_file()`. |
+| `devices` | ignored | Host devices cannot be mapped into a Daytona sandbox. |
+| `networks` | ignored | Single service; there is no network to join. |
+| `network_mode` | partial | `none` sets `network_block_all`; every other value allows network access. `x-daytona.network_block_all` overrides. |
+| `hostname` | ignored | The hostname is assigned by Daytona. |
+| `runtime` | ignored | The runtime is chosen by Daytona; request GPUs via `deploy.resources` or `x-daytona.resources`. |
+| `init` | ignored | Daytona has no init-process option. |
+| `privileged` | ignored | Daytona sandboxes always run unprivileged. |
+| `shm_size` | ignored | `/dev/shm` size is fixed by Daytona. |
+| `ulimits` | ignored | Resource limits cannot be set at creation. |
+| `depends_on` | ignored | Single service; nothing to depend on. |
+| `pull_policy` | ignored | Daytona pulls the image when it creates the sandbox. |
+| `platform` | ignored | Daytona runners are `linux/amd64` only; there is no architecture selection. |
+| `extra_hosts` | ignored | `/etc/hosts` entries cannot be added at creation. |
+| `cap_add` | ignored | Capabilities cannot be granted beyond the sandbox defaults. |
+| `cap_drop` | rejected | Capabilities cannot be dropped, so the sandbox would run with more privilege than the file requests. |
+| `security_opt` | rejected | seccomp, AppArmor and no-new-privileges options cannot be applied, so the sandbox would be less confined than the file requests. |
+| `tmpfs` | ignored | tmpfs mounts cannot be declared at creation. |
+| `restart` | ignored | Sandboxes are never restarted. |
+| `stdin_open` | ignored | `exec()` supplies stdin per command. |
+| `tty` | ignored | Commands run without a pseudo-TTY. |
+| `deploy` | partial | `cpus` round up to whole cores and `memory` to whole GiB without warning; limits win over reservations; GPU `devices` map to a GPU count. `x-daytona.resources` overrides; all of it is ignored when `x-daytona.snapshot` is set. |
+| `mem_limit` | partial | Rounded up to whole GiB; ignored when `x-daytona.snapshot` is set. |
+| `mem_reservation` | ignored | Daytona has no memory reservation. |
+| `memswap_limit` | ignored | Swap cannot be configured. |
+| `cpus` | partial | Rounded up to whole cores; ignored when `x-daytona.snapshot` is set. |
+| `x-default` | supported | Selects the service to run. |
+:::
+
+### Top-level fields
+
+::: {tbl-colwidths="[18,12,70]"}
+| Field | Support | Notes |
+|---|---|---|
+| `volumes` | ignored | Named volume definitions have no Daytona mapping. |
+| `networks` | ignored | Network definitions have no Daytona mapping. |
+:::
+
 ## Finding sandboxes
 
 Every sandbox created by `inspect_sandboxes` is named and labeled so you can locate it in the Daytona dashboard for debugging, audit, or manual cleanup.
