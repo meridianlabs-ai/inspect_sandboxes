@@ -37,7 +37,7 @@ TAKE_STEP = "Take only the coverage data file"
 REQUIRED_CHECKS = {
     f"{job} ({python})"
     for job in ("py-lint", "py-type", "py-test", "py-build")
-    for python in ("3.12", "3.13")
+    for python in ("3.12", "3.14")
 }
 
 
