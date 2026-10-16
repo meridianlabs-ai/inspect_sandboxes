@@ -1,0 +1,184 @@
+---
+title: "Novita"
+---
+
+Cloud sandbox for [Inspect AI](https://inspect.aisi.org.uk/) using [Novita](https://novita.ai).
+
+## Setup
+
+Create a Novita account and set your API key:
+
+```bash
+export NOVITA_API_KEY=your_api_key
+```
+
+## Usage
+
+### Default base template
+
+:::{.callout-note title="What's a template?"}
+A Novita *template* is a pre-built sandbox image, bundled with a resource budget and lifecycle metadata. Functionally similar to a container image, but Novita-managed so sandboxes can be started from it quickly. See [Novita's templates docs](https://novita.ai/docs/guides/sandbox-template-authoring).
+:::
+
+A minimal eval that uses Novita's default `base` template.
+
+```python
+from inspect_ai import Task, eval
+from inspect_ai.solver import generate, system_message
+
+task = Task(
+    dataset=[{"input": "What is 2+2?", "target": "4"}],
+    solver=[
+        system_message("You are a helpful assistant."),
+        generate(),
+    ],
+    sandbox="novita",  # Uses Novita's default `base` template
+)
+
+eval(task)
+```
+
+::: callout-note
+The default template is only used when no config is specified AND no `Dockerfile` / `compose.yaml` / `compose.yml` / `docker-compose.yaml` / `docker-compose.yml` is present in the task's source directory — if one is found there, it is auto-detected and used instead.
+:::
+
+### Dockerfile
+
+Build the sandbox template from a local Dockerfile.
+
+```python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("novita", "path/to/Dockerfile"),
+)
+```
+
+### Docker Compose
+
+Configure the sandbox via a Docker Compose file. A file with a single service gets a single Novita sandbox; a file with two or more services automatically switches to Docker-in-Docker (DinD). Novita-specific settings go under the top-level `x-novita` key — see [Configuration](#configuration).
+
+#### Single-service
+
+```yaml
+# compose.yaml
+services:
+  default:
+    image: python:3.12
+    environment:
+      - MY_VAR=hello
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+```
+
+```python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("novita", "path/to/compose.yaml"),
+)
+```
+
+When the service has `image:` rather than `build:`, `inspect_sandboxes` builds a thin Novita template that wraps the image (`from_image(...)`), cached by image name + resources.
+
+#### Multi-service (DinD)
+
+When a compose file defines more than one service, the provider automatically uses Docker-in-Docker: a single Novita sandbox runs a Docker daemon, and services are brought up via `docker compose` inside it. Each service is exposed as a separate `SandboxEnvironment`.
+
+```yaml
+# compose.yaml
+services:
+  default:
+    image: python:3.12
+    x-default: true
+  helper:
+    image: redis:7
+```
+
+```python
+task = Task(
+    dataset=[...],
+    solver=[...],
+    sandbox=("novita", "path/to/compose.yaml"),
+)
+
+# In a solver, access services by name:
+default_env = sandbox()          # the x-default service
+helper_env = sandbox("helper")
+```
+
+**Default service selection** (priority): `x-default: true` > service named `"default"` or `"main"` > first service in the file.
+
+**DinD image**: The DinD sandbox uses Ubuntu 24.04 with a pinned `docker-ce` (engine + compose plugin) installed from Docker's official apt repo.
+
+**DinD templates**: The provider auto-creates a Novita template for the DinD base image and shares it across runs.
+
+**Image caching**: Each DinD sandbox gets a fresh Docker daemon with no image cache. `docker compose build` rebuilds from scratch every sample. For faster startup, pre-build your images and push them to a registry, then use `image:` instead of `build:` in your compose file.
+
+## Configuration
+
+The top-level `x-novita` key on a compose file passes settings to the Novita sandbox.
+
+::: {tbl-colwidths="[20,12,16,52]"}
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `template` | str | `None` | Pre-built template name. Skips the build step entirely. |
+| `cpu_count` | int | `2` | CPUs allocated to the template. Takes precedence over compose `deploy.resources` and service-level `cpus`. |
+| `memory_mb` | int | `1024` (single-service) / `4096` (DinD) | Memory in MiB. Takes precedence over compose `deploy.resources` and service-level `mem_limit`. |
+| `timeout` | float (seconds) | `3600` | Sandbox lifetime. Novita caps this at 3600 (Free) or 86400 (Paid). |
+| `envs` | dict | `{}` | Extra env vars. Single-service: merged with service `environment` (x-novita wins). DinD: passed to the sandbox VM. |
+| `user` | str | `None` | OS user for commands. Overrides the service-level `user` field. |
+| `allow_internet_access` | bool | `True` | Allow outbound network access. Overrides compose `network_mode`. |
+| `metadata` | dict | `{}` | Custom metadata, merged with the run's tracking metadata (which takes precedence for `created_by`, `inspect_run_id`, `task`, `name`). |
+:::
+
+Example:
+
+```yaml
+x-novita:
+  cpu_count: 4
+  memory_mb: 8192
+  timeout: 1800
+  envs:
+    EXTRA_VAR: "value"
+  metadata:
+    project: alpha
+```
+
+## Finding sandboxes
+
+Every sandbox created by `inspect_sandboxes` is named and labeled so you can locate it via the Novita CLI (`novita-sandbox-cli sandbox list`) for debugging, audit, or manual cleanup.
+
+**Sandbox names** follow `inspect-{task_id}-{sample_id}-{hex}` (e.g. `inspect-my_eval-42-a1b2c3d4`). The 8-character hex suffix guarantees uniqueness across re-runs. If `task_id` or `sample_id` is unavailable, that segment is dropped; if both are unavailable, the name is just `inspect-{hex}`. The `sample_id` segment requires `inspect-ai >= 0.3.211` ([PR #3619](https://github.com/UKGovernmentBEIS/inspect_ai/pull/3619)); on older versions it's silently omitted. Novita sandboxes have no dedicated `name` field, so the name is stored as a metadata entry.
+
+**Metadata** applied to every sandbox:
+
+- `created_by: inspect-ai` — identifies sandboxes created by this package.
+- `inspect_run_id: <hex>` — a per-task-run identifier; all sandboxes for the same eval run share this value.
+- `task: <task_name>` — the Inspect task that created the sandbox.
+- `name: <sandbox-name>` — the sandbox name (see above).
+
+User metadata from `x-novita.metadata` is merged in; the four above always take precedence.
+
+**Template names**: `inspect-<12-char hash>` for single-service Dockerfile/image builds (hashed because the input is unbounded), `inspect-dind-<cpu>cpu-<memory_mb>mb` for DinD (the resource profile is shown directly). Identical inputs produce the same name, so successive runs reuse the same named template slot; the build call itself is skipped or partially redone by Novita's per-instruction layer cache (e.g. an unchanged `COPY` reuses cached files, a changed one triggers a rebuild of that layer).
+
+**Bulk cleanup** via the Inspect CLI — finds and deletes every sandbox tagged `created_by: inspect-ai`:
+
+```bash
+inspect sandbox cleanup novita                 # delete all
+inspect sandbox cleanup novita <sandbox-id>    # delete one
+```
+
+## Notes
+
+- **Network mode**: Docker Compose `network_mode` is automatically translated to Novita's `allow_internet_access`. `network_mode: none` blocks all network access; any other value (e.g. `bridge`) allows it. `x-novita.allow_internet_access` takes precedence if set. For DinD, the VM always has network enabled (needed for `docker pull`); service-level isolation is via compose `network_mode`.
+
+## Limitations {#novita-limitations}
+
+- **Per-sample resource overrides**: CPU and memory are baked into the template at build time; changing them produces a new cached template. Each unique resource profile maps to its own template.
+- **Resource caps**: Novita caps sandboxes at 2 vCPU / 4 GiB (Free) or 8 vCPU / 8 GiB (Paid), and additionally caps memory at 4096 MiB per vCPU. Requests over either limit fail the template build with a 400 from Novita; lower the request via compose resources / `x-novita.memory_mb`, or task-level knobs where the eval provides them (e.g. inspect_harbor's `-T override_memory_mb=4096`).
+- **Large file writes**: a single large upload fails (uncompressed the connection resets; gzipped the gateway returns a 504), so writes above 8 MiB (e.g. big `Sample.files` entries) are uploaded 8 MiB at a time and appended to the target inside the sandbox. Expect roughly two round trips per 8 MiB. The target still has to fit on the sandbox disk.
+- **GPU**: Novita's sandbox API does not expose GPU allocation, so compose `deploy.resources.reservations.devices` is ignored.

@@ -23,25 +23,19 @@ across users and runs.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from logging import getLogger
 from pathlib import Path
 
 from e2b import AsyncTemplate
 from inspect_ai.util import trace_message
 
+from inspect_sandboxes._util.hashing import hash_inputs
+
 logger = getLogger(__name__)
 
 TEMPLATE_NAME_PREFIX = "inspect-"
 DEFAULT_CPU_COUNT = 2
 DEFAULT_MEMORY_MB = 1024
-_HASH_LEN = 12
-
-
-def _hash_inputs(payload: dict[str, object]) -> str:
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(blob).hexdigest()[:_HASH_LEN]
 
 
 def template_name_for_dockerfile(
@@ -52,7 +46,7 @@ def template_name_for_dockerfile(
 ) -> str:
     """Cached template name for a Dockerfile + resource budget."""
     content = Path(dockerfile_path).read_bytes().decode("utf-8", errors="replace")
-    h = _hash_inputs(
+    h = hash_inputs(
         {
             "kind": "dockerfile",
             "content": content,
@@ -70,7 +64,7 @@ def template_name_for_image(
     memory_mb: int = DEFAULT_MEMORY_MB,
 ) -> str:
     """Cached template name for a base image + resource budget."""
-    h = _hash_inputs(
+    h = hash_inputs(
         {
             "kind": "image",
             "image": image,

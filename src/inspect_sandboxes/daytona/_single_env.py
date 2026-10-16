@@ -24,6 +24,12 @@ from inspect_ai.util._sandbox.environment import (
 )
 from typing_extensions import override
 
+from inspect_sandboxes._util.sandbox import (
+    build_stdin_command,
+    decode_file_content,
+    verify_file_size,
+)
+
 from ._exec_capture import (
     ExecCapture,
     build_capture_command,
@@ -31,12 +37,7 @@ from ._exec_capture import (
     captured_exec_result,
 )
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
-from ._sandbox_utils import (
-    build_stdin_command,
-    decode_file_content,
-    delete_sandbox,
-    verify_file_size,
-)
+from ._sandbox_utils import delete_sandbox
 
 logger = getLogger(__name__)
 
@@ -126,7 +127,12 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             data = input.encode("utf-8") if isinstance(input, str) else input
             stdin_file = f"/tmp/.inspect-stdin-{uuid.uuid4().hex}"
             await self._write_file_content(stdin_file, data)
-            command = build_stdin_command(cmd, stdin_file, cleanup=user is None)
+            command = build_stdin_command(
+                cmd,
+                stdin_file,
+                cleanup=user is None,
+                remove_command=build_remove_command,
+            )
         else:
             command = shlex.join(cmd)
 

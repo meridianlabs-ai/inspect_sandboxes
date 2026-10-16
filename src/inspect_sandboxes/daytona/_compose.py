@@ -1,4 +1,3 @@
-import math
 from logging import getLogger
 from pathlib import Path
 from typing import Any
@@ -12,11 +11,14 @@ from daytona import (
 from inspect_ai.util import ComposeConfig, ComposeService, warn_once
 
 from inspect_sandboxes._util.compose import (
+    extract_extension,
+    extract_extension_timeout,
     find_default_service,
+    mib_to_gib,
     parse_environment,
-    parse_memory,
     parse_service_ports,
     resolve_dockerfile_path,
+    resolve_service_resources,
 )
 
 logger = getLogger(__name__)
@@ -210,7 +212,7 @@ def apply_daytona_extensions(
         params: Sandbox params dict to modify in-place.
         extensions: Extensions dict from compose config.
     """
-    ext = extensions.get("x-daytona", {})
+    ext = extract_extension(extensions, "x-daytona")
 
     simple_keys = [
         "auto_stop_interval",
@@ -250,15 +252,7 @@ def extract_daytona_timeout(extensions: dict[str, Any]) -> float | None:
             ``timeout: "30"`` as the string ``"30"``; we coerce here so the
             SDK receives a proper number.
     """
-    raw = (extensions.get("x-daytona") or {}).get("timeout")
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError) as e:
-        raise ValueError(
-            f"x-daytona.timeout must be a number (seconds), got {raw!r}"
-        ) from e
+    return extract_extension_timeout(extensions, "x-daytona")
 
 
 def _service_to_resources(service: ComposeService) -> Resources | None:
@@ -272,24 +266,14 @@ def _service_to_resources(service: ComposeService) -> Resources | None:
         CPU is an integer number of cores.
         Priority: deploy.resources > service-level fields.
     """
-    cpu: int | None = None
-    memory_gib: int | None = None
-    gpu: int | None = None
+    # cpu + memory come from the shared ladder (memory in MiB); convert to GiB.
+    cpu, memory_mib = resolve_service_resources(service)
+    memory_gib = mib_to_gib(memory_mib) if memory_mib is not None else None
 
+    # GPU count from compose deploy.resources.reservations.devices (Daytona-only).
+    gpu: int | None = None
     if service.deploy and service.deploy.resources:
         resources = service.deploy.resources
-
-        if resources.limits and resources.limits.cpus:
-            cpu = max(1, math.ceil(float(resources.limits.cpus)))
-        elif resources.reservations and resources.reservations.cpus:
-            cpu = max(1, math.ceil(float(resources.reservations.cpus)))
-
-        if resources.limits and resources.limits.memory:
-            memory_gib = _to_gib(resources.limits.memory)
-        elif resources.reservations and resources.reservations.memory:
-            memory_gib = _to_gib(resources.reservations.memory)
-
-        # GPU count from compose deploy.resources.reservations.devices
         if resources.reservations and resources.reservations.devices:
             for device in resources.reservations.devices:
                 if device.capabilities and "gpu" in device.capabilities:
@@ -301,19 +285,7 @@ def _service_to_resources(service: ComposeService) -> Resources | None:
                         gpu = 1
                     break
 
-    # Fall back to service-level fields (v2 format)
-    if cpu is None and service.cpus:
-        cpu = max(1, math.ceil(service.cpus))
-
-    if memory_gib is None and service.mem_limit:
-        memory_gib = _to_gib(service.mem_limit)
-
     if cpu is None and memory_gib is None and gpu is None:
         return None
 
     return Resources(cpu=cpu, memory=memory_gib, gpu=gpu)
-
-
-def _to_gib(mem_str: str) -> int:
-    """Convert a memory string to GiB, ceiling-rounded, minimum 1."""
-    return max(1, math.ceil(parse_memory(mem_str) / 1024))
