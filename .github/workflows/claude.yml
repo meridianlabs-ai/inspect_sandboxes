@@ -179,10 +179,6 @@ jobs:
       # continues an earlier agent branch, say; CI on agent PRs does not
       # count). .github/ and agent instructions stay refused either way.
       allow_build_config: true
-      # uv_no_group: exported as UV_NO_GROUP to the provisioning recipe and to
-      # every command the agent runs, so its `uv run` calls do not re-sync the
-      # `doc` group (quarto-cli has no wheel and is built from its sdist).
-      uv_no_group: doc
 
   # @auto kickoff (distinct from the one-shot `claude` above). An `auto` label or
   # `@auto` mention drives the issue autonomously: the dev agent opens a PR, the
@@ -293,7 +289,3 @@ jobs:
       # continues an earlier agent branch, say; CI on agent PRs does not
       # count). .github/ and agent instructions stay refused either way.
       allow_build_config: true
-      # uv_no_group: exported as UV_NO_GROUP to the provisioning recipe and to
-      # every command the agent runs, so its `uv run` calls do not re-sync the
-      # `doc` group (quarto-cli has no wheel and is built from its sdist).
-      uv_no_group: doc

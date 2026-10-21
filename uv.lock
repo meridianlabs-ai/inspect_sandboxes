@@ -1372,7 +1372,6 @@ wheels = [
 [[package]]
 name = "inspect-sandboxes"
 source = { editable = "." }
-default-groups = ["dev", "doc"]
 dependencies = [
     { name = "daytona" },
     { name = "e2b" },

@@ -47,9 +47,9 @@ dev = [
     "ruff",
     "types-PyYAML",
 ]
-# Kept out of `dev` so CI can leave it out (`UV_NO_GROUP=doc` in build.yaml):
-# quarto-cli has no wheel and is built from its sdist. A local `uv sync` still
-# installs it through `default-groups` below.
+# Not a default group, so a plain `uv sync` or `uv run` leaves it out: quarto-cli
+# has no wheel and is built from its sdist. Docs commands ask for it with
+# `--group doc`.
 doc = [
     "griffe>=2",
     "jupyter",
@@ -79,7 +79,6 @@ exclude = ["docs/", "tests/"]
 [tool.uv]
 managed = true
 add-bounds = "lower"
-default-groups = ["dev", "doc"]
 # Exclude packages published within the last 7 days to protect against supply chain attacks
 exclude-newer = "7 days"
 

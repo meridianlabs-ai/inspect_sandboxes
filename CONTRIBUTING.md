@@ -13,8 +13,7 @@ make install
 ```
 
 `make install` runs `uv sync` to create the virtual environment and install the
-`dev` and `doc` dependency groups, then installs the pre-commit hooks. The `doc`
-group holds the docs tools (Quarto); CI leaves it out.
+dev dependencies, then installs the pre-commit hooks.
 
 ## Checks and tests
 
@@ -32,6 +31,20 @@ make test-all
 
 Integration tests are marked with the `integration` marker and are skipped by
 default; run them explicitly with `make test-integration`.
+
+## Docs
+
+The docs live in `docs/` and are built with [Quarto](https://quarto.org). The
+docs tools are in the `doc` dependency group, which `uv sync` and `uv run` leave
+out, so ask for it:
+
+```bash
+# Preview the docs locally
+uv run --group doc quarto preview docs
+
+# Publish to GitHub Pages
+uv run --group doc quarto publish gh-pages docs
+```
 
 ## Commit messages and releases
 

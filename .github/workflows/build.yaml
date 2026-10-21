@@ -18,12 +18,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # leave out the docs packages (quarto-cli has no wheel and is built from its
-  # sdist); as an env var it also covers `uv run`, which re-syncs the default
-  # groups (dev and doc) unless told not to
-  UV_NO_GROUP: doc
-
 jobs:
   py-lint:
     runs-on: ubuntu-latest
