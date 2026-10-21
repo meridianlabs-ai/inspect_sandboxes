@@ -41,6 +41,12 @@ from inspect_sandboxes._util.dind_compose import (
     rewrite_compose_yaml,
 )
 
+from ._command import (
+    exceeds_inline_limit,
+    remove_files_command,
+    source_script_command,
+    temp_file_path,
+)
 from ._single_env import FILE_REQUEST_TIMEOUT
 from ._template import TEMPLATE_NAME_PREFIX
 
@@ -80,7 +86,20 @@ async def vm_exec(
 
     E2B's commands.run raises CommandExitException on non-zero exit; we catch
     it and surface the result as a tuple. Returns (exit_code, stdout, stderr).
+
+    commands.run passes the whole command line as a single ``bash -l -c``
+    argument, which the kernel caps at 128 KiB. A ``docker compose exec`` line
+    carrying a large container argv is staged in a temp file and sourced so
+    the args reach docker intact (see ``_command``).
     """
+    script_file: str | None = None
+    if exceeds_inline_limit(command):
+        script_file = temp_file_path("cmd")
+        await sandbox.files.write(
+            script_file, command.encode("utf-8"), request_timeout=FILE_REQUEST_TIMEOUT
+        )
+        command = source_script_command(script_file)
+
     try:
         result = await sandbox.commands.run(
             command,
@@ -92,6 +111,15 @@ async def vm_exec(
             e.stdout,
             e.stderr,
         )
+    finally:
+        # Same default user wrote and sources the file, so it can remove it.
+        if script_file is not None:
+            try:
+                await sandbox.commands.run(
+                    remove_files_command([script_file]), timeout=10
+                )
+            except Exception as e:
+                logger.debug(f"Could not remove staged command {script_file}: {e}")
     return (
         result.exit_code if result.exit_code is not None else 0,
         result.stdout,
