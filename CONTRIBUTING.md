@@ -13,7 +13,8 @@ make install
 ```
 
 `make install` runs `uv sync` to create the virtual environment and install the
-dev dependencies, then installs the pre-commit hooks.
+`dev` and `doc` dependency groups, then installs the pre-commit hooks. The `doc`
+group holds the docs tools (Quarto); CI leaves it out.
 
 ## Checks and tests
 
