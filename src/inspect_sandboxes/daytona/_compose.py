@@ -18,8 +18,126 @@ from inspect_sandboxes._util.compose import (
     parse_service_ports,
     resolve_dockerfile_path,
 )
+from inspect_sandboxes._util.compose_support import (
+    ComposeSupport,
+    ignored,
+    partial,
+    rejected,
+    supported,
+    validate_compose_support,
+)
 
 logger = getLogger(__name__)
+
+# x-daytona keys copied verbatim onto the sandbox params by apply_daytona_extensions.
+_DAYTONA_SIMPLE_KEYS = (
+    "auto_stop_interval",
+    "auto_archive_interval",
+    "auto_delete_interval",
+    "network_block_all",
+    "network_allow_list",
+    "language",
+    "os_user",
+    "public",
+    "ephemeral",
+    "labels",
+    "snapshot",
+    "resources",
+)
+
+# Every x-daytona key this provider reads: the simple keys, the merged
+# env_vars, and timeout (consumed by extract_daytona_timeout).
+_DAYTONA_EXTENSION_KEYS = frozenset({*_DAYTONA_SIMPLE_KEYS, "env_vars", "timeout"})
+
+_NOT_EXECUTED = (
+    "Daytona sandboxes run the Daytona daemon; the Compose process is not "
+    "started, so a keep-alive such as `sleep infinity` is unnecessary."
+)
+
+# How the single-service converter treats each Compose field. Validated (and
+# rendered in docs/daytona.qmd) by validate_compose_support; see
+# _util/compose_support.py. The DinD path runs Compose itself and is exempt.
+DAYTONA_COMPOSE_SUPPORT = ComposeSupport(
+    provider="Daytona",
+    service={
+        "image": supported("Ignored when `x-daytona.snapshot` is set."),
+        "build": partial(
+            "`context` and `dockerfile` locate the Dockerfile, but the Dockerfile's own directory is the build context, so `COPY` sources differ from Compose when the Dockerfile is not directly inside `context`. Ignored when `x-daytona.snapshot` is set."
+        ),
+        "command": ignored(_NOT_EXECUTED),
+        "entrypoint": ignored(_NOT_EXECUTED),
+        "working_dir": ignored(
+            "Commands start in the sandbox user's home; pass `cwd=` to `exec()`."
+        ),
+        "environment": supported("`x-daytona.env_vars` adds to (and overrides) these."),
+        "env_file": ignored(
+            "Files are not read; put the variables under `environment` or `x-daytona.env_vars`."
+        ),
+        "user": supported(
+            "Becomes the sandbox OS user; `x-daytona.os_user` overrides."
+        ),
+        "healthcheck": ignored("The sandbox is ready once creation returns."),
+        "ports": partial(
+            "Container ports are surfaced as HTTPS preview URLs through `connection()`. Host bindings are dropped; UDP entries and port ranges are dropped with a warning."
+        ),
+        "expose": ignored(
+            "`expose` ports are host-private and have no Daytona equivalent; use `ports` to get a preview URL."
+        ),
+        "volumes": rejected(
+            "Bind mounts and named volumes cannot be attached; ship files with `Sample.files` / `write_file()`."
+        ),
+        "devices": ignored("Host devices cannot be mapped into a Daytona sandbox."),
+        "networks": ignored("Single service; there is no network to join."),
+        "network_mode": partial(
+            "`none` sets `network_block_all`; every other value allows network access. `x-daytona.network_block_all` overrides."
+        ),
+        "hostname": ignored("The hostname is assigned by Daytona."),
+        "runtime": ignored(
+            "The runtime is chosen by Daytona; request GPUs via `deploy.resources` or `x-daytona.resources`."
+        ),
+        "init": ignored("Daytona has no init-process option."),
+        "privileged": ignored("Daytona sandboxes always run unprivileged."),
+        "shm_size": ignored("`/dev/shm` size is fixed by Daytona."),
+        "ulimits": ignored("Resource limits cannot be set at creation."),
+        "depends_on": ignored("Single service; nothing to depend on."),
+        "pull_policy": ignored("Daytona pulls the image when it creates the sandbox."),
+        "platform": ignored(
+            "Daytona runners are `linux/amd64` only; there is no architecture selection."
+        ),
+        "extra_hosts": ignored("`/etc/hosts` entries cannot be added at creation."),
+        "cap_add": ignored(
+            "Capabilities cannot be granted beyond the sandbox defaults."
+        ),
+        "cap_drop": rejected(
+            "Capabilities cannot be dropped, so the sandbox would run with more privilege than the file requests."
+        ),
+        "security_opt": rejected(
+            "seccomp, AppArmor and no-new-privileges options cannot be applied, so the sandbox would be less confined than the file requests."
+        ),
+        "tmpfs": ignored("tmpfs mounts cannot be declared at creation."),
+        "restart": ignored("Sandboxes are never restarted."),
+        "stdin_open": ignored("`exec()` supplies stdin per command."),
+        "tty": ignored("Commands run without a pseudo-TTY."),
+        "deploy": partial(
+            "`cpus` round up to whole cores and `memory` to whole GiB without warning; limits win over reservations; GPU `devices` map to a GPU count. `x-daytona.resources` overrides; all of it is ignored when `x-daytona.snapshot` is set."
+        ),
+        "mem_limit": partial(
+            "Rounded up to whole GiB; ignored when `x-daytona.snapshot` is set."
+        ),
+        "mem_reservation": ignored("Daytona has no memory reservation."),
+        "memswap_limit": ignored("Swap cannot be configured."),
+        "cpus": partial(
+            "Rounded up to whole cores; ignored when `x-daytona.snapshot` is set."
+        ),
+        "x_default": supported("Selects the service to run."),
+    },
+    top_level={
+        "volumes": ignored("Named volume definitions have no Daytona mapping."),
+        "networks": ignored("Network definitions have no Daytona mapping."),
+    },
+    extension="x-daytona",
+    extension_keys=_DAYTONA_EXTENSION_KEYS,
+)
 
 
 def create_single_service_params(
@@ -37,6 +155,7 @@ def create_single_service_params(
         labels: Labels to apply (merged with x-daytona labels).
         name: Optional sandbox name (visible in the Daytona dashboard).
     """
+    validate_compose_support(config, DAYTONA_COMPOSE_SUPPORT)
     _, service = find_default_service(config)
 
     compose_dir = Path(compose_path).parent if compose_path else Path.cwd()
@@ -112,18 +231,10 @@ def service_connection_ports(service: ComposeService) -> list[int]:
     ports at creation; we record the container side of each ``service.ports``
     entry and let ``connection()`` turn them into preview URLs.
 
-    ``expose`` is host-private and is warned about, never surfaced. Port ranges
-    and UDP entries are warned about and skipped (a preview URL is a single
-    HTTP(S) endpoint).
+    ``expose`` is host-private and never surfaced; validate_compose_support
+    warns about it (see DAYTONA_COMPOSE_SUPPORT). Port ranges and UDP entries
+    are warned about and skipped (a preview URL is a single HTTP(S) endpoint).
     """
-    if service.expose:
-        warn_once(
-            logger,
-            "Daytona does not surface Compose 'expose' ports. They stay "
-            "host-private (reachable only by sibling services). Use 'ports' to "
-            "get a preview URL through connection().",
-        )
-
     if not service.ports:
         return []
 
@@ -212,22 +323,7 @@ def apply_daytona_extensions(
     """
     ext = extensions.get("x-daytona", {})
 
-    simple_keys = [
-        "auto_stop_interval",
-        "auto_archive_interval",
-        "auto_delete_interval",
-        "network_block_all",
-        "network_allow_list",
-        "language",
-        "os_user",
-        "public",
-        "ephemeral",
-        "labels",
-        "snapshot",
-        "resources",
-    ]
-
-    for key in simple_keys:
+    for key in _DAYTONA_SIMPLE_KEYS:
         if ext.get(key) is not None:
             params[key] = ext[key]
 

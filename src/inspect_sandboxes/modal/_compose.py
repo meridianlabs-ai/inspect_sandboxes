@@ -8,10 +8,19 @@ import modal
 from inspect_ai.util import ComposeConfig, ComposeService, warn_once
 
 from inspect_sandboxes._util.compose import (
+    find_default_service,
     parse_environment,
     parse_memory,
     parse_service_ports,
     resolve_dockerfile_path,
+)
+from inspect_sandboxes._util.compose_support import (
+    ComposeSupport,
+    ignored,
+    partial,
+    rejected,
+    supported,
+    validate_compose_support,
 )
 
 logger = getLogger(__name__)
@@ -19,6 +28,118 @@ logger = getLogger(__name__)
 # x-modal keys that declare tunnels. If any is set, it overrides the ports
 # translated from service.ports (these extensions are explicit overrides).
 _MODAL_PORT_KEYS = ("encrypted_ports", "h2_ports", "unencrypted_ports")
+
+# Every x-modal key _apply_modal_extensions reads, plus image_registry_secret
+# (consumed by convert_compose_to_modal_params).
+_MODAL_EXTENSION_KEYS = frozenset(
+    {
+        "block_network",
+        "cidr_allowlist",
+        "cloud",
+        "custom_domain",
+        "encrypted_ports",
+        "experimental_options",
+        "gpu",
+        "h2_ports",
+        "idle_timeout",
+        "image_registry_secret",
+        "pty",
+        "region",
+        "secrets",
+        "timeout",
+        "unencrypted_ports",
+        "verbose",
+        "volumes",
+    }
+)
+
+# The x-modal keys copied straight onto Sandbox.create() kwargs (everything but
+# image_registry_secret, which shapes the image pull instead).
+_MODAL_PARAM_KEYS = frozenset(_MODAL_EXTENSION_KEYS - {"image_registry_secret"})
+
+# How this converter treats each Compose field. Validated (and rendered in
+# docs/modal.qmd) by validate_compose_support; see _util/compose_support.py.
+MODAL_COMPOSE_SUPPORT = ComposeSupport(
+    provider="Modal",
+    service={
+        "image": supported(),
+        "build": partial(
+            "`context` and `dockerfile` locate the Dockerfile, but the Dockerfile's own directory is the build context, so `COPY` sources differ from Compose when the Dockerfile is not directly inside `context`."
+        ),
+        "command": supported(),
+        "entrypoint": supported(
+            "Replaces the image ENTRYPOINT and suppresses its CMD."
+        ),
+        "working_dir": supported(),
+        "environment": supported(),
+        "env_file": ignored(
+            "Files are not read; put the variables under `environment` or in a Modal secret (`x-modal.secrets`)."
+        ),
+        "user": rejected(
+            "Modal sandboxes have no per-service user, so the sandbox would run as a different identity; pass `user=` to `exec()` instead."
+        ),
+        "healthcheck": ignored("The sandbox is ready once creation returns."),
+        "ports": partial(
+            "Container ports become unencrypted TCP tunnels surfaced through `connection()`. Host bindings, UDP entries and port ranges are dropped with a warning. `x-modal.*_ports` overrides."
+        ),
+        "expose": ignored(
+            "`expose` ports are host-private and have no Modal equivalent; use `ports` or `x-modal.*_ports` to publish a port."
+        ),
+        "volumes": rejected(
+            "Bind mounts and named volumes cannot be attached; mount a Modal Volume with `x-modal.volumes`, or ship files with `Sample.files` / `write_file()`."
+        ),
+        "devices": ignored("Host devices cannot be mapped into a Modal sandbox."),
+        "networks": ignored("Single service; there is no network to join."),
+        "network_mode": partial(
+            "`none` sets `block_network`; every other value allows network access. `x-modal.block_network` overrides."
+        ),
+        "hostname": ignored("The hostname is assigned by Modal."),
+        "runtime": ignored(
+            "The runtime is chosen by Modal; request GPUs via `deploy.resources` or `x-modal.gpu`."
+        ),
+        "init": ignored("Modal has no init-process option."),
+        "privileged": ignored("Modal sandboxes always run unprivileged."),
+        "shm_size": ignored("`/dev/shm` size is fixed by Modal."),
+        "ulimits": ignored("Resource limits cannot be set at creation."),
+        "depends_on": ignored("Single service; nothing to depend on."),
+        "pull_policy": ignored("Modal pulls the image when it builds its image layer."),
+        "platform": ignored(
+            "Modal runs `linux/amd64` only; there is no architecture selection."
+        ),
+        "extra_hosts": ignored("`/etc/hosts` entries cannot be added at creation."),
+        "cap_add": ignored(
+            "Capabilities cannot be granted beyond the sandbox defaults."
+        ),
+        "cap_drop": rejected(
+            "Capabilities cannot be dropped, so the sandbox would run with more privilege than the file requests."
+        ),
+        "security_opt": rejected(
+            "seccomp, AppArmor and no-new-privileges options cannot be applied, so the sandbox would be less confined than the file requests."
+        ),
+        "tmpfs": ignored("tmpfs mounts cannot be declared at creation."),
+        "restart": ignored("Sandboxes are never restarted."),
+        "stdin_open": ignored("`exec()` supplies stdin per command."),
+        "tty": ignored("Use `x-modal.pty` to request a pseudo-TTY."),
+        "deploy": partial(
+            "`resources.limits` / `reservations` `cpus` and `memory` map to Modal cpu and memory (reservation, limit). GPU `devices` map to a count of `ANY` GPUs (`x-modal.gpu` picks a type); `driver`, `options`, specific `device_ids` and non-GPU devices are dropped silently."
+        ),
+        "mem_limit": supported(),
+        "mem_reservation": ignored(
+            "Only `deploy.resources.reservations.memory` sets a reservation."
+        ),
+        "memswap_limit": ignored("Swap cannot be configured."),
+        "cpus": supported(),
+        "x_default": supported("Selects the service to run."),
+    },
+    top_level={
+        "volumes": ignored(
+            "Named volume definitions have no Modal mapping; see `x-modal.volumes`."
+        ),
+        "networks": ignored("Network definitions have no Modal mapping."),
+    },
+    extension="x-modal",
+    extension_keys=_MODAL_EXTENSION_KEYS,
+)
 
 
 class ModalVolumeSpec(NamedTuple):
@@ -54,10 +175,20 @@ def convert_compose_to_modal_params(
         compose_path: Path to the compose file for resolving relative paths.
             Pass None when using a ComposeConfig object directly.
     """
-    # Select service (prefer x-default, then "default", then first)
-    service = next((svc for svc in config.services.values() if svc.x_default), None)
-    if service is None:
-        service = config.services.get("default") or next(iter(config.services.values()))
+    # Select service (prefer x-default, then "default"/"main", then first).
+    # parse_compose_yaml(multiple_services=False) already rejects multi-service
+    # files; an in-memory ComposeConfig can still carry several, so say which
+    # ones are dropped rather than silently running one. Only the selected
+    # service is validated: settings on the dropped ones never take effect.
+    service_name, service = find_default_service(config)
+    if len(config.services) > 1:
+        others = sorted(name for name in config.services if name != service_name)
+        warn_once(
+            logger,
+            f"Modal runs a single service; using '{service_name}' and ignoring "
+            f"{others}. Mark the intended service with `x-default: true`.",
+        )
+    validate_compose_support(config, MODAL_COMPOSE_SUPPORT, services=[service_name])
 
     params: dict[str, Any] = {}
     command: list[str] = []
@@ -174,16 +305,10 @@ def _apply_service_ports(params: dict[str, Any], service: ComposeService) -> Non
       - A ``host:container`` mapping with a differing host port can't be
         honored; Modal assigns the tunnel URL and there is no host binding.
       - UDP entries and port ranges aren't representable as tunnels; skip them.
-      - ``expose`` is host-private and is never translated.
-    """
-    if service.expose:
-        warn_once(
-            logger,
-            "Modal does not translate Compose 'expose' ports. They stay "
-            "host-private (reachable only by sibling services), and Modal has "
-            "no equivalent. Use 'ports' or x-modal.*_ports to publish a port.",
-        )
 
+    ``expose`` is host-private and never translated; validate_compose_support
+    warns about it (see MODAL_COMPOSE_SUPPORT).
+    """
     if not service.ports:
         return
 
@@ -269,26 +394,7 @@ def _apply_modal_extensions(
     if any(modal_extensions.get(key) is not None for key in _MODAL_PORT_KEYS):
         params.pop("unencrypted_ports", None)
 
-    extension_keys = [
-        "block_network",
-        "cidr_allowlist",
-        "cloud",
-        "custom_domain",
-        "encrypted_ports",
-        "experimental_options",
-        "gpu",
-        "h2_ports",
-        "idle_timeout",
-        "pty",
-        "region",
-        "timeout",
-        "unencrypted_ports",
-        "verbose",
-        "secrets",
-        "volumes",
-    ]
-
-    for key in extension_keys:
+    for key in sorted(_MODAL_PARAM_KEYS):
         if modal_extensions.get(key) is not None:
             if key == "secrets":
                 secrets = modal_extensions[key]
