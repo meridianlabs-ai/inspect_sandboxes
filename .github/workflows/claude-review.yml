@@ -133,3 +133,8 @@ jobs:
       issues: read
       id-token: write
       actions: read
+    with:
+      # uv_no_group: exported as UV_NO_GROUP to the provisioning recipe and to
+      # every command the agent runs, so its `uv run` calls do not re-sync the
+      # `doc` group (quarto-cli has no wheel and is built from its sdist).
+      uv_no_group: doc

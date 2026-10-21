@@ -97,6 +97,10 @@ jobs:
       # continues an earlier agent branch, say; CI on agent PRs does not
       # count). .github/ and agent instructions stay refused either way.
       allow_build_config: true
+      # uv_no_group: exported as UV_NO_GROUP to the provisioning recipe and to
+      # every command the agent runs, so its `uv run` calls do not re-sync the
+      # `doc` group (quarto-cli has no wheel and is built from its sdist).
+      uv_no_group: doc
 
   # Review -> fix / handoff. The marker is a cheap router (it's forgeable — only
   # the reviewer posts it in practice); the reusable workflow does the authoritative
@@ -151,3 +155,7 @@ jobs:
       # continues an earlier agent branch, say; CI on agent PRs does not
       # count). .github/ and agent instructions stay refused either way.
       allow_build_config: true
+      # uv_no_group: exported as UV_NO_GROUP to the provisioning recipe and to
+      # every command the agent runs, so its `uv run` calls do not re-sync the
+      # `doc` group (quarto-cli has no wheel and is built from its sdist).
+      uv_no_group: doc
