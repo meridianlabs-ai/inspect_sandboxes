@@ -32,6 +32,20 @@ make test-all
 Integration tests are marked with the `integration` marker and are skipped by
 default; run them explicitly with `make test-integration`.
 
+## Docs
+
+The docs live in `docs/` and are built with [Quarto](https://quarto.org). The
+docs tools are in the `doc` dependency group, which `uv sync` and `uv run` leave
+out, so ask for it:
+
+```bash
+# Preview the docs locally
+uv run --group doc quarto preview docs
+
+# Publish to GitHub Pages
+uv run --group doc quarto publish gh-pages docs
+```
+
 ## Commit messages and releases
 
 We use [Conventional Commits](https://www.conventionalcommits.org/). Because we

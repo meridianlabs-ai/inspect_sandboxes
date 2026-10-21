@@ -46,9 +46,11 @@ dev = [
     "pytest-cov",
     "ruff",
     "types-PyYAML",
-    {include-group = "docs"},
 ]
-docs = [
+# Not a default group, so a plain `uv sync` or `uv run` leaves it out: quarto-cli
+# has no wheel and is built from its sdist. Docs commands ask for it with
+# `--group doc`.
+doc = [
     "griffe>=2",
     "jupyter",
     "markdown",
@@ -77,7 +79,6 @@ exclude = ["docs/", "tests/"]
 [tool.uv]
 managed = true
 add-bounds = "lower"
-default-groups = ["dev"]
 # Exclude packages published within the last 7 days to protect against supply chain attacks
 exclude-newer = "7 days"
 
