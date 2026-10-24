@@ -1,9 +1,10 @@
 """Tests for Modal sandbox environment implementation."""
 
 import asyncio
+import importlib
 import shlex
 import subprocess
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -20,6 +21,7 @@ from inspect_ai.util import (
     SandboxEnvironmentLimits,
 )
 from inspect_sandboxes.modal._modal import (
+    _EXEC_ARG_MAX_BYTES,
     ModalSandboxEnvironment,
     _build_exec_cmd,
     _locate_su_snippet,
@@ -1611,6 +1613,30 @@ async def test_connection_surfaces_declared_port(
     assert host.host_port > 0
 
 
+def _modal_sandbox_private(name: str) -> Any:
+    """A private name from Modal's sandbox internals.
+
+    modal 1.6 turned modal.sandbox into a package and moved these into
+    modal.sandbox._common without re-exporting them.
+    """
+    for module_name in ("modal.sandbox._common", "modal.sandbox"):
+        try:
+            return getattr(importlib.import_module(module_name), name)
+        except (ImportError, AttributeError):
+            continue
+    raise AttributeError(f"modal.sandbox has no {name}")
+
+
+def _validate_modal_exec_args(args: Sequence[str]) -> None:
+    """Run Modal's own client-side argv check (raises InvalidError if too long)."""
+    _modal_sandbox_private("_validate_exec_args")(args)
+
+
+def test_exec_arg_max_matches_modal() -> None:
+    """The local argv cap mirrors Modal's private ARG_MAX_BYTES."""
+    assert _EXEC_ARG_MAX_BYTES == _modal_sandbox_private("ARG_MAX_BYTES")
+
+
 def _large_cmd() -> list[str]:
     """~1 MiB argv: 16 x 64 KiB args, well over Modal's 64 KiB CMD cap."""
     chunk = "x" * (64 * 1024)
@@ -1664,7 +1690,7 @@ async def test_exec_large_command_runs_via_script_file(
     assert script == "exec " + shlex.join(cmd) + "\n"
     assert calls == [("/bin/sh", path)]
     # The staged argv is what Modal receives, so it must pass Modal's own check.
-    modal.sandbox._validate_exec_args(calls[0])
+    _validate_modal_exec_args(calls[0])
     # cwd/env still travel with the exec call, not inside the script.
     assert exec_kwargs == [{"workdir": "/work", "env": {"K": "v"}}]
     fs.remove.aio.assert_awaited_once_with(path)
@@ -1703,7 +1729,7 @@ async def test_exec_large_command_with_user_wraps_script_in_su(
     assert argv[:2] == ("/bin/sh", "-c")
     assert "su" in argv[2]
     assert shlex.join(["/bin/sh", path]) in argv[2]
-    modal.sandbox._validate_exec_args(argv)
+    _validate_modal_exec_args(argv)
 
 
 @pytest.mark.asyncio
@@ -1740,7 +1766,7 @@ async def test_exec_multibyte_args_are_measured_in_bytes(
     fs.remove.aio = AsyncMock()
     calls = _capture_exec(sandbox_env)
     cmd = ["printf", "%s", "\U0001f600" * 40_000]  # 40k chars, 160 KB
-    modal.sandbox._validate_exec_args(cmd)  # passes Modal's character count
+    _validate_modal_exec_args(cmd)  # passes Modal's character count
 
     await sandbox_env.exec(cmd)
 
