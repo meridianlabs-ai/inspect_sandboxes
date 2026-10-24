@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, Literal, Never, cast, overload
 
 import modal
 import modal.exception
-import modal.sandbox
 from inspect_ai.util import (
     ComposeConfig,
     ExecResult,
@@ -63,9 +62,10 @@ INSPECT_SANDBOX_TAG = {"created_by": "inspect-ai"}
 # InvalidError beyond ARG_MAX_BYTES (64 KiB: a quarter of the usual Linux
 # ARG_MAX, leaving room for its own `runsc exec ...` prefix). exec() stages
 # anything larger as a script inside the sandbox and runs that instead.
-# A direct reference so a rename in Modal fails loudly at import time; Modal's
-# .pyi stubs don't declare the constant, hence the pyright ignore.
-_EXEC_ARG_MAX_BYTES: int = modal.sandbox.ARG_MAX_BYTES  # pyright: ignore[reportAttributeAccessIssue]
+# Mirrors Modal's private ARG_MAX_BYTES (modal.sandbox in modal < 1.6,
+# modal.sandbox._common from 1.6) rather than importing it, so a move in Modal
+# can't break import; a test checks the two still agree.
+_EXEC_ARG_MAX_BYTES = 2**16
 
 # Sandbox.exec()'s stdin writer buffers write() calls and raises BufferError as
 # soon as a single write() would push the buffer past its cap
