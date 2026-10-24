@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.6.1...v0.6.2) (2026-10-24)
+
+
+### Bug Fixes
+
+* keep the Modal sandbox importable on modal 1.6 ([#102](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/102)) ([bbe0ff4](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/bbe0ff489ef5fc64b05b4fd3f1094472f6f22d57))
+
 ## [0.6.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.6.0...v0.6.1) (2026-10-05)
 
 
