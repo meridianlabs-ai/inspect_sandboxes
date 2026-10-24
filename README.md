@@ -29,8 +29,8 @@
 | src/inspect\_sandboxes/e2b/\_template.py           |       37 |       37 |        2 |        0 |     0% |    24-121 |
 | src/inspect\_sandboxes/modal/\_\_init\_\_.py       |        0 |        0 |        0 |        0 |   100% |           |
 | src/inspect\_sandboxes/modal/\_compose.py          |      182 |      182 |      114 |        0 |     0% |     1-471 |
-| src/inspect\_sandboxes/modal/\_modal.py            |      345 |      345 |       98 |        0 |     0% |     1-832 |
-| **TOTAL**                                          | **2630** | **2630** |  **822** |    **0** | **0%** |           |
+| src/inspect\_sandboxes/modal/\_modal.py            |      344 |      344 |       98 |        0 |     0% |     1-832 |
+| **TOTAL**                                          | **2629** | **2629** |  **822** |    **0** | **0%** |           |
 
 
 ## Setup coverage badge
