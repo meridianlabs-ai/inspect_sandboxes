@@ -657,6 +657,13 @@ async def test_file_operations_reject_an_explicit_user(mock_sandbox: MagicMock) 
         await env.read_file("/workspace/test.txt", user="nobody")
 
 
+def test_reports_no_file_user_support(mock_sandbox: MagicMock) -> None:
+    """inspect_ai passes no user, so checkpoint copies read as they did before."""
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+    assert not env._supports_file_user("read_file")
+    assert not env._supports_file_user("write_file")
+
+
 @pytest.mark.asyncio
 async def test_write_file_text(mock_sandbox: MagicMock) -> None:
     """Test write_file with text content."""

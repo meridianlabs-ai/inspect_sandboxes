@@ -282,8 +282,9 @@ async def test_write_file_translates_isdir_sdk_error(mock_sandbox: MagicMock) ->
         await env.write_file("/workspace/test.txt", "y")
 
 
+@pytest.mark.parametrize("user", [None, "root"])
 @pytest.mark.asyncio
-async def test_read_file_text(mock_sandbox: MagicMock) -> None:
+async def test_read_file_text(mock_sandbox: MagicMock, user: str | None) -> None:
     """Test read_file in text mode."""
     env = E2BSingleServiceEnvironment(mock_sandbox)
     file_info = MagicMock()
@@ -292,7 +293,7 @@ async def test_read_file_text(mock_sandbox: MagicMock) -> None:
     mock_sandbox.files.get_info = AsyncMock(return_value=file_info)
     mock_sandbox.files.read = AsyncMock(return_value="hello world\n")
 
-    result = await env.read_file("/test.txt", text=True)
+    result = await env.read_file("/test.txt", text=True, user=user)
     assert result == "hello world\n"
 
 

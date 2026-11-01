@@ -31,7 +31,7 @@ from inspect_ai.util._sandbox.environment import (
 )
 from typing_extensions import override
 
-from inspect_sandboxes._util.file_user import reject_file_user
+from inspect_sandboxes._util.file_user import check_file_user
 
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
 
@@ -155,7 +155,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
-        reject_file_user(self, "write", user)
+        check_file_user(self, "write", user, as_root=True)
         if await self._is_directory(file):
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
         data = contents.encode("utf-8") if isinstance(contents, str) else contents
@@ -183,7 +183,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
-        reject_file_user(self, "read", user)
+        check_file_user(self, "read", user, as_root=True)
         await self._verify_read_size(file)
 
         try:

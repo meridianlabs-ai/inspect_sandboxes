@@ -45,7 +45,7 @@ from tenacity import (
 )
 from typing_extensions import override
 
-from inspect_sandboxes._util.file_user import reject_file_user
+from inspect_sandboxes._util.file_user import check_file_user
 from inspect_sandboxes._util.naming import make_sandbox_name
 
 from ._compose import _MODAL_PORT_KEYS, convert_compose_to_modal_params
@@ -644,7 +644,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
-        reject_file_user(self, "write", user)
+        check_file_user(self, "write", user, as_root=True)
         file = await self._resolve_file_path(file)
         try:
             await self._write_file_content(file, contents)
@@ -673,7 +673,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
-        reject_file_user(self, "read", user)
+        check_file_user(self, "read", user, as_root=True)
         file = await self._resolve_file_path(file)
         try:
             info = await self._get_file_info(file)

@@ -24,7 +24,7 @@ from inspect_ai.util._sandbox.environment import (
 )
 from typing_extensions import override
 
-from inspect_sandboxes._util.file_user import reject_file_user
+from inspect_sandboxes._util.file_user import check_file_user
 
 from ._exec_capture import (
     ExecCapture,
@@ -178,6 +178,16 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             )
 
     @override
+    def _supports_file_user(
+        self, operation: Literal["read_file", "write_file"]
+    ) -> bool:
+        """No file user: the file API acts as the sandbox's default user.
+
+        Returning False keeps inspect_ai calling `read_file()` and `write_file()` without a user, checkpoint copies included, as it did before the parameter existed.
+        """
+        return False
+
+    @override
     async def write_file(
         self, file: str, contents: str | bytes, *, user: str | None = None
     ) -> None:
@@ -186,7 +196,7 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
-        reject_file_user(self, "write", user)
+        check_file_user(self, "write", user, as_root=False)
         parent = str(PurePosixPath(file).parent)
         if parent and parent not in ("/", "."):
             await self._create_parent_folder(parent)
@@ -219,7 +229,7 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
-        reject_file_user(self, "read", user)
+        check_file_user(self, "read", user, as_root=False)
         await verify_file_size(self._is_directory, self._get_file_size, file)
 
         contents_bytes = await self._download_file(file)

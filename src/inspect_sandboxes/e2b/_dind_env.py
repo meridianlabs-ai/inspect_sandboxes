@@ -24,7 +24,7 @@ from inspect_ai.util import (
 from typing_extensions import override
 
 from inspect_sandboxes._util.compose import find_default_service
-from inspect_sandboxes._util.file_user import reject_file_user
+from inspect_sandboxes._util.file_user import check_file_user
 
 from ._dind_project import (
     DEFAULT_DIND_CPU,
@@ -221,7 +221,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         self, file: str, contents: str | bytes, *, user: str | None = None
     ) -> None:
         """Two-hop write: SDK upload to sandbox temp -> docker compose cp to container."""
-        reject_file_user(self, "write", user)
+        check_file_user(self, "write", user, as_root=True)
         file = self._container_file(file)
 
         parent = str(PurePosixPath(file).parent)
@@ -269,7 +269,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         self, file: str, text: bool = True, *, user: str | None = None
     ) -> str | bytes:
         """Two-hop read: docker compose cp from container -> SDK download from sandbox."""
-        reject_file_user(self, "read", user)
+        check_file_user(self, "read", user, as_root=True)
         file = self._container_file(file)
         await self._verify_read_size(file)
 

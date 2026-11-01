@@ -5,14 +5,19 @@ from typing import Literal
 from inspect_ai.util import SandboxUserUnsupportedError
 
 
-def reject_file_user(
-    sandbox: object, operation: Literal["read", "write"], user: str | None
+def check_file_user(
+    sandbox: object,
+    operation: Literal["read", "write"],
+    user: str | None,
+    *,
+    as_root: bool,
 ) -> None:
-    """Refuse an explicit `user` for `read_file()` or `write_file()`.
+    """Refuse a `read_file()` or `write_file()` user the provider cannot enforce.
 
-    inspect_ai requires a provider to enforce an explicit file user's permissions or raise `SandboxUserUnsupportedError`. These providers read and write files with privileged APIs, so they cannot enforce one yet.
+    inspect_ai requires a provider to enforce an explicit file user's permissions or raise `SandboxUserUnsupportedError`. A provider whose file API acts as root (`as_root`) enforces `root`, which inspect_ai's checkpointing asks for. No provider here can act as any other user yet.
     """
-    if user is not None:
-        raise SandboxUserUnsupportedError(
-            f"{type(sandbox).__name__} cannot {operation} files as user {user!r}."
-        )
+    if user is None or (as_root and user == "root"):
+        return
+    raise SandboxUserUnsupportedError(
+        f"{type(sandbox).__name__} cannot {operation} files as user {user!r}."
+    )
