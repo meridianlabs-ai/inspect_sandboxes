@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from inspect_ai.util import ComposeBuild
 from inspect_sandboxes._util.compose import (
+    mib_to_gib,
     parse_environment,
     parse_memory,
     parse_service_ports,
@@ -52,6 +53,22 @@ def test_parse_memory_invalid(input_str: str) -> None:
     """Test that invalid inputs raise ValueError."""
     with pytest.raises(ValueError):
         parse_memory(input_str)
+
+
+@pytest.mark.parametrize(
+    ("mem_str", "expected_gib"),
+    [
+        ("512m", 1),  # 0.5 GiB -> rounds up to 1 GiB
+        ("1g", 1),  # exactly 1 GiB
+        ("1536m", 2),  # 1.5 GiB -> rounds up to 2 GiB
+        ("2g", 2),  # exactly 2 GiB
+        ("100m", 1),  # tiny -> minimum 1 GiB
+        ("4g", 4),  # 4 GiB
+    ],
+)
+def test_mib_to_gib(mem_str: str, expected_gib: int) -> None:
+    """MiB->GiB conversion with ceiling rounding and a 1 GiB minimum."""
+    assert mib_to_gib(parse_memory(mem_str)) == expected_gib
 
 
 @pytest.mark.parametrize(

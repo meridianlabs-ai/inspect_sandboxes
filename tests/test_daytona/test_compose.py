@@ -22,7 +22,6 @@ from inspect_ai.util._sandbox.compose import (
 )
 from inspect_sandboxes.daytona._compose import (
     _service_to_resources,
-    _to_gib,
     aggregate_resources,
     apply_daytona_extensions,
     create_single_service_params,
@@ -39,22 +38,6 @@ def _reset_warn_once() -> None:
     from inspect_ai._util import logger as inspect_logger
 
     inspect_logger._warned.clear()
-
-
-@pytest.mark.parametrize(
-    ("mem_str", "expected_gib"),
-    [
-        ("512m", 1),  # 0.5 GiB -> rounds up to 1 GiB
-        ("1g", 1),  # exactly 1 GiB
-        ("1536m", 2),  # 1.5 GiB -> rounds up to 2 GiB
-        ("2g", 2),  # exactly 2 GiB
-        ("100m", 1),  # tiny -> minimum 1 GiB
-        ("4g", 4),  # 4 GiB
-    ],
-)
-def test_to_gib(mem_str: str, expected_gib: int) -> None:
-    """Test memory string to GiB conversion with ceiling rounding and minimum 1."""
-    assert _to_gib(mem_str) == expected_gib
 
 
 @pytest.mark.parametrize(

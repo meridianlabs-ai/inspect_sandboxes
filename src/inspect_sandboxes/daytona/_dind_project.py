@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import json
 import os
 import shlex
 import uuid
@@ -28,8 +26,16 @@ from inspect_ai.util import ComposeConfig
 
 from inspect_sandboxes._util.dind_compose import (
     compute_healthcheck_timeout,
-    discover_build_contexts,
-    rewrite_compose_yaml,
+)
+from inspect_sandboxes._util.dind_project import (
+    build_compose_command,
+    compose_down,
+    upload_build_contexts,
+    wait_for_docker_daemon,
+    wait_for_services,
+)
+from inspect_sandboxes._util.dind_project import (
+    discover_working_dir as _discover_working_dir,
 )
 
 from ._retry import exec_retry, standard_retry
@@ -81,25 +87,14 @@ def compose_command(
     env: dict[str, str] | None = None,
 ) -> str:
     """The shell command running a ``docker compose`` subcommand on the DinD VM."""
-    parts = [
-        "docker",
-        "compose",
-        "-p",
+    return build_compose_command(
         project.project_name,
-        "--project-directory",
         COMPOSE_DIR,
-        "-f",
         project.compose_path,
-        *subcommand,
-    ]
-    cmd = shlex.join(parts)
-
-    # Inline env vars as prefix for variable substitution in compose files
-    if env:
-        prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-        cmd = f"{prefix} {cmd}"
-
-    return cmd
+        subcommand,
+        env=env,
+        sudo=False,
+    )
 
 
 async def compose_exec(
@@ -117,25 +112,12 @@ async def compose_exec(
 
 
 async def _wait_for_docker_daemon(sandbox: AsyncSandbox) -> None:
-    """Poll ``docker info`` until the Docker daemon is responsive."""
-    logger.debug("Waiting for Docker daemon inside DinD sandbox...")
-    last_output = ""
-    for _ in range(_DAEMON_TIMEOUT // _DAEMON_POLL_INTERVAL):
-        exit_code, output = await vm_exec(sandbox, "docker info", timeout=10)
-        if exit_code == 0:
-            logger.debug("Docker daemon is ready.")
-            return
-        last_output = output
-        await asyncio.sleep(_DAEMON_POLL_INTERVAL)
-
-    # Include daemon log to help diagnose startup failures
-    _, daemon_log = await vm_exec(
-        sandbox, "tail -20 /var/log/dockerd.log 2>/dev/null || true", timeout=5
-    )
-    raise RuntimeError(
-        f"Docker daemon not ready after {_DAEMON_TIMEOUT}s.\n"
-        f"Last 'docker info' output: {last_output}\n"
-        f"dockerd log:\n{daemon_log}"
+    await wait_for_docker_daemon(
+        lambda cmd, t: vm_exec(sandbox, cmd, timeout=t),
+        info_cmd="docker info",
+        timeout=_DAEMON_TIMEOUT,
+        poll_interval=_DAEMON_POLL_INTERVAL,
+        log_tail_cmd="tail -20 /var/log/dockerd.log 2>/dev/null || true",
     )
 
 
@@ -144,33 +126,12 @@ async def _wait_for_services(
     expected: list[str],
     timeout: int = _SERVICE_TIMEOUT,
 ) -> None:
-    """Poll ``docker compose ps`` until all expected services are running."""
-    logger.debug("Waiting for compose services: %s", expected)
-    last_output = ""
-    for _ in range(timeout // _SERVICE_POLL_INTERVAL):
-        exit_code, output = await compose_exec(
-            project,
-            ["ps", "--format", "json", "--status", "running"],
-            timeout=15,
-        )
-        if exit_code == 0 and output.strip():
-            # docker compose ps --format json outputs one JSON object per line
-            running = set()
-            for line in output.strip().splitlines():
-                try:
-                    entry = json.loads(line)
-                    running.add(entry.get("Service", ""))
-                except json.JSONDecodeError:
-                    continue
-            if set(expected) <= running:
-                logger.debug("All services running: %s", running)
-                return
-        last_output = output
-        await asyncio.sleep(_SERVICE_POLL_INTERVAL)
-
-    raise RuntimeError(
-        f"Not all services running after {timeout}s. "
-        f"Expected: {expected}. Last output: {last_output}"
+    await wait_for_services(
+        compose_exec,
+        project,
+        expected,
+        timeout=timeout,
+        poll_interval=_SERVICE_POLL_INTERVAL,
     )
 
 
@@ -211,30 +172,16 @@ async def _upload_build_contexts(
 
     Returns the remote path to the (possibly-rewritten) compose file.
     """
-    compose_path = Path(compose_file)
-    compose_dir = compose_path.parent
-
-    context_map, needs_rewrite = discover_build_contexts(
-        config, compose_dir, BUILD_CONTEXT_DIR
+    return await upload_build_contexts(
+        config,
+        compose_file,
+        COMPOSE_DIR,
+        BUILD_CONTEXT_DIR,
+        upload_directory=lambda local, remote: _upload_directory(
+            sandbox, local, remote
+        ),
+        upload_file=lambda remote, data: sdk_upload(sandbox, remote, data),
     )
-
-    # Upload the compose file's parent directory
-    await _upload_directory(sandbox, compose_dir, COMPOSE_DIR)
-
-    # Upload any external build contexts
-    for local_path, remote_path in context_map.items():
-        await _upload_directory(sandbox, local_path, remote_path)
-
-    if not needs_rewrite:
-        return f"{COMPOSE_DIR}/{compose_path.name}"
-
-    rewritten_yaml = rewrite_compose_yaml(config, compose_dir, context_map)
-    rewritten_remote = f"{COMPOSE_DIR}/compose.yaml"
-
-    await sdk_upload(sandbox, rewritten_remote, rewritten_yaml.encode("utf-8"))
-    logger.debug("Uploaded rewritten compose YAML to %s", rewritten_remote)
-
-    return rewritten_remote
 
 
 def _dind_snapshot_name(resources: Resources | None) -> str:
@@ -415,40 +362,9 @@ async def create_dind_project(
 
 
 async def destroy_dind_project(project: DaytonaDinDProject) -> None:
-    """Tear down compose services inside the DinD sandbox.
-
-    Runs ``docker compose down`` best-effort. The caller is responsible
-    for deleting the Daytona sandbox afterwards.
-    """
-    try:
-        exit_code, output = await compose_exec(
-            project,
-            ["down", "--remove-orphans", "--timeout", "10"],
-            timeout=30,
-        )
-        if exit_code != 0:
-            logger.warning("docker compose down failed: %s", output)
-    except Exception as e:
-        logger.warning("docker compose down error: %s", e)
+    """Best-effort ``compose down``; the caller deletes the sandbox after."""
+    await compose_down(compose_exec, project)
 
 
-async def discover_working_dir(
-    project: DaytonaDinDProject,
-    service: str,
-) -> str:
-    """Discover a service's working directory via ``pwd``.
-
-    Returns ``/`` if the query fails (e.g. service has no shell).
-    """
-    exit_code, output = await compose_exec(
-        project,
-        ["exec", "-T", service, "pwd"],
-        timeout=10,
-    )
-    if exit_code == 0 and output.strip():
-        return output.strip()
-
-    logger.warning(
-        "Failed to get working directory for service '%s', defaulting to /", service
-    )
-    return "/"
+async def discover_working_dir(project: DaytonaDinDProject, service: str) -> str:
+    return await _discover_working_dir(compose_exec, project, service)

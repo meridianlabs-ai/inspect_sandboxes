@@ -1,6 +1,8 @@
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from inspect_ai.util import ComposeBuild, ComposeConfig, ComposeService
 
@@ -54,8 +56,13 @@ def parse_memory(mem_limit: str) -> int:
         raise ValueError(f"Memory must be positive, got: {mem_limit}")
 
     # A positive but sub-MiB request (e.g. "256k") floors to 0 MiB; clamp it to a
-    # 1 MiB minimum rather than rejecting it (mirrors daytona/_compose.py:_to_gib).
+    # 1 MiB minimum rather than rejecting it (as mib_to_gib does for GiB).
     return max(1, result)
+
+
+def mib_to_gib(mib: int) -> int:
+    """Convert MiB to GiB, ceiling-rounded, minimum 1."""
+    return max(1, math.ceil(mib / 1024))
 
 
 def resolve_dockerfile_path(build: str | ComposeBuild, compose_dir: Path) -> Path:
@@ -170,3 +177,72 @@ def parse_service_ports(ports: list[str | int]) -> tuple[list[ParsedPort], list[
         )
 
     return parsed, unparseable
+
+
+def resolve_service_resources(
+    service: ComposeService,
+) -> tuple[int | None, int | None]:
+    """Resolve ``(cpu_cores, memory_mib)`` from a service's resource fields.
+
+    Priority per axis, independently: ``deploy.resources.limits`` →
+    ``deploy.resources.reservations`` → service-level ``cpus`` / ``mem_limit``.
+    CPU is ceiling-rounded to a whole core (minimum 1); memory is MiB via
+    :func:`parse_memory`. Either axis is ``None`` if unset at every level.
+
+    This is the shared ladder; provider-specific layers — ``x-<provider>``
+    overrides, MiB→GiB conversion, GPU, and defaults — sit on top.
+    """
+    cpu: int | None = None
+    memory_mib: int | None = None
+
+    if service.deploy and service.deploy.resources:
+        resources = service.deploy.resources
+        if resources.limits and resources.limits.cpus:
+            cpu = max(1, math.ceil(float(resources.limits.cpus)))
+        elif resources.reservations and resources.reservations.cpus:
+            cpu = max(1, math.ceil(float(resources.reservations.cpus)))
+        if resources.limits and resources.limits.memory:
+            memory_mib = parse_memory(resources.limits.memory)
+        elif resources.reservations and resources.reservations.memory:
+            memory_mib = parse_memory(resources.reservations.memory)
+
+    if cpu is None and service.cpus:
+        cpu = max(1, math.ceil(service.cpus))
+    if memory_mib is None and service.mem_limit:
+        memory_mib = parse_memory(service.mem_limit)
+
+    return cpu, memory_mib
+
+
+def extract_extension(extensions: dict[str, Any] | None, key: str) -> dict[str, Any]:
+    """Return the parsed ``x-<provider>`` extension block (``key``), or ``{}``.
+
+    A missing block, or one that isn't a mapping, yields ``{}``.
+    """
+    if not extensions:
+        return {}
+    raw = extensions.get(key)
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def extract_extension_timeout(
+    extensions: dict[str, Any] | None, key: str
+) -> float | None:
+    """Return ``x-<provider>.timeout`` (seconds) from extension ``key``, or None.
+
+    Raises:
+        ValueError: If ``timeout`` is set to something that can't be coerced to
+            ``float`` (e.g. a non-numeric string). YAML parses ``timeout: "30"``
+            as the string ``"30"``; we coerce here so the SDK receives a number.
+    """
+    raw = extract_extension(extensions, key).get("timeout")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"{key}.timeout must be a number (seconds), got {raw!r}"
+        ) from e

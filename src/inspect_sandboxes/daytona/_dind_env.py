@@ -24,6 +24,11 @@ from inspect_ai.util import (
 from typing_extensions import override
 
 from inspect_sandboxes._util.compose import find_default_service
+from inspect_sandboxes._util.sandbox import (
+    build_stdin_command,
+    decode_file_content,
+    verify_file_size,
+)
 
 from ._compose import (
     aggregate_resources,
@@ -47,12 +52,9 @@ from ._exec_capture import (
 )
 from ._retry import run_with_timeout_retry
 from ._sandbox_utils import (
-    build_stdin_command,
-    decode_file_content,
     delete_sandbox,
     sdk_download,
     sdk_upload,
-    verify_file_size,
 )
 
 logger = getLogger(__name__)
@@ -288,7 +290,13 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             )
             if stdin_container_file is None:
                 return timed
-            return ["sh", "-c", build_stdin_command(timed, stdin_container_file)]
+            return [
+                "sh",
+                "-c",
+                build_stdin_command(
+                    timed, stdin_container_file, remove_command=build_remove_command
+                ),
+            ]
 
         async def _run(t: int | None) -> ExecResult[str]:
             # Daytona merges stdout and stderr into one output field, so the
