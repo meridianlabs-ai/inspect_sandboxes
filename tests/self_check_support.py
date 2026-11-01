@@ -22,6 +22,13 @@ class XFail:
     strict: bool = True
 
 
+FILE_USER_XFAILS = {
+    "test_read_file_as_user": XFail("file operations reject an explicit user"),
+    "test_write_file_as_user": XFail("file operations reject an explicit user"),
+}
+"""Checks every provider fails until its file operations can enforce a user."""
+
+
 @dataclass(frozen=True)
 class SandboxConfig:
     """A sandbox configuration to run the check suite against."""

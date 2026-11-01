@@ -14,7 +14,11 @@ from e2b import (
     SandboxException,
     TimeoutException,
 )
-from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
+from inspect_ai.util import (
+    OutputLimitExceededError,
+    SandboxEnvironmentLimits,
+    SandboxUserUnsupportedError,
+)
 from inspect_sandboxes.e2b._single_env import E2BSingleServiceEnvironment
 
 
@@ -219,6 +223,16 @@ async def test_exec_timeout_retry_uses_capped_timeouts(
     assert run.await_count == 3
     timeouts = [call.kwargs["timeout"] for call in run.call_args_list]
     assert timeouts == [120, 60, 30]
+
+
+@pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user(mock_sandbox: MagicMock) -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/workspace/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/workspace/test.txt", user="nobody")
 
 
 @pytest.mark.asyncio

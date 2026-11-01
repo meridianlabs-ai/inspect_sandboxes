@@ -19,6 +19,7 @@ from inspect_ai.util import (
     OutputLimitExceededError,
     SandboxEnvironment,
     SandboxEnvironmentLimits,
+    SandboxUserUnsupportedError,
 )
 from inspect_sandboxes.modal._modal import (
     _EXEC_ARG_MAX_BYTES,
@@ -1149,6 +1150,18 @@ async def test_exec_relative_cwd_converted_to_absolute(
     sandbox_env.sandbox.exec.aio = capturing_exec
     await sandbox_env.exec(["echo", "test"], cwd="relative/path")
     assert captured_workdir == ["/relative/path"]
+
+
+@pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = sandbox_env
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/test.txt", user="nobody")
 
 
 @pytest.mark.asyncio

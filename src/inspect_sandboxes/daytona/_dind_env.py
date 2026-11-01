@@ -24,6 +24,7 @@ from inspect_ai.util import (
 from typing_extensions import override
 
 from inspect_sandboxes._util.compose import find_default_service
+from inspect_sandboxes._util.file_user import reject_file_user
 
 from ._compose import (
     aggregate_resources,
@@ -336,8 +337,11 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             )
 
     @override
-    async def write_file(self, file: str, contents: str | bytes) -> None:
+    async def write_file(
+        self, file: str, contents: str | bytes, *, user: str | None = None
+    ) -> None:
         """Two-hop write: SDK upload to sandbox temp -> docker compose cp to container."""
+        reject_file_user(self, "write", user)
         file = self._container_file(file)
 
         parent = str(PurePosixPath(file).parent)
@@ -366,14 +370,21 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             )
 
     @overload
-    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+    async def read_file(
+        self, file: str, text: Literal[True] = True, *, user: str | None = None
+    ) -> str: ...
 
     @overload
-    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+    async def read_file(
+        self, file: str, text: Literal[False], *, user: str | None = None
+    ) -> bytes: ...
 
     @override
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:
+    async def read_file(
+        self, file: str, text: bool = True, *, user: str | None = None
+    ) -> str | bytes:
         """Two-hop read: docker compose cp from container -> SDK download from sandbox."""
+        reject_file_user(self, "read", user)
         file = self._container_file(file)
         await verify_file_size(self._is_directory, self._get_file_size, file)
 

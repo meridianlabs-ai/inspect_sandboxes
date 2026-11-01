@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daytona import DaytonaError
-from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService, SandboxUserUnsupportedError
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._dind_env import (
     DaytonaDinDServiceEnvironment,
@@ -555,6 +555,16 @@ async def test_exec_unframed_vm_output_is_a_failed_exec() -> None:
     assert not result.success
     assert result.stdout == ""
     assert "No space left" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user() -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = make_env(service="web")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/app/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/app/test.txt", user="nobody")
 
 
 @pytest.mark.asyncio

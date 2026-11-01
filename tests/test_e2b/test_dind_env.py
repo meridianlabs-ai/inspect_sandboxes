@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService, SandboxUserUnsupportedError
 from inspect_sandboxes.e2b._dind_env import E2BDinDServiceEnvironment
 from inspect_sandboxes.e2b._dind_project import E2BDinDProject
 
@@ -187,6 +187,16 @@ async def test_exec_stdin_two_hop_upload() -> None:
     assert sandbox.files.write.call_args[0][0].startswith("/tmp/.inspect-stdin-")
     assert sandbox.files.write.call_args[0][1] == b"hello"
     assert result.stdout == "stdin data"
+
+
+@pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user() -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = make_env(service="web")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/app/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/app/test.txt", user="nobody")
 
 
 @pytest.mark.asyncio
