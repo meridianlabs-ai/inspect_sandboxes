@@ -19,6 +19,7 @@ from inspect_ai.util import (
     OutputLimitExceededError,
     SandboxEnvironment,
     SandboxEnvironmentLimits,
+    SandboxUserUnsupportedError,
 )
 from inspect_sandboxes.modal._modal import (
     _EXEC_ARG_MAX_BYTES,
@@ -1152,6 +1153,18 @@ async def test_exec_relative_cwd_converted_to_absolute(
 
 
 @pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = sandbox_env
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/test.txt", user="nobody")
+
+
+@pytest.mark.asyncio
 async def test_write_file_text(sandbox_env: ModalSandboxEnvironment) -> None:
     """Test write_file with text content."""
     filesystem = _mock_filesystem(sandbox_env)
@@ -1171,8 +1184,11 @@ async def test_write_file_binary(sandbox_env: ModalSandboxEnvironment) -> None:
     filesystem.write_bytes.aio.assert_awaited_once_with(b"binary content", "/test.bin")
 
 
+@pytest.mark.parametrize("user", [None, "root"])
 @pytest.mark.asyncio
-async def test_read_file_text(sandbox_env: ModalSandboxEnvironment) -> None:
+async def test_read_file_text(
+    sandbox_env: ModalSandboxEnvironment, user: str | None
+) -> None:
     """Test read_file in text mode."""
     filesystem = _mock_filesystem(sandbox_env)
     info = MagicMock()
@@ -1181,7 +1197,7 @@ async def test_read_file_text(sandbox_env: ModalSandboxEnvironment) -> None:
     filesystem.stat.aio.return_value = info
     filesystem.read_bytes.aio.return_value = b"test content"
 
-    result = await sandbox_env.read_file("/test.txt", text=True)
+    result = await sandbox_env.read_file("/test.txt", text=True, user=user)
 
     assert isinstance(result, str)
     assert result == "test content"

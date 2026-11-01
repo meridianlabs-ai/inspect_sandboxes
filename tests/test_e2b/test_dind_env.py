@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService, SandboxUserUnsupportedError
 from inspect_sandboxes.e2b._dind_env import E2BDinDServiceEnvironment
 from inspect_sandboxes.e2b._dind_project import E2BDinDProject
 
@@ -190,6 +190,16 @@ async def test_exec_stdin_two_hop_upload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user() -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = make_env(service="web")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/app/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/app/test.txt", user="nobody")
+
+
+@pytest.mark.asyncio
 async def test_write_file_two_hop() -> None:
     """Test write_file uploads to VM temp, then compose cp to service."""
     env = make_env(service="web")
@@ -214,8 +224,9 @@ async def test_write_file_two_hop() -> None:
     assert "web:/app/test.txt" in cp_calls[0][0][1]
 
 
+@pytest.mark.parametrize("user", [None, "root"])
 @pytest.mark.asyncio
-async def test_read_file_two_hop() -> None:
+async def test_read_file_two_hop(user: str | None) -> None:
     """Test read_file compose cp's from service, then SDK downloads from VM."""
     sandbox = make_mock_sandbox()
     sandbox.files.read = AsyncMock(return_value=bytearray(b"file content"))
@@ -235,7 +246,7 @@ async def test_read_file_two_hop() -> None:
             return_value=(0, "", ""),
         ),
     ):
-        result = await env.read_file("/app/test.txt")
+        result = await env.read_file("/app/test.txt", user=user)
 
     assert result == "file content"
 

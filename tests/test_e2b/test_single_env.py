@@ -14,7 +14,11 @@ from e2b import (
     SandboxException,
     TimeoutException,
 )
-from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
+from inspect_ai.util import (
+    OutputLimitExceededError,
+    SandboxEnvironmentLimits,
+    SandboxUserUnsupportedError,
+)
 from inspect_sandboxes.e2b._single_env import E2BSingleServiceEnvironment
 
 
@@ -222,6 +226,16 @@ async def test_exec_timeout_retry_uses_capped_timeouts(
 
 
 @pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user(mock_sandbox: MagicMock) -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/workspace/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/workspace/test.txt", user="nobody")
+
+
+@pytest.mark.asyncio
 async def test_write_file_text(mock_sandbox: MagicMock) -> None:
     """Test write_file with text content."""
     env = E2BSingleServiceEnvironment(mock_sandbox)
@@ -268,8 +282,9 @@ async def test_write_file_translates_isdir_sdk_error(mock_sandbox: MagicMock) ->
         await env.write_file("/workspace/test.txt", "y")
 
 
+@pytest.mark.parametrize("user", [None, "root"])
 @pytest.mark.asyncio
-async def test_read_file_text(mock_sandbox: MagicMock) -> None:
+async def test_read_file_text(mock_sandbox: MagicMock, user: str | None) -> None:
     """Test read_file in text mode."""
     env = E2BSingleServiceEnvironment(mock_sandbox)
     file_info = MagicMock()
@@ -278,7 +293,7 @@ async def test_read_file_text(mock_sandbox: MagicMock) -> None:
     mock_sandbox.files.get_info = AsyncMock(return_value=file_info)
     mock_sandbox.files.read = AsyncMock(return_value="hello world\n")
 
-    result = await env.read_file("/test.txt", text=True)
+    result = await env.read_file("/test.txt", text=True, user=user)
     assert result == "hello world\n"
 
 
