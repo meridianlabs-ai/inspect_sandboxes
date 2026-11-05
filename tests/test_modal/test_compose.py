@@ -719,12 +719,81 @@ def test_service_ports_malformed_value_warns_neutrally(
 def test_expose_warns_and_is_not_translated(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Expose is host-private: warn, never translate."""
-    params: dict[str, Any] = {}
-    with caplog.at_level("WARNING"):
-        _apply_service_ports(params, ComposeService(image="x", expose=["5432"]))
-    assert "unencrypted_ports" not in params
+    """Expose is host-private: the converter warns (via MODAL_COMPOSE_SUPPORT), never translates."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", expose=["5432"])}
+    )
+    with (
+        patch("inspect_sandboxes.modal._compose.modal.Image"),
+        caplog.at_level("WARNING"),
+    ):
+        result = convert_compose_to_modal_params(config, None)
+    assert "unencrypted_ports" not in result.kwargs
     assert any("expose" in r.message for r in caplog.records)
+
+
+def _convert(config: ComposeConfig) -> Any:
+    with patch("inspect_sandboxes.modal._compose.modal.Image"):
+        return convert_compose_to_modal_params(config, None)
+
+
+def test_convert_rejects_compose_volumes() -> None:
+    """Standard volumes can't be attached; failing beats silently running without data."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", volumes=["./data:/data"])}
+    )
+    with pytest.raises(ValueError, match=r"services\.default\.volumes"):
+        _convert(config)
+
+
+def test_convert_rejects_compose_user() -> None:
+    """Modal has no per-sandbox user; running as a different identity is an error."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", user="agent")}
+    )
+    with pytest.raises(ValueError, match=r"services\.default\.user"):
+        _convert(config)
+
+
+def test_convert_warns_for_ignored_field(caplog: pytest.LogCaptureFixture) -> None:
+    config = ComposeConfig(services={"default": ComposeService(image="x", init=True)})
+    with caplog.at_level("WARNING"):
+        result = _convert(config)
+    assert result is not None
+    assert any("services.default.init" in r.message for r in caplog.records)
+
+
+def test_unknown_x_modal_key_warns(caplog: pytest.LogCaptureFixture) -> None:
+    config = ComposeConfig.model_validate(
+        {
+            "services": {"default": {"image": "x"}},
+            "x-modal": {"gpu": "A10G", "regoin": "us-east"},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        result = _convert(config)
+    assert result.kwargs["gpu"] == "A10G"
+    messages = " ".join(r.message for r in caplog.records)
+    assert "x-modal.regoin" in messages
+    assert "x-modal.gpu" not in messages
+
+
+def test_multi_service_config_warns_about_ignored_services(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An in-memory multi-service config says which services it drops."""
+    config = ComposeConfig(
+        services={
+            "default": ComposeService(image="x"),
+            "helper": ComposeService(image="y"),
+        }
+    )
+    with caplog.at_level("WARNING"):
+        _convert(config)
+    messages = " ".join(r.message for r in caplog.records)
+    assert "'default'" in messages
+    assert "helper" in messages
+    assert "x-default" in messages
 
 
 def test_x_modal_ports_override_translated_service_ports() -> None:
@@ -963,3 +1032,31 @@ class TestImageRegistrySecret:
 
         with pytest.raises(TypeError):
             convert_compose_to_modal_params(config, None)
+
+
+def test_service_named_main_is_preferred_over_first(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Selection now goes through find_default_service: x-default, default, main, first."""
+    config = ComposeConfig(
+        services={
+            "web": ComposeService(image="x", working_dir="/web"),
+            "main": ComposeService(image="y", working_dir="/main"),
+        }
+    )
+    with caplog.at_level("WARNING"):
+        result = _convert(config)
+    assert result.kwargs["workdir"] == "/main"
+    assert any("ignoring ['web']" in r.message for r in caplog.records)
+
+
+def test_dropped_services_are_not_validated() -> None:
+    """Settings on a service Modal will not run never take effect, so they don't fail it."""
+    config = ComposeConfig(
+        services={
+            "default": ComposeService(image="x"),
+            "helper": ComposeService(image="y", volumes=["./data:/data"]),
+        }
+    )
+    result = _convert(config)
+    assert result is not None
