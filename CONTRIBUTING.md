@@ -36,12 +36,14 @@ files.
 at least seven days. A compromised release is usually found and removed within
 that time, before it reaches `uv.lock`, CI or your machine. A few packages wait
 6 hours instead, so Inspect Sandboxes can adopt a new release the day it ships:
-`inspect-ai`, and the `daytona`, `e2b` and `modal` SDKs. They are listed with
-`"6 hours"` in `[tool.uv.exclude-newer-package]`. Only a direct dependency (a
-package in `dependencies` or the `dev` extra in `pyproject.toml`) that is a
-sandbox provider SDK or an Inspect package gets this exception. Every other
-package, the dependencies of these packages included, keeps the seven-day
-cooldown. Dependabot's `uv` entry in `.github/dependabot.yml` repeats the
+`inspect-ai`, and the `e2b` and `modal` SDKs. They are listed with `"6 hours"`
+in `[tool.uv.exclude-newer-package]`. Only a direct dependency (a package in
+`dependencies` or the `dev` extra in `pyproject.toml`) that is a sandbox
+provider SDK or an Inspect package gets this exception. Every other package,
+the dependencies of these packages included, keeps the seven-day cooldown.
+Thus `daytona` is not on the list: each release pins its `daytona-*` client
+packages to the same version, and they wait seven days, so a 6-hour entry for
+`daytona` alone has no effect. Dependabot's `uv` entry in `.github/dependabot.yml` repeats the
 cooldown and the list. When you add a `"6 hours"` entry, also add the package
 to `cooldown.exclude` and the `six-hour-cooldown` group there.
 `tests/test_dependency_cooldown.py` checks that each entry is a direct

@@ -1,4 +1,4 @@
 build
-# Keep the same requirements as [build-system] in pyproject.toml.
+# Keep the hatchling requirement the same as in [build-system] in pyproject.toml.
 hatchling
 hatch-vcs

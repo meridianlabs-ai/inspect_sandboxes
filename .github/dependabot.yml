@@ -35,14 +35,12 @@ updates:
     cooldown:
       default-days: 7
       exclude:
-        - "daytona"
         - "e2b"
         - "inspect-ai"
         - "modal"
     groups:
       six-hour-cooldown:
         patterns:
-          - "daytona"
           - "e2b"
           - "inspect-ai"
           - "modal"
