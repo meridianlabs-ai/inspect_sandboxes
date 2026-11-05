@@ -43,9 +43,10 @@ provider SDK or an Inspect package gets this exception. Every other package,
 the dependencies of these packages included, keeps the seven-day cooldown.
 Thus `daytona` is not on the list: each release pins its `daytona-*` client
 packages to the same version, and they wait seven days, so a 6-hour entry for
-`daytona` alone has no effect. Dependabot's `uv` entry in `.github/dependabot.yml` repeats the
-cooldown and the list. When you add a `"6 hours"` entry, also add the package
-to `cooldown.exclude` and the `six-hour-cooldown` group there.
+`daytona` alone has no effect. Dependabot's `uv` entry in
+`.github/dependabot.yml` repeats the cooldown and the list. When you add a
+`"6 hours"` entry, also add the package to `cooldown.exclude` and the
+`six-hour-cooldown` group there.
 `tests/test_dependency_cooldown.py` checks that each entry is a direct
 dependency, that dated entries (below) are less than seven days old, and that
 the two files match. Whether a package is a provider SDK or an Inspect package
@@ -58,7 +59,10 @@ for it rather than overriding `exclude-newer`, unless it's an emergency
 (below).
 
 In an emergency, for example a security fix, you can adopt a release that is
-less than seven days old with a one-time dated entry:
+less than seven days old with a one-time dated entry. A dated entry does not
+shorten the cooldown of the package's own dependencies. Thus it does not work
+for `daytona`, whose `daytona-*` client packages are released with it and are
+not direct dependencies.
 
 1. Under `[tool.uv.exclude-newer-package]` in `pyproject.toml`, add
    `<package> = "<timestamp>"`. The package must be a direct dependency. Use an
