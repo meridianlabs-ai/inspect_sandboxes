@@ -34,7 +34,7 @@ Documentation = "https://meridianlabs-ai.github.io/inspect_sandboxes/"
 [project.entry-points.inspect_ai]
 inspect_sandboxes = "inspect_sandboxes._registry"
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
     # The conformance suites consume inspect_ai's pytest-collected checks
     "inspect-ai>=0.3.261",
@@ -44,9 +44,16 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
+    # tests/test_workflows.py and tests/test_dependency_cooldown.py read the
+    # workflows
+    "pyyaml",
     "ruff",
     "types-PyYAML",
 ]
+
+[dependency-groups]
+# Keeps a plain `uv sync` or `uv run` (Makefile) pulling the dev tools.
+dev = ["inspect_sandboxes[dev]"]
 # Not a default group, so a plain `uv sync` or `uv run` leaves it out: quarto-cli
 # has no wheel and is built from its sdist. Docs commands ask for it with
 # `--group doc`.
@@ -79,11 +86,20 @@ exclude = ["docs/", "tests/"]
 [tool.uv]
 managed = true
 add-bounds = "lower"
-# Exclude packages published within the last 7 days to protect against supply chain attacks
+# 0.11.8 is the first uv that keeps uv.lock stable with a relative exclude-newer,
+# and 0.13.4 the first that no longer trusts the compromised emSign root
+# (GHSA-hq85-5cpj-mr62).
+required-version = ">=0.13.4"
+# Only resolve releases at least 7 days old (see CONTRIBUTING.md).
 exclude-newer = "7 days"
 
+# 6 hours only for direct dependencies that are a sandbox provider SDK or an
+# Inspect package; see CONTRIBUTING.md.
 [tool.uv.exclude-newer-package]
-inspect-ai = false
+daytona = "6 hours"
+e2b = "6 hours"
+inspect-ai = "6 hours"
+modal = "6 hours"
 
 [tool.mypy]
 ignore_missing_imports = false
