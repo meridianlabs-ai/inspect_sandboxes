@@ -38,7 +38,7 @@ jobs:
       - name: Lint with Ruff
         run: uv run --no-sync ruff check --output-format github .
       - name: Format with Ruff
-        run: uv run --no-sync ruff format --check --output-format github .
+        run: uv run --no-sync ruff format --check .
       - name: Minimize uv cache
         if: ${{ !cancelled() }}
         run: uv cache prune --ci
