@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_sandboxes.e2b._command import MAX_INLINE_COMMAND_BYTES
 from inspect_sandboxes.e2b._dind_project import (
     E2BDinDProject,
     _dind_template_name,
@@ -317,3 +319,36 @@ async def test_destroy_dind_project_swallows_errors() -> None:
     ):
         # Should not raise.
         await destroy_dind_project(project)
+
+
+@pytest.mark.asyncio
+async def test_vm_exec_large_command_is_sourced_from_script_file() -> None:
+    """The VM runs commands as one `bash -l -c` argv element (128 KiB cap).
+
+    A `docker compose exec` line carrying more than that (here 128 KiB of
+    argv) is staged in a temp file on the VM, sourced so the args reach
+    docker intact, and removed afterwards.
+    """
+    sandbox = make_mock_sandbox()
+    command = "echo " + "x" * (2 * MAX_INLINE_COMMAND_BYTES)
+
+    exit_code, _, _ = await vm_exec(sandbox, command)
+
+    assert exit_code == 0
+    sandbox.files.write.assert_awaited_once()
+    path, data = sandbox.files.write.call_args[0]
+    assert path.startswith("/tmp/.inspect-cmd-")
+    assert data == command.encode()
+    run_cmd, cleanup_cmd = (c[0][0] for c in sandbox.commands.run.call_args_list)
+    assert run_cmd == f". {shlex.quote(path)}"
+    assert cleanup_cmd == f"rm -f {shlex.quote(path)}"
+
+
+@pytest.mark.asyncio
+async def test_vm_exec_short_command_runs_inline() -> None:
+    sandbox = make_mock_sandbox()
+
+    await vm_exec(sandbox, "echo hello")
+
+    sandbox.files.write.assert_not_awaited()
+    assert sandbox.commands.run.call_args[0][0] == "echo hello"

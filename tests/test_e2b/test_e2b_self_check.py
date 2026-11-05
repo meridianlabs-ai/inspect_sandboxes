@@ -67,10 +67,6 @@ SANDBOX_CONFIGS = [
             "test_exec_as_nonexistent_user": XFail(
                 "E2B raises AuthenticationException, not the inspect_ai-expected error"
             ),
-            "test_exec_large_command": XFail(
-                "E2B process-start RPC caps command size; raw ConnectException "
-                "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/64)"
-            ),
             **_FLAKY_TIMEOUT_XFAILS,
         },
     ),
@@ -89,10 +85,6 @@ SANDBOX_CONFIGS = [
             ),
             "test_read_file_not_allowed": XFail(
                 "docker compose exec routes through sh; permission edges differ"
-            ),
-            "test_exec_large_command": XFail(
-                "E2B process-start RPC caps command size; raw ConnectException "
-                "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/64)"
             ),
             **_FLAKY_TIMEOUT_XFAILS,
         },

@@ -330,3 +330,32 @@ async def test_sample_init_dind_serializes_compose_config() -> None:
 
     assert list(envs.keys())[0] == "web"
     assert "helper" in envs
+
+
+@pytest.mark.asyncio
+async def test_exec_stdin_passes_argv_positionally() -> None:
+    """With input, the user's argv stays separate elements (not joined into `sh -c`).
+
+    A joined command would be one argv element inside the container and hit
+    the kernel's 128 KiB per-argument cap for large commands.
+    """
+    sandbox = make_mock_sandbox()
+    env = make_env(make_mock_project(sandbox))
+    with (
+        patch(
+            "inspect_sandboxes.e2b._dind_env.compose_exec",
+            new=AsyncMock(return_value=(0, "", "")),
+        ) as mock_compose_exec,
+        patch(
+            "inspect_sandboxes.e2b._dind_env.vm_exec",
+            new=AsyncMock(return_value=(0, "", "")),
+        ),
+    ):
+        await env.exec(["printf", "%s", "a b", "c"], input="data")
+
+    exec_call = mock_compose_exec.call_args_list[1][0][1]
+    service_index = exec_call.index("web")
+    tail = exec_call[service_index + 1 :]
+    assert tail[:2] == ["sh", "-c"]
+    assert '"$@" <' in tail[2]
+    assert tail[3:] == ["sh", "printf", "%s", "a b", "c"]
