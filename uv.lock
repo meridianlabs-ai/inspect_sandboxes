@@ -12,7 +12,9 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-inspect-ai = false
+e2b = { timestamp = "0001-01-01T00:00:00Z", span = "PT6H" }
+inspect-ai = { timestamp = "0001-01-01T00:00:00Z", span = "PT6H" }
+modal = { timestamp = "0001-01-01T00:00:00Z", span = "PT6H" }
 
 [[package]]
 name = "agent-client-protocol"
@@ -1380,7 +1382,7 @@ dependencies = [
     { name = "tenacity" },
 ]
 
-[package.dev-dependencies]
+[package.optional-dependencies]
 dev = [
     { name = "inspect-ai" },
     { name = "mypy" },
@@ -1389,8 +1391,14 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
+    { name = "pyyaml" },
     { name = "ruff" },
     { name = "types-pyyaml" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "inspect-sandboxes", extra = ["dev"] },
 ]
 doc = [
     { name = "griffe" },
@@ -1407,22 +1415,23 @@ requires-dist = [
     { name = "daytona", specifier = ">=0.201.0" },
     { name = "e2b", specifier = ">=2.20" },
     { name = "inspect-ai", specifier = ">=0.3.211" },
+    { name = "inspect-ai", marker = "extra == 'dev'", specifier = ">=0.3.261" },
     { name = "modal", specifier = ">=1.5.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19.1" },
+    { name = "pre-commit", marker = "extra == 'dev'" },
+    { name = "pyright", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'" },
+    { name = "pytest-cov", marker = "extra == 'dev'" },
+    { name = "pyyaml", marker = "extra == 'dev'" },
+    { name = "ruff", marker = "extra == 'dev'" },
     { name = "tenacity", specifier = ">=9.1.4" },
+    { name = "types-pyyaml", marker = "extra == 'dev'" },
 ]
+provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "inspect-ai", specifier = ">=0.3.261" },
-    { name = "mypy", specifier = ">=1.19.1" },
-    { name = "pre-commit" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-    { name = "types-pyyaml" },
-]
+dev = [{ name = "inspect-sandboxes", extras = ["dev"] }]
 doc = [
     { name = "griffe", specifier = ">=2" },
     { name = "jupyter" },

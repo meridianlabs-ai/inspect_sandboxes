@@ -1,0 +1,4 @@
+build
+# Keep hatchling and hatch-vcs the same as in [build-system] in pyproject.toml.
+hatchling
+hatch-vcs
