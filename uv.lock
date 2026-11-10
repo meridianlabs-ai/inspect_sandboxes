@@ -1520,7 +1520,7 @@ doc = [
 requires-dist = [
     { name = "daytona", specifier = ">=0.201.0" },
     { name = "e2b", specifier = ">=2.20" },
-    { name = "inspect-ai", specifier = ">=0.3.286" },
+    { name = "inspect-ai", specifier = ">=0.3.275" },
     { name = "inspect-ai", marker = "extra == 'dev'", specifier = ">=0.3.261" },
     { name = "modal", specifier = ">=1.5.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19.1" },
