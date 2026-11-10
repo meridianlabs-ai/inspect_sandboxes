@@ -23,8 +23,10 @@ class XFail:
 
 
 FILE_USER_XFAILS = {
-    "test_read_file_as_user": XFail("file operations cannot act as a non-root user"),
-    "test_write_file_as_user": XFail("file operations cannot act as a non-root user"),
+    "test_read_file_as_user": XFail("file operations cannot act as the requested user"),
+    "test_write_file_as_user": XFail(
+        "file operations cannot act as the requested user"
+    ),
 }
 """Checks every provider fails until its file operations can enforce a user."""
 
