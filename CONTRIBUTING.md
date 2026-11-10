@@ -42,8 +42,6 @@ For this repository:
   cooldown of a package's own dependencies. Thus it does not work for
   `daytona`, whose `daytona-*` client packages are released with it and are not
   direct dependencies.
-- When uv builds the project itself, for example for the editable install in
-  `uv sync`, it resolves the build backend, still within the cooldown.
 
 ## Checks and tests
 
