@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from functools import partial
 from logging import getLogger
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, overload
@@ -346,9 +347,9 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
 
         parent = str(PurePosixPath(file).parent)
         if parent and parent not in ("/", "."):
-            await self._create_parent_folder(parent)
+            await self._create_parent_folder(parent, user)
 
-        if await self._is_directory(file):
+        if await self._is_directory(file, user):
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
 
         data = contents.encode("utf-8") if isinstance(contents, str) else contents
@@ -386,7 +387,11 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         """Two-hop read: docker compose cp from container -> SDK download from sandbox."""
         check_file_user(self, "read", user, as_root=True)
         file = self._container_file(file)
-        await verify_file_size(self._is_directory, self._get_file_size, file)
+        await verify_file_size(
+            partial(self._is_directory, user=user),
+            partial(self._get_file_size, user=user),
+            file,
+        )
 
         temp = f"/tmp/.inspect-read-{uuid.uuid4().hex}"
         try:
@@ -419,19 +424,31 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
             path = PurePosixPath(self._working_dir) / path
         return str(path)
 
-    async def _is_directory(self, path: str) -> bool:
+    def _service_exec(self, user: str | None) -> list[str]:
+        """`compose exec` arguments that run a command in the service as `user`.
+
+        The file preflight runs as the caller's file user, so a root read or write reaches root-only paths. With no user it runs as the service's default user.
+        """
+        return [
+            "exec",
+            "-T",
+            *(["--user", user] if user is not None else []),
+            self.service,
+        ]
+
+    async def _is_directory(self, path: str, user: str | None) -> bool:
         exit_code, _ = await compose_exec(
             self.project,
-            ["exec", "-T", self.service, "test", "-d", path],
+            [*self._service_exec(user), "test", "-d", path],
             timeout=10,
         )
         return exit_code == 0
 
-    async def _get_file_size(self, path: str) -> int:
+    async def _get_file_size(self, path: str, user: str | None) -> int:
         # Use wc -c for portability — stat -c %s is GNU/BusyBox-specific
         exit_code, output = await compose_exec(
             self.project,
-            ["exec", "-T", self.service, "sh", "-c", f"wc -c < {shlex.quote(path)}"],
+            [*self._service_exec(user), "sh", "-c", f"wc -c < {shlex.quote(path)}"],
             timeout=10,
         )
         if exit_code != 0:
@@ -441,10 +458,10 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         except ValueError as e:
             raise RuntimeError(f"Failed to parse file size for {path}") from e
 
-    async def _create_parent_folder(self, path: str) -> None:
+    async def _create_parent_folder(self, path: str, user: str | None) -> None:
         exit_code, output = await compose_exec(
             self.project,
-            ["exec", "-T", self.service, "mkdir", "-p", path],
+            [*self._service_exec(user), "mkdir", "-p", path],
             timeout=10,
         )
         if exit_code != 0:

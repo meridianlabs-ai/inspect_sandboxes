@@ -226,9 +226,9 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
 
         parent = str(PurePosixPath(file).parent)
         if parent and parent not in ("/", "."):
-            await self._create_parent_folder(parent)
+            await self._create_parent_folder(parent, user)
 
-        if await self._is_directory(file):
+        if await self._is_directory(file, user):
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
 
         data = contents.encode("utf-8") if isinstance(contents, str) else contents
@@ -271,7 +271,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         """Two-hop read: docker compose cp from container -> SDK download from sandbox."""
         check_file_user(self, "read", user, as_root=True)
         file = self._container_file(file)
-        await self._verify_read_size(file)
+        await self._verify_read_size(file, user)
 
         temp = f"/tmp/.inspect-read-{uuid.uuid4().hex}"
         try:
@@ -289,8 +289,13 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
                 raise RuntimeError(
                     f"docker compose cp from {self.service}:{file} failed: {stderr}"
                 )
+            # `compose cp` stages the file as root with its mode kept, so a root
+            # read downloads it as root.
             data = await self.project.sandbox.files.read(
-                temp, format="bytes", request_timeout=FILE_REQUEST_TIMEOUT
+                temp,
+                format="bytes",
+                user=user,
+                request_timeout=FILE_REQUEST_TIMEOUT,
             )
             data_bytes = bytes(data)
         finally:
@@ -330,24 +335,34 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
             path = PurePosixPath(self._working_dir) / path
         return str(path)
 
-    async def _is_directory(self, path: str) -> bool:
+    def _service_exec(self, user: str | None) -> list[str]:
+        """`compose exec` arguments that run a command in the service as `user`.
+
+        The file preflight runs as the caller's file user, so a root read or write reaches root-only paths. With no user it runs as the service's default user.
+        """
+        return [
+            "exec",
+            "-T",
+            *(["--user", user] if user is not None else []),
+            self.service,
+        ]
+
+    async def _is_directory(self, path: str, user: str | None) -> bool:
         exit_code, _, _ = await compose_exec(
             self.project,
-            ["exec", "-T", self.service, "test", "-d", path],
+            [*self._service_exec(user), "test", "-d", path],
             timeout=10,
         )
         return exit_code == 0
 
-    async def _get_file_size(self, path: str) -> int:
+    async def _get_file_size(self, path: str, user: str | None) -> int:
         """Return file size in bytes. Raises FileNotFoundError if missing."""
         quoted = shlex.quote(path)
         # stat -c %s works on GNU coreutils + busybox; -f %z is the BSD fallback.
         exit_code, stdout, _ = await compose_exec(
             self.project,
             [
-                "exec",
-                "-T",
-                self.service,
+                *self._service_exec(user),
                 "sh",
                 "-c",
                 f"stat -c %s {quoted} 2>/dev/null || stat -f %z {quoted} 2>/dev/null",
@@ -364,7 +379,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
 
         test_exit, _, _ = await compose_exec(
             self.project,
-            ["exec", "-T", self.service, "test", "-e", path],
+            [*self._service_exec(user), "test", "-e", path],
             timeout=10,
         )
         if test_exit != 0:
@@ -373,20 +388,20 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
             errno.EACCES, "Cannot stat (likely permission denied)", path
         )
 
-    async def _verify_read_size(self, file: str) -> None:
-        if await self._is_directory(file):
+    async def _verify_read_size(self, file: str, user: str | None) -> None:
+        if await self._is_directory(file, user):
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
-        size = await self._get_file_size(file)
+        size = await self._get_file_size(file, user)
         if size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
             raise OutputLimitExceededError(
                 limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
                 truncated_output=None,
             )
 
-    async def _create_parent_folder(self, path: str) -> None:
+    async def _create_parent_folder(self, path: str, user: str | None) -> None:
         exit_code, _, stderr = await compose_exec(
             self.project,
-            ["exec", "-T", self.service, "mkdir", "-p", path],
+            [*self._service_exec(user), "mkdir", "-p", path],
             timeout=10,
         )
         if exit_code != 0:
