@@ -205,7 +205,7 @@ async def test_file_operations_reject_an_explicit_user() -> None:
 async def test_file_preflight_runs_as_the_file_user(user: str | None) -> None:
     """The mkdir, directory and size checks run in the service as the file user.
 
-    The VM download runs as that user too: `compose cp` stages the file as root.
+    The VM download runs as root: `compose cp` stages the file as root.
     """
     sandbox = make_mock_sandbox()
     sandbox.files.read = AsyncMock(return_value=bytearray(b"hello"))
@@ -239,7 +239,9 @@ async def test_file_preflight_runs_as_the_file_user(user: str | None) -> None:
     # write: mkdir, directory check; read: directory check, size
     assert len(exec_calls) == 4
     assert all(c[: len(prefix)] == prefix for c in exec_calls), exec_calls
-    assert sandbox.files.read.call_args.kwargs["user"] == user
+    # utilities never resolve through the image's PATH
+    assert all(c[len(prefix)] == "/bin/sh" for c in exec_calls), exec_calls
+    assert sandbox.files.read.call_args.kwargs["user"] == "root"
 
 
 @pytest.mark.asyncio

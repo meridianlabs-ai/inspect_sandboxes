@@ -22,6 +22,7 @@ from inspect_ai.util import (
     SandboxEnvironmentConfigType,
     trace_message,
 )
+from inspect_ai.util._sandbox._privileged import pinned_command, pinned_shell_command
 from typing_extensions import override
 
 from inspect_sandboxes._util.compose import find_default_service
@@ -427,7 +428,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
     def _service_exec(self, user: str | None) -> list[str]:
         """`compose exec` arguments that run a command in the service as `user`.
 
-        The file preflight runs as the caller's file user, so a root read or write reaches root-only paths. With no user it runs as the service's default user.
+        The file preflight runs as the caller's file user, so a root read or write reaches root-only paths. With no user it runs as the service's default user. Its commands go through `pinned_command()` or `pinned_shell_command()`, so they never resolve through the image's PATH, which the service user may control.
         """
         return [
             "exec",
@@ -439,7 +440,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
     async def _is_directory(self, path: str, user: str | None) -> bool:
         exit_code, _ = await compose_exec(
             self.project,
-            [*self._service_exec(user), "test", "-d", path],
+            [*self._service_exec(user), *pinned_command(["test", "-d", path])],
             timeout=10,
         )
         return exit_code == 0
@@ -448,7 +449,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
         # Use wc -c for portability — stat -c %s is GNU/BusyBox-specific
         exit_code, output = await compose_exec(
             self.project,
-            [*self._service_exec(user), "sh", "-c", f"wc -c < {shlex.quote(path)}"],
+            [*self._service_exec(user), *pinned_shell_command('wc -c < "$1"', path)],
             timeout=10,
         )
         if exit_code != 0:
@@ -461,7 +462,7 @@ class DaytonaDinDServiceEnvironment(SandboxEnvironment):
     async def _create_parent_folder(self, path: str, user: str | None) -> None:
         exit_code, output = await compose_exec(
             self.project,
-            [*self._service_exec(user), "mkdir", "-p", path],
+            [*self._service_exec(user), *pinned_command(["mkdir", "-p", path])],
             timeout=10,
         )
         if exit_code != 0:

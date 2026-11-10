@@ -21,6 +21,7 @@ from inspect_ai.util import (
     SandboxEnvironmentLimits,
     trace_message,
 )
+from inspect_ai.util._sandbox._privileged import pinned_command, pinned_shell_command
 from typing_extensions import override
 
 from inspect_sandboxes._util.compose import find_default_service
@@ -289,12 +290,13 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
                 raise RuntimeError(
                     f"docker compose cp from {self.service}:{file} failed: {stderr}"
                 )
-            # `compose cp` stages the file as root with its mode kept, so a root
-            # read downloads it as root.
+            # `compose cp` stages the file as root with its mode kept, so the
+            # VM's default user may not be able to read it. The preflight has
+            # already checked access as the caller's user.
             data = await self.project.sandbox.files.read(
                 temp,
                 format="bytes",
-                user=user,
+                user="root",
                 request_timeout=FILE_REQUEST_TIMEOUT,
             )
             data_bytes = bytes(data)
@@ -338,7 +340,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
     def _service_exec(self, user: str | None) -> list[str]:
         """`compose exec` arguments that run a command in the service as `user`.
 
-        The file preflight runs as the caller's file user, so a root read or write reaches root-only paths. With no user it runs as the service's default user.
+        The file preflight runs as the caller's file user, so a root read or write reaches root-only paths. With no user it runs as the service's default user. Its commands go through `pinned_command()` or `pinned_shell_command()`, so they never resolve through the image's PATH, which the service user may control.
         """
         return [
             "exec",
@@ -350,22 +352,21 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
     async def _is_directory(self, path: str, user: str | None) -> bool:
         exit_code, _, _ = await compose_exec(
             self.project,
-            [*self._service_exec(user), "test", "-d", path],
+            [*self._service_exec(user), *pinned_command(["test", "-d", path])],
             timeout=10,
         )
         return exit_code == 0
 
     async def _get_file_size(self, path: str, user: str | None) -> int:
         """Return file size in bytes. Raises FileNotFoundError if missing."""
-        quoted = shlex.quote(path)
         # stat -c %s works on GNU coreutils + busybox; -f %z is the BSD fallback.
         exit_code, stdout, _ = await compose_exec(
             self.project,
             [
                 *self._service_exec(user),
-                "sh",
-                "-c",
-                f"stat -c %s {quoted} 2>/dev/null || stat -f %z {quoted} 2>/dev/null",
+                *pinned_shell_command(
+                    'stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null', path
+                ),
             ],
             timeout=10,
         )
@@ -379,7 +380,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
 
         test_exit, _, _ = await compose_exec(
             self.project,
-            [*self._service_exec(user), "test", "-e", path],
+            [*self._service_exec(user), *pinned_command(["test", "-e", path])],
             timeout=10,
         )
         if test_exit != 0:
@@ -401,7 +402,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
     async def _create_parent_folder(self, path: str, user: str | None) -> None:
         exit_code, _, stderr = await compose_exec(
             self.project,
-            [*self._service_exec(user), "mkdir", "-p", path],
+            [*self._service_exec(user), *pinned_command(["mkdir", "-p", path])],
             timeout=10,
         )
         if exit_code != 0:

@@ -607,6 +607,8 @@ async def test_file_preflight_runs_as_the_file_user(user: str | None) -> None:
     # write: mkdir, directory check; read: directory check, size
     assert len(exec_calls) == 4
     assert all(c[: len(prefix)] == prefix for c in exec_calls), exec_calls
+    # utilities never resolve through the image's PATH
+    assert all(c[len(prefix)] == "/bin/sh" for c in exec_calls), exec_calls
 
 
 @pytest.mark.asyncio
