@@ -10,73 +10,40 @@ Python 3.12+.
 ```bash
 git clone https://github.com/meridianlabs-ai/inspect_sandboxes.git
 cd inspect_sandboxes
-make install
+uv sync --locked
+uv run --no-sync pre-commit install
 ```
 
-`make install` runs `uv sync` to create the virtual environment and install the
-dev dependencies, then installs the pre-commit hooks. The dev tools are in the
+`uv sync --locked` creates the virtual environment with the exact versions in
+`uv.lock` and installs the dev dependencies. It fails if `uv.lock` is out of
+date with `pyproject.toml`. `pre-commit install` sets up the pre-commit hooks.
+The dev tools are in the
 `dev` extra. The `dev` dependency group includes that extra, so a plain
 `uv sync` or `uv run` installs them. `uv sync --extra dev` does the same.
 
-### Dependencies and the cooldown
+### Dependencies
 
-`uv.lock` pins every Python dependency except the build toolchain. CI's lint,
-type-check, test and build jobs install their dependencies from it, and fail
-when `uv.lock` is out of date with `pyproject.toml`. CI's build job and the
-release build use the build toolchain (build, hatchling, hatch-vcs) pinned with
-hashes in `scripts/build-dist/requirements.txt`. Dependabot updates that file
-weekly, and `.github/workflows/publish.yaml` gives the command to update it by
-hand. When uv builds the project itself, for example for the editable install
-in `uv sync`, it resolves the build backend, still within the cooldown. When
-you change dependencies in `pyproject.toml`, run `uv lock` and commit both
-files.
+[DEPENDENCIES.md](https://github.com/meridianlabs-ai/actions/blob/main/DEPENDENCIES.md)
+in meridianlabs-ai/actions tells how the Inspect repositories install and change
+dependencies. It covers the lock file, the cooldown, Dependabot, the canaries,
+the release build tools, and the procedures to add or update a dependency.
+Follow it. It is the same for every Inspect repository, so this file does not
+repeat it.
 
-`pyproject.toml` sets `exclude-newer = "7 days"` under `[tool.uv]`, so
-`uv lock`, `uv sync` and `uv pip` only pick releases that have been on PyPI for
-at least seven days. A compromised release is usually found and removed within
-that time, before it reaches `uv.lock`, CI or your machine. A few packages wait
-6 hours instead, so Inspect Sandboxes can adopt a new release the day it ships:
-`inspect-ai`, and the `e2b` and `modal` SDKs. They are listed with `"6 hours"`
-in `[tool.uv.exclude-newer-package]`. Only a direct dependency (a package in
-`dependencies` or the `dev` extra in `pyproject.toml`) that is a sandbox
-provider SDK or an Inspect package gets this exception. Every other package,
-the dependencies of these packages included, keeps the seven-day cooldown.
-Thus `daytona` is not on the list: each release pins its `daytona-*` client
-packages to the same version, and they wait seven days, so a 6-hour entry for
-`daytona` alone has no effect. Dependabot's `uv` entry in
-`.github/dependabot.yml` repeats the cooldown and the list. When you add a
-`"6 hours"` entry, also add the package to `cooldown.exclude` and the
-`six-hour-cooldown` group there.
-`tests/test_dependency_cooldown.py` checks that each entry is a direct
-dependency, that dated entries (below) are less than seven days old, and that
-the two files match. Whether a package is a provider SDK or an Inspect package
-is up to review.
+For this repository:
 
-Dependabot proposes `uv.lock` updates daily, once a release has cleared its
-cooldown. To adopt a release sooner, run `uv lock --upgrade-package <package>`
-and commit `uv.lock`. A release still inside its cooldown can't be locked; wait
-for it rather than overriding `exclude-newer`, unless it's an emergency
-(below).
-
-In an emergency, for example a security fix, you can adopt a release that is
-less than seven days old with a one-time dated entry. A dated entry does not
-shorten the cooldown of the package's own dependencies. Thus it does not work
-for `daytona`, whose `daytona-*` client packages are released with it and are
-not direct dependencies.
-
-1. Under `[tool.uv.exclude-newer-package]` in `pyproject.toml`, add
-   `<package> = "<timestamp>"`. The package must be a direct dependency. Use an
-   RFC 3339 timestamp just after the upload time of the fixed release. Don't
-   add a dated entry to `.github/dependabot.yml`.
-2. Run `uv lock --upgrade-package <package>` and commit both files.
-3. Within seven days, once the normal cooldown includes the release, delete the
-   entry, run `uv lock --upgrade-package <package>`, and commit both files. A
-   plain `uv lock` doesn't reliably remove the entry from `uv.lock`, and CI
-   then fails. A test fails when a dated entry is seven days old or older.
-
-Testing against the newest release of every dependency happens in the nightly
-canary in [meridianlabs-ai/canaries](https://github.com/meridianlabs-ai/canaries),
-so Inspect Sandboxes' own CI doesn't need to.
+- Inspect Sandboxes uses only released inspect_ai: `inspect-ai` comes from PyPI.
+- The 6-hour packages are in `[tool.uv.exclude-newer-package]` in
+  `pyproject.toml`. Here a direct dependency that is a sandbox provider SDK
+  (`e2b`, `modal`) can also wait 6 hours.
+- `daytona` is not on the 6-hour list: each release pins its `daytona-*` client
+  packages to the same version, and they wait seven days, so a 6-hour entry for
+  `daytona` alone has no effect. An emergency entry does not shorten the
+  cooldown of a package's own dependencies. Thus it does not work for
+  `daytona`, whose `daytona-*` client packages are released with it and are not
+  direct dependencies.
+- When uv builds the project itself, for example for the editable install in
+  `uv sync`, it resolves the build backend, still within the cooldown.
 
 ## Checks and tests
 
