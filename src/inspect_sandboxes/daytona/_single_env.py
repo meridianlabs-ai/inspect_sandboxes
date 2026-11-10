@@ -178,16 +178,6 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             )
 
     @override
-    def _supports_file_user(
-        self, operation: Literal["read_file", "write_file"]
-    ) -> bool:
-        """No file user: the file API acts as the sandbox's default user.
-
-        Returning False keeps inspect_ai calling `read_file()` and `write_file()` without a user, checkpoint copies included, as it did before the parameter existed.
-        """
-        return False
-
-    @override
     async def write_file(
         self, file: str, contents: str | bytes, *, user: str | None = None
     ) -> None:

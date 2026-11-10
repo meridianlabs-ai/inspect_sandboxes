@@ -648,20 +648,16 @@ async def test_exec_does_not_retry_non_daytona_error(mock_sandbox: MagicMock) ->
 
 
 @pytest.mark.asyncio
-async def test_file_operations_reject_an_explicit_user(mock_sandbox: MagicMock) -> None:
-    """An explicit file user is refused rather than ignored."""
+@pytest.mark.parametrize("user", ["nobody", "root"])
+async def test_file_operations_reject_an_explicit_user(
+    mock_sandbox: MagicMock, user: str
+) -> None:
+    """An explicit file user, root included, is refused rather than ignored."""
     env = DaytonaSingleServiceEnvironment(mock_sandbox)
     with pytest.raises(SandboxUserUnsupportedError):
-        await env.write_file("/workspace/test.txt", "hello", user="nobody")
+        await env.write_file("/workspace/test.txt", "hello", user=user)
     with pytest.raises(SandboxUserUnsupportedError):
-        await env.read_file("/workspace/test.txt", user="nobody")
-
-
-def test_reports_no_file_user_support(mock_sandbox: MagicMock) -> None:
-    """inspect_ai passes no user, so checkpoint copies read as they did before."""
-    env = DaytonaSingleServiceEnvironment(mock_sandbox)
-    assert not env._supports_file_user("read_file")
-    assert not env._supports_file_user("write_file")
+        await env.read_file("/workspace/test.txt", user=user)
 
 
 @pytest.mark.asyncio
