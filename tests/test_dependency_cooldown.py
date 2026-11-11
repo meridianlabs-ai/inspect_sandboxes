@@ -294,6 +294,12 @@ def test_publish_jobs_only_upload_the_shared_build() -> None:
         assert build["uses"].startswith(SHARED_BUILD), build["uses"]
         ref = build["uses"].split("@")[1].split()[0]
         assert re.fullmatch(r"[0-9a-f]{40}", ref), "pin a 40-character SHA"
+    # hatch-vcs makes a dev version if the build runs before release-please
+    # makes the tag, and publish uploads it.
+    release = yaml.safe_load((WORKFLOWS / "release.yaml").read_text())["jobs"]
+    needs = release["build"].get("needs", [])
+    assert "release-please" in ([needs] if isinstance(needs, str) else needs), needs
+    assert release["build"]["if"] == release["publish"]["if"], release["build"]["if"]
 
 
 def test_build_toolchain_keeps_the_hatchling_requirement() -> None:
