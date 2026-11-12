@@ -1501,11 +1501,6 @@ dev = [
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
-
-[package.dev-dependencies]
-dev = [
-    { name = "inspect-sandboxes", extra = ["dev"] },
-]
 doc = [
     { name = "griffe" },
     { name = "jupyter" },
@@ -1516,37 +1511,40 @@ doc = [
     { name = "rich" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "inspect-sandboxes", extra = ["dev"] },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "daytona", specifier = ">=0.201.0" },
     { name = "e2b", specifier = ">=2.20" },
+    { name = "griffe", marker = "extra == 'doc'", specifier = ">=2" },
     { name = "inspect-ai", specifier = ">=0.3.211" },
     { name = "inspect-ai", marker = "extra == 'dev'", specifier = ">=0.3.261" },
+    { name = "jupyter", marker = "extra == 'doc'" },
+    { name = "markdown", marker = "extra == 'doc'" },
     { name = "modal", specifier = ">=1.5.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19.1" },
+    { name = "panflute", marker = "extra == 'doc'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pyright", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pyyaml", marker = "extra == 'dev'" },
+    { name = "pyyaml", marker = "extra == 'doc'" },
+    { name = "quarto-cli", marker = "extra == 'doc'", specifier = ">=1.9" },
+    { name = "rich", marker = "extra == 'doc'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "tenacity", specifier = ">=9.1.4" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "doc"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "inspect-sandboxes", extras = ["dev"] }]
-doc = [
-    { name = "griffe", specifier = ">=2" },
-    { name = "jupyter" },
-    { name = "markdown" },
-    { name = "panflute" },
-    { name = "pyyaml" },
-    { name = "quarto-cli", specifier = ">=1.9" },
-    { name = "rich" },
-]
 
 [[package]]
 name = "ipykernel"

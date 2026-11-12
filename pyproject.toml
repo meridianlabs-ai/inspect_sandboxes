@@ -51,12 +51,9 @@ dev = [
     "types-PyYAML",
 ]
 
-[dependency-groups]
-# Keeps a plain `uv sync` or `uv run` (Makefile) pulling the dev tools.
-dev = ["inspect_sandboxes[dev]"]
-# Not a default group, so a plain `uv sync` or `uv run` leaves it out: quarto-cli
-# has no wheel and is built from its sdist. Docs commands ask for it with
-# `--group doc`.
+# Not installed by default, so a plain `uv sync` or `uv run` leaves it out:
+# quarto-cli has no wheel and is built from its sdist. Docs commands ask for it
+# with `--extra doc`.
 doc = [
     "griffe>=2",
     "jupyter",
@@ -66,6 +63,10 @@ doc = [
     "quarto-cli>=1.9",
     "rich",
 ]
+
+[dependency-groups]
+# Keeps a plain `uv sync` or `uv run` (Makefile) pulling the dev tools.
+dev = ["inspect_sandboxes[dev]"]
 
 [tool.hatch.version]
 source = "vcs"
