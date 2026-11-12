@@ -24,6 +24,8 @@ from inspect_ai.util._sandbox.environment import (
 )
 from typing_extensions import override
 
+from inspect_sandboxes._util.file_user import check_file_user
+
 from ._exec_capture import (
     ExecCapture,
     build_capture_command,
@@ -176,12 +178,15 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             )
 
     @override
-    async def write_file(self, file: str, contents: str | bytes) -> None:
+    async def write_file(
+        self, file: str, contents: str | bytes, *, user: str | None = None
+    ) -> None:
         """Creates parent directories automatically if they don't exist.
 
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
+        check_file_user(self, "write", user, as_root=False)
         parent = str(PurePosixPath(file).parent)
         if parent and parent not in ("/", "."):
             await self._create_parent_folder(parent)
@@ -193,13 +198,19 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
         await self._write_file_content(file, data)
 
     @overload
-    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+    async def read_file(
+        self, file: str, text: Literal[True] = True, *, user: str | None = None
+    ) -> str: ...
 
     @overload
-    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+    async def read_file(
+        self, file: str, text: Literal[False], *, user: str | None = None
+    ) -> bytes: ...
 
     @override
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:
+    async def read_file(
+        self, file: str, text: bool = True, *, user: str | None = None
+    ) -> str | bytes:
         """Read file from sandbox.
 
         Raises:
@@ -208,6 +219,7 @@ class DaytonaSingleServiceEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
+        check_file_user(self, "read", user, as_root=False)
         await verify_file_size(self._is_directory, self._get_file_size, file)
 
         contents_bytes = await self._download_file(file)

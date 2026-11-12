@@ -18,6 +18,7 @@ from inspect_ai.util import (
     OutputLimitExceededError,
     SandboxEnvironment,
     SandboxEnvironmentLimits,
+    SandboxUserUnsupportedError,
 )
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._exec_capture import (
@@ -644,6 +645,19 @@ async def test_exec_does_not_retry_non_daytona_error(mock_sandbox: MagicMock) ->
         await env.exec(["echo", "test"])
 
     assert mock_sandbox.process.exec.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user", ["nobody", "root"])
+async def test_file_operations_reject_an_explicit_user(
+    mock_sandbox: MagicMock, user: str
+) -> None:
+    """An explicit file user, root included, is refused rather than ignored."""
+    env = DaytonaSingleServiceEnvironment(mock_sandbox)
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/workspace/test.txt", "hello", user=user)
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/workspace/test.txt", user=user)
 
 
 @pytest.mark.asyncio

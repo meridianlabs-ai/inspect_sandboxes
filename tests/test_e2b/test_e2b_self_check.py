@@ -17,6 +17,7 @@ from inspect_ai.util._sandbox.self_check import *  # noqa: F403  # pyright: igno
 from inspect_sandboxes.e2b._e2b import E2BSandboxEnvironment
 
 from tests.self_check_support import (
+    FILE_USER_XFAILS,
     ConfigAndEnv,
     SandboxConfig,
     XFail,
@@ -49,6 +50,7 @@ SANDBOX_CONFIGS = [
         id="single",
         config=None,
         xfails={
+            **FILE_USER_XFAILS,
             "test_read_file_not_allowed": XFail(
                 "files.read doesn't translate permission denials to PermissionError"
             ),
@@ -78,6 +80,7 @@ SANDBOX_CONFIGS = [
         id="dind",
         config=dind_config(),
         xfails={
+            **FILE_USER_XFAILS,
             "test_exec_permission_error": XFail(
                 "docker compose exec routes through sh; permission edges differ"
             ),

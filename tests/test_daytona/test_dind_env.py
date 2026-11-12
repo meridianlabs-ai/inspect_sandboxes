@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daytona import DaytonaError
-from inspect_ai.util import ComposeConfig, ComposeService
+from inspect_ai.util import ComposeConfig, ComposeService, SandboxUserUnsupportedError
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._dind_env import (
     DaytonaDinDServiceEnvironment,
@@ -558,6 +558,60 @@ async def test_exec_unframed_vm_output_is_a_failed_exec() -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user() -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = make_env(service="web")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/app/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/app/test.txt", user="nobody")
+
+
+@pytest.mark.parametrize("user", [None, "root"])
+@pytest.mark.asyncio
+async def test_file_preflight_runs_as_the_file_user(user: str | None) -> None:
+    """The mkdir, directory and size checks run in the service as the file user."""
+    env = make_env(service="web")
+
+    async def fake_compose_exec(
+        project: DaytonaDinDProject, subcommand: list[str], **kwargs: Any
+    ) -> tuple[int, str]:
+        if "test" in subcommand:
+            return (1, "")  # not a directory
+        if "sh" in subcommand:
+            return (0, "5\n")  # wc -c
+        return (0, "")
+
+    with (
+        patch("inspect_sandboxes.daytona._dind_env.sdk_upload", new_callable=AsyncMock),
+        patch(
+            "inspect_sandboxes.daytona._dind_env.sdk_download",
+            new_callable=AsyncMock,
+            return_value=b"hello",
+        ),
+        patch(
+            "inspect_sandboxes.daytona._dind_env.compose_exec",
+            side_effect=fake_compose_exec,
+        ) as mock_exec,
+        patch(
+            "inspect_sandboxes.daytona._dind_env.vm_exec",
+            new_callable=AsyncMock,
+            return_value=(0, ""),
+        ),
+    ):
+        await env.write_file("/app/sub/test.txt", "hello", user=user)
+        assert await env.read_file("/app/sub/test.txt", user=user) == "hello"
+
+    prefix = ["exec", "-T", *(["--user", user] if user else []), "web"]
+    exec_calls = [c.args[1] for c in mock_exec.call_args_list if c.args[1][0] == "exec"]
+    # write: mkdir, directory check; read: directory check, size
+    assert len(exec_calls) == 4
+    assert all(c[: len(prefix)] == prefix for c in exec_calls), exec_calls
+    # utilities never resolve through the image's PATH
+    assert all(c[len(prefix)] == "/bin/sh" for c in exec_calls), exec_calls
+
+
+@pytest.mark.asyncio
 async def test_write_file_two_hop() -> None:
     """Test write_file uploads to VM temp, then compose cp to service."""
     env = make_env(service="web")
@@ -583,8 +637,9 @@ async def test_write_file_two_hop() -> None:
     assert "web:/app/test.txt" in cp_calls[0][0][1]
 
 
+@pytest.mark.parametrize("user", [None, "root"])
 @pytest.mark.asyncio
-async def test_read_file_two_hop() -> None:
+async def test_read_file_two_hop(user: str | None) -> None:
     """Test read_file compose cp's from service, then SDK downloads from VM."""
     env = make_env()
     env._is_directory = AsyncMock(return_value=False)  # type: ignore[method-assign]
@@ -607,7 +662,7 @@ async def test_read_file_two_hop() -> None:
             return_value=(0, ""),
         ),
     ):
-        result = await env.read_file("/app/test.txt")
+        result = await env.read_file("/app/test.txt", user=user)
 
     assert result == "file content"
 

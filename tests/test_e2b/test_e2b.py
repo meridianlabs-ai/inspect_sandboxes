@@ -16,6 +16,8 @@ from inspect_sandboxes.e2b._e2b import (
 )
 from inspect_sandboxes.e2b._single_env import E2BSingleServiceEnvironment
 
+from tests.self_check_support import check_root_file_ops_in_root_only_dir, dind_config
+
 
 def make_mock_sandbox(sandbox_id: str = "sb-test-123") -> MagicMock:
     """Create a mock AsyncSandbox instance."""
@@ -454,3 +456,31 @@ async def test_connection_surfaces_declared_port(
     host = port.mappings[0]
     assert isinstance(host.host_ip, str) and host.host_ip, "expected a real host"
     assert host.host_port == 443
+
+
+@pytest_asyncio.fixture
+async def e2b_nonroot_dind_env() -> AsyncGenerator[SandboxEnvironment, None]:
+    """Create a real E2B DinD sandbox whose default service runs as nobody."""
+    config = dind_config("nobody")
+    await E2BSandboxEnvironment.task_init("test_root_file_ops_dind", None)
+    envs = await E2BSandboxEnvironment.sample_init(
+        "test_root_file_ops_dind", config, {}
+    )
+    yield envs["default"]
+    try:
+        await E2BSandboxEnvironment.sample_cleanup(
+            "test_root_file_ops_dind", config, envs, False
+        )
+        await E2BSandboxEnvironment.task_cleanup(
+            "test_root_file_ops_dind", None, cleanup=True
+        )
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_root_file_ops_in_root_only_dir_dind(
+    e2b_nonroot_dind_env: SandboxEnvironment,
+) -> None:
+    await check_root_file_ops_in_root_only_dir(e2b_nonroot_dind_env)
