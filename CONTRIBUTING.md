@@ -33,9 +33,11 @@ repeat it.
 For this repository:
 
 - Inspect Sandboxes uses only released inspect_ai: `inspect-ai` comes from PyPI.
-- The 6-hour packages are in `[tool.uv.exclude-newer-package]` in
-  `pyproject.toml`. Here a direct dependency that is a sandbox provider SDK
-  (`e2b`, `modal`) can also wait 6 hours.
+- `[tool.uv.exclude-newer-package]` in `pyproject.toml` sets `inspect-ai` to
+  `false`, so it has no uv cooldown. Here a direct dependency that is a sandbox
+  provider SDK (`e2b`, `modal`) waits 6 hours. A `false` entry goes on the
+  Dependabot `cooldown.exclude` list and in the `six-hour-cooldown` group, the
+  same as a 6-hour entry.
 - `daytona` is not on the 6-hour list: each release pins its `daytona-*` client
   packages to the same version, and they wait seven days, so a 6-hour entry for
   `daytona` alone has no effect. An emergency entry does not shorten the
