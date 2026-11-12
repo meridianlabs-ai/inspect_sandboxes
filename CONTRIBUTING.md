@@ -63,15 +63,15 @@ default; run them explicitly with `make test-integration`.
 ## Docs
 
 The docs live in `docs/` and are built with [Quarto](https://quarto.org). The
-docs tools are in the `doc` dependency group, which `uv sync` and `uv run` leave
+docs tools are in the `doc` extra, which `uv sync` and `uv run` leave
 out, so ask for it:
 
 ```bash
 # Preview the docs locally
-uv run --group doc quarto preview docs
+uv run --extra doc quarto preview docs
 
 # Publish to GitHub Pages
-uv run --group doc quarto publish gh-pages docs
+uv run --extra doc quarto publish gh-pages docs
 ```
 
 ## Commit messages and releases
