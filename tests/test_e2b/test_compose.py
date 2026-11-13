@@ -160,19 +160,25 @@ def test_x_e2b_template_skips_build() -> None:
     assert result.dockerfile_path is None
 
 
-def test_environment_and_user_passthrough() -> None:
+def test_environment_passthrough() -> None:
     config = ComposeConfig(
         services={
             "default": ComposeService(
-                image="alpine",
-                environment=["FOO=bar", "BAZ=qux"],
-                user="nobody",
+                image="alpine", environment=["FOO=bar", "BAZ=qux"]
             )
         }
     )
     result = resolve_single_service_params(config, None)
     assert result.envs == {"FOO": "bar", "BAZ": "qux"}
-    assert result.user == "nobody"
+
+
+def test_service_user_is_rejected_until_applied() -> None:
+    """Compose `user` is never applied on E2B (issue #85); dropping it silently ran as root."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="alpine", user="nobody")}
+    )
+    with pytest.raises(ValueError, match=r"services\.default\.user"):
+        resolve_single_service_params(config, None)
 
 
 def test_x_e2b_envs_extend_environment() -> None:
@@ -184,13 +190,14 @@ def test_x_e2b_envs_extend_environment() -> None:
     assert result.envs == {"FOO": "bar", "EXTRA": "value"}
 
 
-def test_x_e2b_user_overrides_service_user() -> None:
+def test_x_e2b_user_is_rejected_until_applied() -> None:
+    """x-e2b.user is documented but never applied (issue #85)."""
     config = ComposeConfig(
-        services={"default": ComposeService(image="alpine", user="nobody")},
+        services={"default": ComposeService(image="alpine")},
         **{"x-e2b": {"user": "root"}},
     )
-    result = resolve_single_service_params(config, None)
-    assert result.user == "root"
+    with pytest.raises(ValueError, match="x-e2b.user"):
+        resolve_single_service_params(config, None)
 
 
 def test_x_e2b_metadata() -> None:
@@ -306,11 +313,110 @@ def test_service_connection_ports_malformed_value_warns_neutrally(
     assert "port range or malformed" in messages
 
 
-def test_service_connection_ports_expose_warns_not_surfaced(
+def test_expose_warns_and_is_not_surfaced(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Expose is host-private: the converter warns (via E2B_COMPOSE_SUPPORT)."""
     service = ComposeService(image="x", expose=["5432"])
+    config = ComposeConfig(services={"default": service})
     with caplog.at_level("WARNING"):
-        ports = service_connection_ports(service)
-    assert ports == []
+        resolve_single_service_params(config, None)
+    assert service_connection_ports(service) == []
     assert any("expose" in r.message for r in caplog.records)
+
+
+def test_resolve_rejects_compose_volumes() -> None:
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", volumes=["./data:/data"])}
+    )
+    with pytest.raises(ValueError, match=r"services\.default\.volumes"):
+        resolve_single_service_params(config, None)
+
+
+def test_resolve_warns_for_ignored_command(caplog: pytest.LogCaptureFixture) -> None:
+    """The Compose command is never started on E2B; say so once."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", command="sleep infinity")}
+    )
+    with caplog.at_level("WARNING"):
+        resolve_single_service_params(config, None)
+    assert any("services.default.command" in r.message for r in caplog.records)
+
+
+def test_unknown_x_e2b_key_warns(caplog: pytest.LogCaptureFixture) -> None:
+    config = ComposeConfig.model_validate(
+        {
+            "services": {"default": {"image": "x"}},
+            "x-e2b": {"cpu_count": 4, "cpus": 8},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        params = resolve_single_service_params(config, None)
+    assert params.cpu_count == 4
+    messages = " ".join(r.message for r in caplog.records)
+    assert "x-e2b.cpus" in messages
+    assert "x-e2b.cpu_count" not in messages
+
+
+def test_network_mode_none_is_rejected() -> None:
+    """E2B sandboxes always have internet access; silently ignoring `none` is unsafe."""
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", network_mode="none")}
+    )
+    with pytest.raises(ValueError, match="network_mode"):
+        resolve_single_service_params(config, None)
+
+
+def test_network_mode_bridge_is_accepted(caplog: pytest.LogCaptureFixture) -> None:
+    config = ComposeConfig(
+        services={"default": ComposeService(image="x", network_mode="bridge")}
+    )
+    with caplog.at_level("WARNING"):
+        resolve_single_service_params(config, None)
+    assert not any("network_mode" in r.message for r in caplog.records)
+
+
+def test_gpu_reservation_warns(caplog: pytest.LogCaptureFixture) -> None:
+    config = ComposeConfig.model_validate(
+        {
+            "services": {
+                "default": {
+                    "image": "x",
+                    "deploy": {
+                        "resources": {
+                            "reservations": {
+                                "devices": [{"capabilities": ["gpu"], "count": 1}]
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    )
+    with caplog.at_level("WARNING"):
+        resolve_single_service_params(config, None)
+    assert any("E2B has no GPU allocation" in r.message for r in caplog.records)
+
+
+def test_non_gpu_device_reservation_does_not_warn_about_gpus(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = ComposeConfig.model_validate(
+        {
+            "services": {
+                "default": {
+                    "image": "x",
+                    "deploy": {
+                        "resources": {
+                            "reservations": {
+                                "devices": [{"capabilities": ["tpu"], "count": 1}]
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    )
+    with caplog.at_level("WARNING"):
+        resolve_single_service_params(config, None)
+    assert not any("GPU" in r.message for r in caplog.records)

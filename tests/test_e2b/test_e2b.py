@@ -454,3 +454,60 @@ async def test_connection_surfaces_declared_port(
     host = port.mappings[0]
     assert isinstance(host.host_ip, str) and host.host_ip, "expected a real host"
     assert host.host_port == 443
+
+
+@pytest.mark.asyncio
+async def test_multi_service_compose_skips_native_validation(
+    mock_sandbox: MagicMock,
+    tmp_path: Any,
+) -> None:
+    """DinD runs Compose itself, so fields the native converter rejects must pass through."""
+    from inspect_sandboxes.e2b._dind_env import E2BDinDServiceEnvironment
+    from inspect_sandboxes.e2b._dind_project import E2BDinDProject
+
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        "services:\n"
+        "  a:\n    image: alpine\n    volumes: ['./data:/data']\n"
+        "    network_mode: none\n"
+        "  b:\n    image: ubuntu\n"
+    )
+    project_sandbox = MagicMock()
+    project_sandbox.sandbox_id = "sb-dind-1"
+    project = E2BDinDProject(
+        sandbox=project_sandbox,
+        project_name="inspect-x",
+        compose_path="/inspect/compose/compose.yaml",
+        services=["a", "b"],
+    )
+    real_envs = {
+        "a": E2BDinDServiceEnvironment(project, "a", "/"),
+        "b": E2BDinDServiceEnvironment(project, "b", "/"),
+    }
+    mock_cls = make_mock_async_sandbox_cls(mock_sandbox)
+    with (
+        patch("inspect_sandboxes.e2b._e2b.AsyncSandbox", new=mock_cls),
+        patch.object(
+            E2BDinDServiceEnvironment,
+            "sample_init_dind",
+            new=AsyncMock(return_value=real_envs),
+        ) as init_dind,
+    ):
+        await E2BSandboxEnvironment.task_init("test_task", str(compose))
+        envs = await E2BSandboxEnvironment.sample_init("test_task", str(compose), {})
+
+    init_dind.assert_awaited_once()
+    assert set(envs) == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_task_init_rejects_unsupported_single_service_fields(
+    tmp_path: Any,
+) -> None:
+    """Rejections surface at task_init, before any template build or sample."""
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        "services:\n  default:\n    image: alpine\n    volumes: ['./data:/data']\n"
+    )
+    with pytest.raises(ValueError, match=r"services\.default\.volumes"):
+        await E2BSandboxEnvironment.task_init("test_task", str(compose))
