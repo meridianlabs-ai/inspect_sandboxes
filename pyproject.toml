@@ -94,12 +94,13 @@ required-version = ">=0.13.4"
 # Only resolve releases at least 7 days old (see CONTRIBUTING.md).
 exclude-newer = "7 days"
 
-# 6 hours only for direct dependencies that are a sandbox provider SDK or an
-# Inspect package; see CONTRIBUTING.md. Not daytona: it pins its daytona-*
-# client packages to its own version, and they keep the 7-day cooldown.
+# 6 hours only for direct dependencies that are a sandbox provider SDK, and no
+# cooldown (false) for Inspect's own packages; see CONTRIBUTING.md. Not daytona:
+# it pins its daytona-* client packages to its own version, and they keep the
+# 7-day cooldown.
 [tool.uv.exclude-newer-package]
 e2b = "6 hours"
-inspect-ai = "6 hours"
+inspect-ai = false
 modal = "6 hours"
 
 [tool.mypy]
