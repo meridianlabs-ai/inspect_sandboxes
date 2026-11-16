@@ -13,7 +13,7 @@ exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
 e2b = { timestamp = "0001-01-01T00:00:00Z", span = "PT6H" }
-inspect-ai = { timestamp = "0001-01-01T00:00:00Z", span = "PT6H" }
+inspect-ai = false
 modal = { timestamp = "0001-01-01T00:00:00Z", span = "PT6H" }
 
 [[package]]
@@ -1428,7 +1428,7 @@ wheels = [
 
 [[package]]
 name = "inspect-ai"
-version = "0.3.288"
+version = "0.3.290"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -1472,9 +1472,9 @@ dependencies = [
     { name = "zipp" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ed/58/17e75cebbeaa60b43ce811e0ce2829496f2afcf8c5329905e8ea7584dea3/inspect_ai-0.3.288.tar.gz", hash = "sha256:0ef4181d7ee5d326d0c3e555fa48f456f9d14f2e1b0d769a3492f1b585fb2083", size = 36823277, upload-time = "2026-11-07T01:24:53.812Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/a1/07c1eec7ae724eaa07c6f28ce3b8c8031e53bac18569a6dcde833f4ac2eb/inspect_ai-0.3.290.tar.gz", hash = "sha256:1e26aa90723996df2812adf634d5a14794d3f4dd56c30864e035a5842e7cea3a", size = 7793640, upload-time = "2026-11-14T21:16:02.572Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/72/b7/495946bef4c1b918198798444d227336662ae6415a6946f608f19bc45803/inspect_ai-0.3.288-py3-none-any.whl", hash = "sha256:393efdf0220659db9388679ff37858f3ba91e6fd1520da48e3474e93f02c8106", size = 35607189, upload-time = "2026-11-07T01:24:49.441Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/4a/cde5661cae598ea8cbfe6c5da465ea144a81474534620e657a860328b1c0/inspect_ai-0.3.290-py3-none-any.whl", hash = "sha256:72f3d164ec04cea71ab3f17c27bc3650fd772815e70b2a672ca79f11bfd0509d", size = 35737576, upload-time = "2026-11-14T21:15:59.346Z" },
 ]
 
 [[package]]
@@ -1501,11 +1501,6 @@ dev = [
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
-
-[package.dev-dependencies]
-dev = [
-    { name = "inspect-sandboxes", extra = ["dev"] },
-]
 doc = [
     { name = "griffe" },
     { name = "jupyter" },
@@ -1516,37 +1511,40 @@ doc = [
     { name = "rich" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "inspect-sandboxes", extra = ["dev"] },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "daytona", specifier = ">=0.201.0" },
     { name = "e2b", specifier = ">=2.20" },
+    { name = "griffe", marker = "extra == 'doc'", specifier = ">=2" },
     { name = "inspect-ai", specifier = ">=0.3.275" },
     { name = "inspect-ai", marker = "extra == 'dev'", specifier = ">=0.3.261" },
+    { name = "jupyter", marker = "extra == 'doc'" },
+    { name = "markdown", marker = "extra == 'doc'" },
     { name = "modal", specifier = ">=1.5.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19.1" },
+    { name = "panflute", marker = "extra == 'doc'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pyright", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pyyaml", marker = "extra == 'dev'" },
+    { name = "pyyaml", marker = "extra == 'doc'" },
+    { name = "quarto-cli", marker = "extra == 'doc'", specifier = ">=1.9" },
+    { name = "rich", marker = "extra == 'doc'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "tenacity", specifier = ">=9.1.4" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "doc"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "inspect-sandboxes", extras = ["dev"] }]
-doc = [
-    { name = "griffe", specifier = ">=2" },
-    { name = "jupyter" },
-    { name = "markdown" },
-    { name = "panflute" },
-    { name = "pyyaml" },
-    { name = "quarto-cli", specifier = ">=1.9" },
-    { name = "rich" },
-]
 
 [[package]]
 name = "ipykernel"
