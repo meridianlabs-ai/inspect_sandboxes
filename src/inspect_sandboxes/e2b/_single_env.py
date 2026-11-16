@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import posixpath
 import shlex
 import uuid
 from logging import getLogger
@@ -49,6 +50,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         # Container ports declared via Compose `ports`, surfaced through
         # connection() as get_host URLs.
         self._connection_ports = connection_ports or []
+        self._working_dir: str | None = None
 
     @override
     @classmethod
@@ -94,6 +96,8 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         write *input* to a temp file inside the sandbox and pipe it via shell
         redirection — same approach Daytona uses.
         """
+        if cwd is not None:
+            cwd = await self._absolute_path(cwd)
         stdin_file: str | None = None
         if input is not None:
             data = input.encode("utf-8") if isinstance(input, str) else input
@@ -151,6 +155,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
+        file = await self._absolute_path(file)
         if await self._is_directory(file):
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
         data = contents.encode("utf-8") if isinstance(contents, str) else contents
@@ -172,6 +177,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
+        file = await self._absolute_path(file)
         await self._verify_read_size(file)
 
         try:
@@ -235,6 +241,27 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             await sandbox.kill()
         except NotFoundException:
             pass  # already gone
+
+    async def _absolute_path(self, file: str) -> str:
+        """Resolve a relative path against the directory `exec` runs in.
+
+        E2B resolves a relative file path, or a relative `exec` cwd, against
+        the user's home (`/root`), while `exec` with no cwd runs in the
+        template's working directory. Without this, a relative file written by
+        `write_file` is not where `exec` looks for it.
+        """
+        if posixpath.isabs(file):
+            return file
+        if self._working_dir is None:
+            result = await self.exec(["pwd"], timeout=10)
+            working_dir = result.stdout.strip()
+            if not result.success or not posixpath.isabs(working_dir):
+                raise RuntimeError(
+                    "Could not resolve the sandbox working directory: "
+                    f"stdout={result.stdout!r} stderr={result.stderr!r}"
+                )
+            self._working_dir = working_dir
+        return posixpath.join(self._working_dir, file)
 
     @standard_retry
     async def _get_file_size(self, file: str) -> int:

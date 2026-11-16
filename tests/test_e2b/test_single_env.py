@@ -345,6 +345,90 @@ async def test_read_file_filenotfound_during_read(mock_sandbox: MagicMock) -> No
 
 
 @pytest.mark.asyncio
+async def test_relative_file_paths_resolve_against_exec_working_dir(
+    mock_sandbox: MagicMock,
+) -> None:
+    """The files API resolves relative paths against /root; exec runs elsewhere."""
+    mock_sandbox.commands.run = AsyncMock(
+        return_value=_make_command_result(stdout="/home/user\n")
+    )
+    mock_sandbox.files.get_info = AsyncMock(
+        return_value=MagicMock(type=FileType.FILE, size=7)
+    )
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    await env.write_file("dir/a.txt", "content")
+    await env.read_file("dir/a.txt")
+
+    assert mock_sandbox.files.write.call_args[0][0] == "/home/user/dir/a.txt"
+    assert mock_sandbox.files.read.call_args[0][0] == "/home/user/dir/a.txt"
+    assert mock_sandbox.commands.run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_relative_exec_cwd_resolves_against_exec_working_dir(
+    mock_sandbox: MagicMock,
+) -> None:
+    """E2B resolves a relative cwd against /root too, not the working directory."""
+    mock_sandbox.commands.run = AsyncMock(
+        return_value=_make_command_result(stdout="/home/user\n")
+    )
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    await env.exec(["ls"], cwd="subdir")
+
+    assert mock_sandbox.commands.run.call_args[1]["cwd"] == "/home/user/subdir"
+
+
+@pytest.mark.asyncio
+async def test_relative_file_path_raises_when_working_dir_lookup_fails(
+    mock_sandbox: MagicMock,
+) -> None:
+    mock_sandbox.commands.run = AsyncMock(
+        side_effect=CommandExitException(
+            stderr="pwd: boom", stdout="", exit_code=1, error=None
+        )
+    )
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    with pytest.raises(RuntimeError, match="working directory.*pwd: boom"):
+        await env.read_file("a.txt")
+    mock_sandbox.files.read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_relative_file_path_raises_when_working_dir_is_not_absolute(
+    mock_sandbox: MagicMock,
+) -> None:
+    """A login-shell banner on stdout must not become the working directory."""
+    mock_sandbox.commands.run = AsyncMock(
+        return_value=_make_command_result(stdout="Welcome!\n/home/user\n")
+    )
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    with pytest.raises(RuntimeError, match="working directory"):
+        await env.write_file("a.txt", "x")
+    mock_sandbox.files.write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_absolute_file_paths_skip_working_dir_lookup(
+    mock_sandbox: MagicMock,
+) -> None:
+    mock_sandbox.files.get_info = AsyncMock(
+        return_value=MagicMock(type=FileType.FILE, size=7)
+    )
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+
+    await env.write_file("/tmp/a.txt", "content")
+    await env.read_file("/tmp/a.txt")
+
+    assert mock_sandbox.files.write.call_args[0][0] == "/tmp/a.txt"
+    assert mock_sandbox.files.read.call_args[0][0] == "/tmp/a.txt"
+    mock_sandbox.commands.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_sample_cleanup_kills_sandbox(mock_sandbox: MagicMock) -> None:
     """Test sample_cleanup kills all sandboxes in environments dict."""
     env = E2BSingleServiceEnvironment(mock_sandbox)
