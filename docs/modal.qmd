@@ -171,3 +171,4 @@ inspect sandbox cleanup modal <sandbox-id>      # terminate one
 ## Limitations {#modal-limitations}
 
 - **Single service only**: Multi-service compose files raise a `ValueError` before sandbox creation. Modal's default [gVisor](https://gvisor.dev/) runtime restricts the low-level network operations Docker needs to connect containers, and `experimental_options={"enable_docker": True}` does not lift those restrictions. The VM runtime supports inter-container networking, but `inspect_sandboxes` does not currently translate or orchestrate multiple Compose services there. For multi-service workloads, use the [Daytona provider](daytona.qmd), which supports multi-service compose via Docker-in-Docker.
+- **File user**: `read_file()` and `write_file()` accept `user="root"` and raise `SandboxUserUnsupportedError` for any other user.
