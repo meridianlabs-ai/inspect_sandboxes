@@ -71,10 +71,10 @@ out, so ask for it:
 ```bash
 # Preview the docs locally
 uv run --extra doc quarto preview docs
-
-# Publish to GitHub Pages
-uv run --extra doc quarto publish gh-pages docs
 ```
+
+The release workflow publishes the site to GitHub Pages with each release, so
+docs changes go live with the next release.
 
 ## Commit messages and releases
 
