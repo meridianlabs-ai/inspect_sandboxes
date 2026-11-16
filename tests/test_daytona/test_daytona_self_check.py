@@ -17,6 +17,7 @@ from inspect_ai.util._sandbox.self_check import *  # noqa: F403  # pyright: igno
 from inspect_sandboxes.daytona._daytona import DaytonaSandboxEnvironment
 
 from tests.self_check_support import (
+    FILE_USER_XFAILS,
     ConfigAndEnv,
     SandboxConfig,
     XFail,
@@ -34,6 +35,7 @@ SANDBOX_CONFIGS = [
         id="single",
         config=None,
         xfails={
+            **FILE_USER_XFAILS,
             "test_exec_permission_error": XFail(
                 "exit code 126, not translated to PermissionError"
             ),
@@ -43,6 +45,7 @@ SANDBOX_CONFIGS = [
         id="dind",
         config=dind_config(),
         xfails={
+            **FILE_USER_XFAILS,
             "test_exec_permission_error": XFail(
                 "exit code 126, not translated to PermissionError"
             ),

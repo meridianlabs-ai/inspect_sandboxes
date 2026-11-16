@@ -32,6 +32,8 @@ from inspect_ai.util._sandbox.environment import (
 )
 from typing_extensions import override
 
+from inspect_sandboxes._util.file_user import check_file_user
+
 from ._retry import exec_retry, run_with_timeout_retry, standard_retry
 
 logger = getLogger(__name__)
@@ -149,12 +151,15 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
                     pass
 
     @override
-    async def write_file(self, file: str, contents: str | bytes) -> None:
+    async def write_file(
+        self, file: str, contents: str | bytes, *, user: str | None = None
+    ) -> None:
         """Creates parent directories automatically.
 
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
+        check_file_user(self, "write", user, as_root=True)
         file = await self._absolute_path(file)
         if await self._is_directory(file):
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
@@ -162,13 +167,19 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         await self._write_file_content(file, data)
 
     @overload
-    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+    async def read_file(
+        self, file: str, text: Literal[True] = True, *, user: str | None = None
+    ) -> str: ...
 
     @overload
-    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+    async def read_file(
+        self, file: str, text: Literal[False], *, user: str | None = None
+    ) -> bytes: ...
 
     @override
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:
+    async def read_file(
+        self, file: str, text: bool = True, *, user: str | None = None
+    ) -> str | bytes:
         """Read file from sandbox.
 
         Raises:
@@ -177,6 +188,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
+        check_file_user(self, "read", user, as_root=True)
         file = await self._absolute_path(file)
         await self._verify_read_size(file)
 

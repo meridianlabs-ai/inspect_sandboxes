@@ -17,6 +17,7 @@ from inspect_ai.util._sandbox.self_check import *  # noqa: F403  # pyright: igno
 from inspect_sandboxes.modal._modal import ModalSandboxEnvironment
 
 from tests.self_check_support import (
+    FILE_USER_XFAILS,
     ConfigAndEnv,
     SandboxConfig,
     XFail,
@@ -33,6 +34,7 @@ SANDBOX_CONFIGS = [
         id="default",
         config=None,
         xfails={
+            **FILE_USER_XFAILS,
             "test_read_file_not_allowed": XFail("user is root"),
             "test_write_text_file_without_permissions": XFail("user is root"),
             "test_write_binary_file_without_permissions": XFail("user is root"),
