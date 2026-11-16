@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daytona import Resources
+from daytona_api_client import SnapshotState
 from inspect_ai.util import ComposeConfig, ComposeService
 from inspect_sandboxes.daytona._dind_project import (
     DaytonaDinDProject,
     _dind_snapshot_name,
+    _ensure_dind_snapshot,
     _wait_for_docker_daemon,
     _wait_for_services,
     compose_exec,
@@ -184,6 +187,88 @@ def test_dind_snapshot_name() -> None:
         _dind_snapshot_name(None)
         == "inspect-dind-defaultcpu-defaultgb-0gpu-defaultdisk-bb4ebfa28b94"
     )
+
+
+def make_snapshot_client(*states: SnapshotState) -> MagicMock:
+    """A Daytona client whose ``snapshot.get`` reports ``states`` in order."""
+    client = MagicMock()
+    client.snapshot.get = AsyncMock(
+        side_effect=[MagicMock(state=state) for state in states]
+    )
+    client.snapshot.activate = AsyncMock()
+    client.snapshot.create = AsyncMock()
+    return client
+
+
+@pytest.fixture
+def no_sleep() -> Iterator[None]:
+    with patch(
+        "inspect_sandboxes.daytona._dind_project.asyncio.sleep",
+        new_callable=AsyncMock,
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_sleep")
+async def test_ensure_dind_snapshot_activates_an_inactive_snapshot() -> None:
+    client = make_snapshot_client(
+        SnapshotState.INACTIVE,
+        SnapshotState.INACTIVE,
+        SnapshotState.PENDING,
+        SnapshotState.ACTIVE,
+    )
+
+    assert await _ensure_dind_snapshot(client, "snap", None) == "snap"
+    client.snapshot.activate.assert_awaited_once_with("snap")
+    client.snapshot.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_sleep")
+async def test_ensure_dind_snapshot_waits_for_a_pending_snapshot() -> None:
+    """A sample arriving mid-activation waits instead of using it unready."""
+    client = make_snapshot_client(
+        SnapshotState.PENDING, SnapshotState.PENDING, SnapshotState.ACTIVE
+    )
+
+    assert await _ensure_dind_snapshot(client, "snap", None) == "snap"
+    assert client.snapshot.get.await_count == 3
+    client.snapshot.activate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_sleep")
+async def test_ensure_dind_snapshot_retries_a_rejected_activation() -> None:
+    client = make_snapshot_client(
+        SnapshotState.INACTIVE,
+        SnapshotState.INACTIVE,
+        SnapshotState.INACTIVE,
+        SnapshotState.ACTIVE,
+    )
+    client.snapshot.activate.side_effect = [RuntimeError("still deactivating"), None]
+
+    assert await _ensure_dind_snapshot(client, "snap", None) == "snap"
+    assert client.snapshot.activate.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_sleep")
+async def test_ensure_dind_snapshot_falls_back_when_activation_times_out() -> None:
+    client = make_snapshot_client(SnapshotState.INACTIVE, SnapshotState.INACTIVE)
+
+    with patch("inspect_sandboxes.daytona._dind_project._SNAPSHOT_READY_TIMEOUT", 0):
+        assert await _ensure_dind_snapshot(client, "snap", None) == ""
+    client.snapshot.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_sleep")
+async def test_ensure_dind_snapshot_falls_back_on_a_failed_snapshot() -> None:
+    client = make_snapshot_client(SnapshotState.INACTIVE, SnapshotState.ERROR)
+
+    assert await _ensure_dind_snapshot(client, "snap", None) == ""
+    assert client.snapshot.get.await_count == 2
 
 
 @pytest.mark.asyncio
