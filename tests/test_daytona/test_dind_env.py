@@ -576,11 +576,18 @@ async def test_file_preflight_runs_as_the_file_user(user: str | None) -> None:
     async def fake_compose_exec(
         project: DaytonaDinDProject, subcommand: list[str], **kwargs: Any
     ) -> tuple[int, str]:
-        if "test" in subcommand:
+        if subcommand[0] != "exec":
+            return (0, "")  # compose cp
+        # pinned: ... /bin/sh -c <script> sh <args>
+        sh = subcommand.index("/bin/sh")
+        script, args = subcommand[sh + 2], subcommand[sh + 4 :]
+        if args[0] == "test":
             return (1, "")  # not a directory
-        if "sh" in subcommand:
-            return (0, "5\n")  # wc -c
-        return (0, "")
+        if args[0] == "mkdir":
+            return (0, "")
+        if "wc -c" in script:
+            return (0, "5\n")
+        raise AssertionError(f"unexpected preflight command: {subcommand}")
 
     with (
         patch("inspect_sandboxes.daytona._dind_env.sdk_upload", new_callable=AsyncMock),
