@@ -29,6 +29,8 @@ from inspect_sandboxes.daytona._daytona import (
 from inspect_sandboxes.daytona._dind_env import DaytonaDinDServiceEnvironment
 from inspect_sandboxes.daytona._single_env import DaytonaSingleServiceEnvironment
 
+from tests.self_check_support import check_root_file_ops_in_root_only_dir, dind_config
+
 
 def _assert_has_run_labels(labels: dict[str, str] | None) -> None:
     """Assert labels contain INSPECT_SANDBOX_LABEL entries and an inspect_run_id."""
@@ -893,3 +895,31 @@ async def test_connection_surfaces_declared_port(
     host = port.mappings[0]
     assert isinstance(host.host_ip, str) and host.host_ip, "expected a real host"
     assert host.host_port > 0
+
+
+@pytest_asyncio.fixture
+async def daytona_nonroot_dind_env() -> AsyncGenerator[SandboxEnvironment, None]:
+    """Create a real Daytona DinD sandbox whose default service runs as nobody."""
+    config = dind_config("nobody")
+    await DaytonaSandboxEnvironment.task_init("test_root_file_ops_dind", None)
+    envs = await DaytonaSandboxEnvironment.sample_init(
+        "test_root_file_ops_dind", config, {}
+    )
+    yield envs["default"]
+    try:
+        await DaytonaSandboxEnvironment.sample_cleanup(
+            "test_root_file_ops_dind", config, envs, False
+        )
+        await DaytonaSandboxEnvironment.task_cleanup(
+            "test_root_file_ops_dind", None, cleanup=True
+        )
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_root_file_ops_in_root_only_dir_dind(
+    daytona_nonroot_dind_env: SandboxEnvironment,
+) -> None:
+    await check_root_file_ops_in_root_only_dir(daytona_nonroot_dind_env)

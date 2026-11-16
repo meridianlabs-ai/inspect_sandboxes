@@ -197,3 +197,5 @@ inspect sandbox cleanup daytona <sandbox-id>    # delete one
 ## Limitations {#daytona-limitations}
 
 - **Architecture**: Daytona runners use `linux/amd64`. arm64-only images are not supported.
+- **File user**: In single-service mode, `read_file()` and `write_file()` raise `SandboxUserUnsupportedError` for any explicit `user`, `root` included, because Daytona's file API acts as the sandbox's default user. With inspect-ai 0.3.286 and later, Inspect features that copy files as root, such as [checkpointing](https://inspect.aisi.org.uk/checkpointing.html), fail in single-service mode. DinD mode accepts `user="root"` and raises `SandboxUserUnsupportedError` for any other user.
+- **DinD file permissions**: Without a `user`, DinD `read_file()` and `write_file()` check the path as the service's default user, but `docker compose cp` moves the file as root. So the default user's permissions are not consistently enforced. For example, a write can create a file in a directory the default user cannot write to.
