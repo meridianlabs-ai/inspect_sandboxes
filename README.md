@@ -9,28 +9,29 @@
 | src/inspect\_sandboxes/\_util/\_\_init\_\_.py      |        0 |        0 |        0 |        0 |   100% |           |
 | src/inspect\_sandboxes/\_util/compose.py           |       72 |       72 |       30 |        0 |     0% |     1-172 |
 | src/inspect\_sandboxes/\_util/dind\_compose.py     |       61 |       61 |       28 |        0 |     0% |     8-120 |
+| src/inspect\_sandboxes/\_util/file\_user.py        |        6 |        6 |        2 |        0 |     0% |      3-21 |
 | src/inspect\_sandboxes/\_util/naming.py            |       42 |       42 |       14 |        0 |     0% |      3-72 |
 | src/inspect\_sandboxes/daytona/\_\_init\_\_.py     |        0 |        0 |        0 |        0 |   100% |           |
 | src/inspect\_sandboxes/daytona/\_compose.py        |      117 |      117 |       68 |        0 |     0% |     1-319 |
 | src/inspect\_sandboxes/daytona/\_daytona.py        |      183 |      183 |       48 |        0 |     0% |     3-356 |
-| src/inspect\_sandboxes/daytona/\_dind\_env.py      |      184 |      184 |       50 |        0 |     0% |     3-444 |
+| src/inspect\_sandboxes/daytona/\_dind\_env.py      |      191 |      191 |       50 |        0 |     0% |     3-473 |
 | src/inspect\_sandboxes/daytona/\_dind\_project.py  |      178 |      178 |       40 |        0 |     0% |     3-454 |
 | src/inspect\_sandboxes/daytona/\_exec\_capture.py  |       78 |       78 |        8 |        0 |     0% |    13-250 |
 | src/inspect\_sandboxes/daytona/\_retry.py          |       26 |       26 |        6 |        0 |     0% |     13-81 |
 | src/inspect\_sandboxes/daytona/\_sandbox\_utils.py |      127 |      127 |       32 |        0 |     0% |     3-290 |
-| src/inspect\_sandboxes/daytona/\_single\_env.py    |      151 |      151 |       26 |        0 |     0% |     3-327 |
+| src/inspect\_sandboxes/daytona/\_single\_env.py    |      154 |      154 |       26 |        0 |     0% |     3-339 |
 | src/inspect\_sandboxes/e2b/\_\_init\_\_.py         |        0 |        0 |        0 |        0 |   100% |           |
 | src/inspect\_sandboxes/e2b/\_compose.py            |      105 |      105 |       54 |        0 |     0% |     1-239 |
-| src/inspect\_sandboxes/e2b/\_dind\_env.py          |      171 |      171 |       46 |        0 |     0% |     3-382 |
+| src/inspect\_sandboxes/e2b/\_dind\_env.py          |      176 |      176 |       46 |        0 |     0% |     3-409 |
 | src/inspect\_sandboxes/e2b/\_dind\_project.py      |      159 |      159 |       38 |        0 |     0% |    18-430 |
 | src/inspect\_sandboxes/e2b/\_e2b.py                |      240 |      240 |       90 |        0 |     0% |     3-442 |
 | src/inspect\_sandboxes/e2b/\_retry.py              |       32 |       32 |        8 |        0 |     0% |    15-103 |
-| src/inspect\_sandboxes/e2b/\_single\_env.py        |      137 |      137 |       22 |        0 |     0% |     3-305 |
+| src/inspect\_sandboxes/e2b/\_single\_env.py        |      140 |      140 |       22 |        0 |     0% |     3-317 |
 | src/inspect\_sandboxes/e2b/\_template.py           |       37 |       37 |        2 |        0 |     0% |    24-121 |
 | src/inspect\_sandboxes/modal/\_\_init\_\_.py       |        0 |        0 |        0 |        0 |   100% |           |
 | src/inspect\_sandboxes/modal/\_compose.py          |      182 |      182 |      114 |        0 |     0% |     1-471 |
-| src/inspect\_sandboxes/modal/\_modal.py            |      344 |      344 |       98 |        0 |     0% |     1-832 |
-| **TOTAL**                                          | **2629** | **2629** |  **822** |    **0** | **0%** |           |
+| src/inspect\_sandboxes/modal/\_modal.py            |      347 |      347 |       98 |        0 |     0% |     1-843 |
+| **TOTAL**                                          | **2656** | **2656** |  **824** |    **0** | **0%** |           |
 
 
 ## Setup coverage badge
