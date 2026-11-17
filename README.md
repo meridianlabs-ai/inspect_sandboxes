@@ -15,7 +15,7 @@
 | src/inspect\_sandboxes/daytona/\_compose.py        |      117 |      117 |       68 |        0 |     0% |     1-319 |
 | src/inspect\_sandboxes/daytona/\_daytona.py        |      183 |      183 |       48 |        0 |     0% |     3-356 |
 | src/inspect\_sandboxes/daytona/\_dind\_env.py      |      191 |      191 |       50 |        0 |     0% |     3-473 |
-| src/inspect\_sandboxes/daytona/\_dind\_project.py  |      178 |      178 |       40 |        0 |     0% |     3-454 |
+| src/inspect\_sandboxes/daytona/\_dind\_project.py  |      205 |      205 |       50 |        0 |     0% |     3-502 |
 | src/inspect\_sandboxes/daytona/\_exec\_capture.py  |       78 |       78 |        8 |        0 |     0% |    13-250 |
 | src/inspect\_sandboxes/daytona/\_retry.py          |       26 |       26 |        6 |        0 |     0% |     13-81 |
 | src/inspect\_sandboxes/daytona/\_sandbox\_utils.py |      127 |      127 |       32 |        0 |     0% |     3-290 |
@@ -31,7 +31,7 @@
 | src/inspect\_sandboxes/modal/\_\_init\_\_.py       |        0 |        0 |        0 |        0 |   100% |           |
 | src/inspect\_sandboxes/modal/\_compose.py          |      182 |      182 |      114 |        0 |     0% |     1-471 |
 | src/inspect\_sandboxes/modal/\_modal.py            |      347 |      347 |       98 |        0 |     0% |     1-843 |
-| **TOTAL**                                          | **2656** | **2656** |  **824** |    **0** | **0%** |           |
+| **TOTAL**                                          | **2683** | **2683** |  **834** |    **0** | **0%** |           |
 
 
 ## Setup coverage badge
