@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shlex
+import time
 import uuid
 from dataclasses import dataclass, field
 from logging import getLogger
@@ -24,6 +25,7 @@ from daytona import (
     Image,
     Resources,
 )
+from daytona_api_client import SnapshotState
 from inspect_ai.util import ComposeConfig
 
 from inspect_sandboxes._util.dind_compose import (
@@ -46,6 +48,8 @@ _DAEMON_POLL_INTERVAL = 2
 _DAEMON_TIMEOUT = 60
 _SERVICE_POLL_INTERVAL = 2
 _SERVICE_TIMEOUT = 120
+_SNAPSHOT_POLL_INTERVAL = 2
+_SNAPSHOT_READY_TIMEOUT = 300
 
 
 @dataclass
@@ -259,16 +263,15 @@ async def _ensure_dind_snapshot(
     """
     try:
         snapshot = await client.snapshot.get(snapshot_name)
-        logger.debug(
-            "Using existing DinD snapshot: %s (state=%s)",
-            snapshot_name,
-            snapshot.state,
-        )
-        return snapshot_name
     except DaytonaNotFoundError:
         pass  # doesn't exist yet — create below
     except Exception:
         pass  # check failed — still try to create
+    else:
+        if snapshot.state == SnapshotState.ACTIVE:
+            logger.debug("Using existing DinD snapshot: %s", snapshot_name)
+            return snapshot_name
+        return await _wait_for_dind_snapshot(client, snapshot_name)
 
     try:
         await client.snapshot.create(
@@ -288,6 +291,51 @@ async def _ensure_dind_snapshot(
             e,
         )
         return ""
+
+
+_SNAPSHOT_FAILED_STATES = (
+    SnapshotState.ERROR,
+    SnapshotState.BUILD_FAILED,
+    SnapshotState.REMOVING,
+)
+
+
+async def _wait_for_dind_snapshot(client: AsyncDaytona, snapshot_name: str) -> str:
+    """Wait for an existing DinD snapshot to become active, activating it if needed.
+
+    Daytona refuses to create sandboxes from a snapshot that isn't active. It
+    marks unused snapshots inactive, and can reject an ``activate`` call (e.g.
+    while a deactivation is still in progress), so activation is retried while
+    the snapshot stays inactive. Samples that find it pending or building wait.
+
+    Returns the snapshot name once it is active, or empty string to fall back
+    to image-based creation.
+    """
+    deadline = time.monotonic() + _SNAPSHOT_READY_TIMEOUT
+    state = None
+    while True:
+        try:
+            state = (await client.snapshot.get(snapshot_name)).state
+            if state == SnapshotState.ACTIVE:
+                logger.debug("DinD snapshot is active: %s", snapshot_name)
+                return snapshot_name
+            if state in _SNAPSHOT_FAILED_STATES:
+                break
+            if state == SnapshotState.INACTIVE:
+                await client.snapshot.activate(snapshot_name)
+        except Exception as e:
+            logger.debug("Waiting for DinD snapshot '%s': %s", snapshot_name, e)
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(_SNAPSHOT_POLL_INTERVAL)
+
+    logger.warning(
+        "DinD snapshot '%s' is not active (state=%s). "
+        "Falling back to image-based sandbox creation.",
+        snapshot_name,
+        state,
+    )
+    return ""
 
 
 async def create_dind_project(
