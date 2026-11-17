@@ -26,12 +26,12 @@
 | src/inspect\_sandboxes/e2b/\_dind\_project.py      |      159 |      159 |       38 |        0 |     0% |    18-430 |
 | src/inspect\_sandboxes/e2b/\_e2b.py                |      240 |      240 |       90 |        0 |     0% |     3-442 |
 | src/inspect\_sandboxes/e2b/\_retry.py              |       32 |       32 |        8 |        0 |     0% |    15-103 |
-| src/inspect\_sandboxes/e2b/\_single\_env.py        |      140 |      140 |       22 |        0 |     0% |     3-317 |
+| src/inspect\_sandboxes/e2b/\_single\_env.py        |      156 |      156 |       30 |        0 |     0% |     3-344 |
 | src/inspect\_sandboxes/e2b/\_template.py           |       37 |       37 |        2 |        0 |     0% |    24-121 |
 | src/inspect\_sandboxes/modal/\_\_init\_\_.py       |        0 |        0 |        0 |        0 |   100% |           |
 | src/inspect\_sandboxes/modal/\_compose.py          |      182 |      182 |      114 |        0 |     0% |     1-471 |
 | src/inspect\_sandboxes/modal/\_modal.py            |      347 |      347 |       98 |        0 |     0% |     1-843 |
-| **TOTAL**                                          | **2683** | **2683** |  **834** |    **0** | **0%** |           |
+| **TOTAL**                                          | **2699** | **2699** |  **842** |    **0** | **0%** |           |
 
 
 ## Setup coverage badge
