@@ -11,7 +11,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT License" }
 dependencies = [
-    "daytona>=0.201.0",
+    # Below 1: daytona 2.0.0 moves this interface under a v0 namespace, so the
+    # imports and client calls here fail on it.
+    "daytona>=0.201.0,<1",
     "e2b>=2.20",
     "inspect-ai>=0.3.275",
     "modal>=1.5.0",
