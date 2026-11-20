@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.2](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.6.1...v0.6.2) (2026-11-19)
+
+
+### Bug Fixes
+
+* Daytona DinD sandboxes fail to start when the cached snapshot is inactive ([#127](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/127)) ([de116b6](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/de116b65939e236f1ffa09faba54a4d7b30e5777))
+* Daytona sandboxes keep working when daytona 2.0.0 becomes the default install ([#129](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/129)) ([0e429a7](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/0e429a71d68274a76ccfc86d690050097938a8ca))
+* Daytona, E2B and Modal sandboxes accept inspect_ai's file user parameter ([#105](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/105)) ([9556571](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/955657165fd1c17ca12aafeed67d401854dfaa96))
+* keep the Modal sandbox importable on modal 1.6 ([#102](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/102)) ([bbe0ff4](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/bbe0ff489ef5fc64b05b4fd3f1094472f6f22d57))
+* relative paths on E2B sandboxes point where exec looks ([#126](https://github.com/meridianlabs-ai/inspect_sandboxes/issues/126)) ([e1b2fdb](https://github.com/meridianlabs-ai/inspect_sandboxes/commit/e1b2fdb48539648d3da07f07a5490e427b4fe746))
+
 ## [0.6.1](https://github.com/meridianlabs-ai/inspect_sandboxes/compare/v0.6.0...v0.6.1) (2026-10-05)
 
 
