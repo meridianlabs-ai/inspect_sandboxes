@@ -462,7 +462,8 @@ def _service_to_gpu(service: ComposeService) -> str | None:
     if not gpu_device:
         return None
 
-    if gpu_device.count:
+    # Compose accepts `count: all` (case-insensitive); treat it like an absent count.
+    if gpu_device.count and str(gpu_device.count).lower() != "all":
         return f"ANY:{gpu_device.count}"
     if gpu_device.device_ids:
         # Modal doesn't support specific device IDs in cloud environments

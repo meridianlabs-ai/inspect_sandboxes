@@ -32,6 +32,12 @@ from inspect_sandboxes.daytona._compose import (
 
 STUB_LABELS = {"created_by": "test"}
 
+GPU_COUNT_ALL_DEPLOY = {
+    "resources": {
+        "reservations": {"devices": [{"capabilities": ["gpu"], "count": "all"}]}
+    }
+}
+
 
 @pytest.fixture(autouse=True)
 def _reset_warn_once() -> None:
@@ -210,6 +216,21 @@ def test_apply_daytona_extensions_does_not_set_timeout() -> None:
                 "deploy": {
                     "resources": {
                         "reservations": {"devices": [{"capabilities": ["gpu"]}]}
+                    }
+                }
+            },
+            None,
+            None,
+            1,
+        ),
+        # GPU with count: all -> same as no count
+        (
+            {
+                "deploy": {
+                    "resources": {
+                        "reservations": {
+                            "devices": [{"capabilities": ["gpu"], "count": "all"}]
+                        }
                     }
                 }
             },
@@ -539,6 +560,26 @@ def test_aggregate_resources_sums_with_overhead() -> None:
     assert result.gpu is None
 
 
+def test_aggregate_resources_gpu_count_all() -> None:
+    """Test aggregate_resources accepts a GPU reservation with count: all."""
+    config = ComposeConfig.model_validate(
+        {
+            "services": {
+                "default": {
+                    "image": "python:3.12",
+                    "deploy": GPU_COUNT_ALL_DEPLOY,
+                },
+                "db": {"image": "postgres:16"},
+            }
+        }
+    )
+
+    result = aggregate_resources(config)
+
+    assert result is not None
+    assert result.gpu == 1
+
+
 def test_aggregate_resources_returns_none_when_no_resources() -> None:
     """Test aggregate_resources returns None when no services have resources."""
     config = ComposeConfig(
@@ -580,6 +621,41 @@ def test_create_single_service_params_with_resources_override() -> None:
     assert result.resources.cpu == 4
     assert result.resources.memory == 8
     assert result.resources.disk == 20
+
+
+def test_create_single_service_params_gpu_count_all_with_resources_override() -> None:
+    """Test that x-daytona.resources.gpu applies when the service uses count: all."""
+    config = ComposeConfig.model_validate(
+        {
+            "services": {
+                "default": {"image": "python:3.12", "deploy": GPU_COUNT_ALL_DEPLOY}
+            },
+            "x-daytona": {"resources": {"gpu": 2}},
+        }
+    )
+
+    result = create_single_service_params(config, None, STUB_LABELS)
+
+    assert isinstance(result, CreateSandboxFromImageParams)
+    assert result.resources is not None
+    assert result.resources.gpu == 2
+
+
+def test_create_single_service_params_gpu_count_all_with_snapshot() -> None:
+    """Test that x-daytona.snapshot applies when the service uses count: all."""
+    config = ComposeConfig.model_validate(
+        {
+            "services": {
+                "default": {"image": "python:3.12", "deploy": GPU_COUNT_ALL_DEPLOY}
+            },
+            "x-daytona": {"snapshot": "my-snapshot"},
+        }
+    )
+
+    result = create_single_service_params(config, None, STUB_LABELS)
+
+    assert isinstance(result, CreateSandboxFromSnapshotParams)
+    assert result.snapshot == "my-snapshot"
 
 
 def test_create_single_service_params_forwards_name_to_image_params() -> None:
