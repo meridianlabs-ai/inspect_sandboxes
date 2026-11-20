@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from inspect_ai.util import parse_compose_yaml
+import pytest
+from inspect_ai.util import (
+    ComposeBuild,
+    ComposeConfig,
+    ComposeService,
+    parse_compose_yaml,
+)
 from inspect_sandboxes._util.dind_compose import (
     compute_healthcheck_timeout,
     discover_build_contexts,
+    resolve_build_contexts,
     rewrite_compose_yaml,
 )
 
@@ -119,3 +126,32 @@ services:
     rewritten = rewrite_compose_yaml(cfg, compose_dir, context_map)
     assert "/inspect/contexts/default" in rewritten
     assert str(external.resolve()) not in rewritten
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "https://github.com/docker/getting-started.git#main",
+        "git://example.com/repo.git",
+        "ssh://git@example.com/repo.git",
+        "git@github.com:org/repo.git",
+        "github.com/org/repo",
+        "docker-image://alpine",
+    ],
+)
+def test_resolve_build_contexts_leaves_remote_contexts_unchanged(
+    tmp_path: Path, remote: str
+) -> None:
+    config = ComposeConfig(
+        services={
+            "as_string": ComposeService(build=remote),
+            "as_object": ComposeService(build=ComposeBuild(context=remote)),
+            "local": ComposeService(build="app"),
+        }
+    )
+    resolved = resolve_build_contexts(config, tmp_path)
+    assert resolved.services["as_string"].build == remote
+    as_object = resolved.services["as_object"].build
+    assert isinstance(as_object, ComposeBuild)
+    assert as_object.context == remote
+    assert resolved.services["local"].build == str(tmp_path / "app")

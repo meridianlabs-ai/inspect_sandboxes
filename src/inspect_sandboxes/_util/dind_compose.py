@@ -40,6 +40,42 @@ def compute_healthcheck_timeout(
     return max_time if max_time > 0 else default
 
 
+_REMOTE_CONTEXT_PREFIXES = ("github.com/", "git@")
+
+
+def _is_local_relative_context(ctx: str) -> bool:
+    """True if *ctx* is a relative local path (not absolute, not a remote URL).
+
+    Remote contexts follow Compose's rule: anything containing ``://`` (git,
+    http(s), ssh, ``docker-image://``, ...) or starting with ``github.com/``
+    or ``git@``.
+    """
+    if "://" in ctx or ctx.startswith(_REMOTE_CONTEXT_PREFIXES):
+        return False
+    return not Path(ctx).is_absolute()
+
+
+def resolve_build_contexts(config: ComposeConfig, base_dir: Path) -> ComposeConfig:
+    """Return a copy of *config* with relative build contexts made absolute.
+
+    A ``ComposeConfig`` passed without a compose file is serialized to a temp
+    directory, so its relative build contexts must be resolved against
+    *base_dir* (the working directory, as Inspect's Docker provider does)
+    before that happens. Absolute paths and remote (git/URL) contexts are left
+    unchanged.
+    """
+    config_copy = deepcopy(config)
+    for service in config_copy.services.values():
+        if isinstance(service.build, str):
+            if _is_local_relative_context(service.build):
+                service.build = str(base_dir / service.build)
+        elif service.build is not None:
+            ctx = service.build.context or "."
+            if _is_local_relative_context(ctx):
+                service.build.context = str(base_dir / ctx)
+    return config_copy
+
+
 def discover_build_contexts(
     config: ComposeConfig,
     compose_dir: Path,
