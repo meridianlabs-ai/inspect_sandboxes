@@ -75,6 +75,19 @@ def _reset_warn_once() -> None:
             },
             "ANY",
         ),
+        # GPU with count: all -> same as no count
+        (
+            {
+                "deploy": {
+                    "resources": {
+                        "reservations": {
+                            "devices": [{"capabilities": ["gpu"], "count": "all"}]
+                        }
+                    }
+                }
+            },
+            "ANY",
+        ),
     ],
 )
 def test_service_to_gpu(

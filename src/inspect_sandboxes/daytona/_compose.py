@@ -293,7 +293,9 @@ def _service_to_resources(service: ComposeService) -> Resources | None:
         if resources.reservations and resources.reservations.devices:
             for device in resources.reservations.devices:
                 if device.capabilities and "gpu" in device.capabilities:
-                    if device.count:
+                    # Compose accepts `count: all` (case-insensitive); treat it
+                    # like an absent count.
+                    if device.count and str(device.count).lower() != "all":
                         gpu = int(device.count)
                     elif device.device_ids:
                         gpu = len(device.device_ids)
