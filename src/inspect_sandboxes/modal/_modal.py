@@ -9,7 +9,6 @@ import sys
 import uuid
 from contextvars import ContextVar
 from logging import getLogger
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, overload
 
 import modal
@@ -26,7 +25,6 @@ from inspect_ai.util import (
     parse_compose_yaml,
     sandboxenv,
     trace_message,
-    warn_once,
 )
 from inspect_ai.util._sandbox.environment import (
     HostMapping,
@@ -503,6 +501,10 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         # parameter of its own.
         exec_cmd = _build_exec_cmd(cmd, user)
 
+        # Modal requires an absolute workdir. Resolve a relative cwd against the
+        # sandbox working directory, as read_file/write_file do.
+        workdir = None if cwd is None else await self._resolve_file_path(cwd)
+
         # Commands over Modal's cap are written to a script in the sandbox and
         # run via /bin/sh instead. Size is measured in UTF-8 bytes: that covers
         # everything Modal's character count rejects and also stays under the
@@ -520,16 +522,6 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             except modal.exception.SandboxFilesystemError as e:
                 self._raise_filesystem_error(script_file, e)
             exec_cmd = _build_exec_cmd(["/bin/sh", script_file], user)
-
-        # Modal requires absolute paths for workdir
-        workdir = cwd
-        if workdir is not None and not PurePosixPath(workdir).is_absolute():
-            warn_once(
-                logger,
-                f"Relative path '{workdir}' for cwd parameter was converted to absolute path '/{workdir}' "
-                "(relative to filesystem root). For clarity, consider using absolute paths.",
-            )
-            workdir = f"/{workdir}"
 
         # Encode once, outside the retried/timed region: a large str input
         # would otherwise be re-encoded on every attempt.
@@ -803,7 +795,9 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             return file
 
         if self._working_dir is None:
-            result = await self.exec(["pwd"])
+            # Bounded so a stalled sandbox can't block exec(cwd=...) or a
+            # relative file operation indefinitely (as in the E2B provider).
+            result = await self.exec(["pwd"], timeout=10)
             if not result.success:
                 raise RuntimeError(
                     "Failed to resolve the Modal sandbox working directory: "

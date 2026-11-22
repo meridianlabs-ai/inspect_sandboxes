@@ -1124,32 +1124,91 @@ async def test_exec_concurrency_param_ignored(
     assert isinstance(result, ExecResult)
 
 
-@pytest.mark.asyncio
-async def test_exec_relative_cwd_converted_to_absolute(
+@pytest.fixture
+def captured_exec_workdir(
     sandbox_env: ModalSandboxEnvironment,
-) -> None:
-    """Test that a relative cwd is prefixed with / before being passed to Modal."""
-    captured_workdir: list[str | None] = []
+) -> list[tuple[tuple[str, ...], str | None]]:
+    """Wire `sandbox_env.sandbox.exec` to a mock that records argv and workdir.
 
-    async def capturing_exec(*args: Any, **kwargs: Any) -> MagicMock:
-        captured_workdir.append(kwargs.get("workdir"))
+    `pwd` answers `/home/user`, like an image whose WORKDIR is that directory.
+    """
+    captured: list[tuple[tuple[str, ...], str | None]] = []
+
+    async def capturing_exec(*args: str, **kwargs: Any) -> MagicMock:
+        captured.append((args, kwargs.get("workdir")))
         process = MagicMock()
         process.returncode = 0
-        process.stdout = MagicMock()
-        process.stdout.read = AsyncMock(return_value="")
-        process.stderr = MagicMock()
-        process.stderr.read = AsyncMock(return_value="")
-        process.stdin = MagicMock()
-        process.stdin.write = MagicMock()
-        process.stdin.write_eof = MagicMock()
-        process.stdin.drain = AsyncMock()
-        process.wait = AsyncMock()
+        process.stdout.read.aio = AsyncMock(
+            return_value="/home/user\n" if args == ("pwd",) else ""
+        )
+        process.stderr.read.aio = AsyncMock(return_value="")
+        process.wait.aio = AsyncMock()
         return process
 
     sandbox_env.sandbox.exec = MagicMock()
     sandbox_env.sandbox.exec.aio = capturing_exec
-    await sandbox_env.exec(["echo", "test"], cwd="relative/path")
-    assert captured_workdir == ["/relative/path"]
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_exec_relative_cwd_uses_sandbox_working_directory(
+    sandbox_env: ModalSandboxEnvironment,
+    captured_exec_workdir: list[tuple[tuple[str, ...], str | None]],
+) -> None:
+    """A relative cwd resolves where read_file/write_file resolve relative paths."""
+    sandbox_env._working_dir = "/app"
+
+    await sandbox_env.exec(["ls"], cwd="subdir")
+    await sandbox_env.exec(["ls"], cwd="/abs")
+
+    assert captured_exec_workdir == [(("ls",), "/app/subdir"), (("ls",), "/abs")]
+
+
+@pytest.mark.asyncio
+async def test_exec_relative_cwd_resolved_via_pwd_once(
+    sandbox_env: ModalSandboxEnvironment,
+    captured_exec_workdir: list[tuple[tuple[str, ...], str | None]],
+) -> None:
+    """Without a configured workdir, pwd is queried once and cached."""
+    await sandbox_env.exec(["ls"], cwd="subdir")
+    await sandbox_env.exec(["ls"], cwd="other")
+
+    assert captured_exec_workdir == [
+        (("pwd",), None),
+        (("ls",), "/home/user/subdir"),
+        (("ls",), "/home/user/other"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exec_relative_cwd_pwd_lookup_is_time_bounded(
+    sandbox_env: ModalSandboxEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled pwd lookup raises TimeoutError instead of blocking exec forever."""
+
+    async def hanging_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        await asyncio.Event().wait()
+        return MagicMock()
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = hanging_exec
+
+    # Record each attempt's timeout but expire it at once, so the test is fast.
+    real_wait_for = asyncio.wait_for
+    attempt_timeouts: list[float | None] = []
+
+    async def fast_wait_for(aw: Any, timeout: float | None) -> Any:
+        attempt_timeouts.append(timeout)
+        return await real_wait_for(aw, timeout=0.01)
+
+    monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+
+    async with asyncio.timeout(5):
+        with pytest.raises(TimeoutError):
+            await sandbox_env.exec(["ls"], cwd="subdir")
+
+    assert attempt_timeouts == [10, 10, 10]
+    assert sandbox_env._working_dir is None
 
 
 @pytest.mark.asyncio
@@ -1263,7 +1322,7 @@ async def test_relative_file_path_resolved_via_pwd_once(
         await sandbox_env.write_file("a.txt", "a")
         await sandbox_env.write_file("b.txt", "b")
 
-    exec_mock.assert_awaited_once_with(["pwd"])
+    exec_mock.assert_awaited_once_with(["pwd"], timeout=10)
     filesystem.write_text.aio.assert_has_awaits(
         [call("a", "/home/user/a.txt"), call("b", "/home/user/b.txt")]
     )
