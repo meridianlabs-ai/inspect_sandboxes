@@ -11,9 +11,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT License" }
 dependencies = [
-    "daytona-sdk>=0.180.0",
+    # Below 1: daytona 2.0.0 moves this interface under a v0 namespace, so the
+    # imports and client calls here fail on it.
+    "daytona>=0.201.0,<1",
     "e2b>=2.20",
-    "inspect-ai>=0.3.211",
+    "inspect-ai>=0.3.275",
     "modal>=1.5.0",
     "tenacity>=9.1.4",
 ]
@@ -21,6 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
@@ -33,7 +36,7 @@ Documentation = "https://meridianlabs-ai.github.io/inspect_sandboxes/"
 [project.entry-points.inspect_ai]
 inspect_sandboxes = "inspect_sandboxes._registry"
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
     # The conformance suites consume inspect_ai's pytest-collected checks
     "inspect-ai>=0.3.261",
@@ -43,11 +46,17 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
+    # tests/test_workflows.py and tests/test_dependency_cooldown.py read the
+    # workflows
+    "pyyaml",
     "ruff",
     "types-PyYAML",
-    {include-group = "docs"},
 ]
-docs = [
+
+# Not installed by default, so a plain `uv sync` or `uv run` leaves it out:
+# quarto-cli has no wheel and is built from its sdist. Docs commands ask for it
+# with `--extra doc`.
+doc = [
     "griffe>=2",
     "jupyter",
     "markdown",
@@ -56,6 +65,10 @@ docs = [
     "quarto-cli>=1.9",
     "rich",
 ]
+
+[dependency-groups]
+# Keeps a plain `uv sync` or `uv run` (Makefile) pulling the dev tools.
+dev = ["inspect_sandboxes[dev]"]
 
 [tool.hatch.version]
 source = "vcs"
@@ -76,12 +89,21 @@ exclude = ["docs/", "tests/"]
 [tool.uv]
 managed = true
 add-bounds = "lower"
-default-groups = ["dev"]
-# Exclude packages published within the last 7 days to protect against supply chain attacks
+# 0.11.8 is the first uv that keeps uv.lock stable with a relative exclude-newer,
+# and 0.13.4 the first that no longer trusts the compromised emSign root
+# (GHSA-hq85-5cpj-mr62).
+required-version = ">=0.13.4"
+# Only resolve releases at least 7 days old (see CONTRIBUTING.md).
 exclude-newer = "7 days"
 
+# 6 hours only for direct dependencies that are a sandbox provider SDK, and no
+# cooldown (false) for Inspect's own packages; see CONTRIBUTING.md. Not daytona:
+# it pins its daytona-* client packages to its own version, and they keep the
+# 7-day cooldown.
 [tool.uv.exclude-newer-package]
+e2b = "6 hours"
 inspect-ai = false
+modal = "6 hours"
 
 [tool.mypy]
 ignore_missing_imports = false
@@ -93,7 +115,7 @@ module = "modal.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "daytona_sdk.*"
+module = "daytona.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -135,6 +157,10 @@ convention = "google"
 
 [tool.coverage.run]
 relative_files = true
+# hatch-vcs writes this at install time and it is gitignored, so the
+# `coverage` job in build.yaml (a bare checkout, nothing installed) has no
+# source for it and `coverage json` fails.
+omit = ["src/inspect_sandboxes/_version.py"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

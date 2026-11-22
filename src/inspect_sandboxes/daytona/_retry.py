@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
-from daytona_sdk import DaytonaError, DaytonaTimeoutError
+from daytona import DaytonaError, DaytonaTimeoutError
 from tenacity import (
     retry,
     retry_if_exception,

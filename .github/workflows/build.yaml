@@ -9,70 +9,150 @@ on:
       - main
   workflow_dispatch:
 
+# Read-only for every job that runs code from the checkout: an agent may land
+# build and dependency configuration (pyproject.toml, uv.lock; the tier-2
+# opt-in, meridianlabs-ai/agents design/executed-paths-residual.md), and these
+# jobs run it. The coverage writes happen where no checkout code runs: the PR
+# comment from coverage-comment.yml (workflow_run), the data branch from the
+# `coverage` job below.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   py-lint:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      # Ruff only reads the source, so the project itself does not install.
+      - uses: meridianlabs-ai/actions/install-python-dependencies@65f1b6bdb9b1af7eb0bc89942c624dd4efef1316 # main
+        with:
+          versions: locked
           python-version: ${{ matrix.python-version }}
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-      - name: Install dependencies
-        run: uv sync
+          project-install: skip
+          extras: dev
       - name: Lint with Ruff
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check --output-format github .
       - name: Format with Ruff
-        run: uv run ruff format --check .
+        run: uv run --no-sync ruff format --check .
+      - name: Minimize uv cache
+        if: ${{ !cancelled() }}
+        run: uv cache prune --ci
 
   py-type:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: meridianlabs-ai/actions/install-python-dependencies@65f1b6bdb9b1af7eb0bc89942c624dd4efef1316 # main
+        with:
+          versions: locked
           python-version: ${{ matrix.python-version }}
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-      - name: Install dependencies
-        run: uv sync
+          extras: dev
       - name: Type check with pyright
-        run: uv run pyright
+        run: uv run --no-sync pyright
+      - name: Minimize uv cache
+        if: ${{ !cancelled() }}
+        run: uv cache prune --ci
 
   py-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # the coverage action reads the PR diff
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: meridianlabs-ai/actions/install-python-dependencies@65f1b6bdb9b1af7eb0bc89942c624dd4efef1316 # main
         with:
+          versions: locked
           python-version: ${{ matrix.python-version }}
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-      - name: Install dependencies
-        run: uv sync
+          extras: dev
       - name: Run tests with coverage
-        run: uv run pytest -m "not integration" --cov=inspect_sandboxes --cov-report=term --cov-report=xml --cov-branch
+        run: uv run --no-sync pytest -m "not integration" --cov=inspect_sandboxes --cov-report=term --cov-report=xml --cov-branch
+      # The action's PR mode with a read-only token: it cannot post, so it
+      # writes the comment to a file, which coverage-comment.yml posts (the
+      # action's documented two-workflow split). One matrix entry, so the
+      # comment and the data come from a single run.
       - name: Coverage comment
-        uses: py-cov-action/python-coverage-comment-action@v3
+        id: coverage_comment
+        if: matrix.python-version == '3.12' && github.event_name == 'pull_request'
+        uses: py-cov-action/python-coverage-comment-action@50d15ff8768f6d897b04e5a0805bd1a98f7096c4 # v3
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          MINIMUM_GREEN: 95
+          MINIMUM_ORANGE: 90
+      - name: Store the coverage comment
+        if: steps.coverage_comment.outputs.COMMENT_FILE_WRITTEN == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # coverage-comment.yml's action reads these default names.
+          name: python-coverage-comment-action
+          path: python-coverage-comment-action.txt
+      - name: Store the coverage data
+        if: matrix.python-version == '3.12' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-data
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Minimize uv cache
+        if: ${{ !cancelled() }}
+        run: uv cache prune --ci
+
+  # Main's coverage data, on the action's data branch. Runs nothing from the
+  # checkout: the action's own container reads the .coverage file py-test
+  # stored and the source it covers. v3 pushes with the credentials
+  # actions/checkout persists (v4.1 and later take the token instead).
+  coverage:
+    needs: py-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # py-test ran the checkout's code, so its artifact may hold anything:
+      # it lands outside the checkout, and only a single regular .coverage
+      # file is copied in (never a link, a directory, .git/config or any
+      # other member).
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-data
+          path: ${{ runner.temp }}/coverage-data
+      - name: Take only the coverage data file
+        env:
+          ARTIFACT: ${{ runner.temp }}/coverage-data
+        run: |
+          members=$(cd "$ARTIFACT" && find . -mindepth 1)
+          if [ "$members" != "./.coverage" ] || [ -L "$ARTIFACT/.coverage" ] || [ ! -f "$ARTIFACT/.coverage" ]; then
+            echo "::error::coverage-data must hold only a regular .coverage file; it holds: $members"
+            exit 1
+          fi
+          rm -f -- .coverage
+          cp -- "$ARTIFACT/.coverage" .coverage
+      - name: Coverage data
+        uses: py-cov-action/python-coverage-comment-action@50d15ff8768f6d897b04e5a0805bd1a98f7096c4 # v3
+        env:
+          # The action runs `coverage json/html/report` in the checkout, which
+          # would read the checkout's coverage configuration and import any
+          # plugins it names. An agent may land pyproject.toml (tier 2), so
+          # coverage reads no configuration here: only this empty file.
+          COVERAGE_RCFILE: /dev/null
         with:
           GITHUB_TOKEN: ${{ github.token }}
           MINIMUM_GREEN: 95
@@ -82,20 +162,41 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      # The build toolchain that release.yaml uses, pinned with hashes. To
+      # update the file, see release.yaml.
+      - name: Install build toolchain
+        uses: meridianlabs-ai/actions/install-python-dependencies@65f1b6bdb9b1af7eb0bc89942c624dd4efef1316 # main
+        with:
+          versions: hashed-requirements
           python-version: ${{ matrix.python-version }}
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-      - name: Install build dependencies
-        run: uv pip install --system build
+          requirements-file: scripts/build-dist/requirements.txt
+          package-format: wheels-only
+          environment-dir: ${{ runner.temp }}/build-venv
+          actions-cache: none
       - name: Build package
-        run: python -m build
-      - name: Verify package
+        id: build
         run: |
-          uv pip install --system dist/*.whl
-          python -c "import inspect_sandboxes; print('Package imported successfully')"
+          "$RUNNER_TEMP/build-venv/bin/python" -m build --no-isolation
+          wheels=(dist/*.whl)
+          [ ${#wheels[@]} -eq 1 ] && [ -f "${wheels[0]}" ] || { echo "::error::expected one wheel in dist/"; exit 1; }
+          # ./ marks a local path for the install action.
+          echo "wheel=./${wheels[0]}" >> "$GITHUB_OUTPUT"
+      # The locked runtime dependencies, without the dev group and without the
+      # project, then the wheel with --no-deps. A second call in a job must
+      # use the first call's actions-cache.
+      - uses: meridianlabs-ai/actions/install-python-dependencies@65f1b6bdb9b1af7eb0bc89942c624dd4efef1316 # main
+        with:
+          versions: locked
+          python-version: ${{ matrix.python-version }}
+          project-install: skip
+          default-dependency-groups: exclude
+          also-install-without-deps: ${{ steps.build.outputs.wheel }}
+          actions-cache: none
+      - name: Verify package
+        # -I so the import resolves to the installed wheel, not the checkout's src/.
+        run: .venv/bin/python -I -c "import inspect_sandboxes; print('Package imported successfully')"

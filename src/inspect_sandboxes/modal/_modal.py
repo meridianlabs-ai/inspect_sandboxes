@@ -6,6 +6,7 @@ import os
 import posixpath
 import shlex
 import sys
+import uuid
 from contextvars import ContextVar
 from logging import getLogger
 from pathlib import PurePosixPath
@@ -44,6 +45,7 @@ from tenacity import (
 )
 from typing_extensions import override
 
+from inspect_sandboxes._util.file_user import check_file_user
 from inspect_sandboxes._util.naming import make_sandbox_name
 
 from ._compose import _MODAL_PORT_KEYS, convert_compose_to_modal_params
@@ -56,6 +58,23 @@ logger = getLogger(__name__)
 
 MODAL_APP_NAME = "inspect_modal_sandbox"
 INSPECT_SANDBOX_TAG = {"created_by": "inspect-ai"}
+
+# Modal's Sandbox.exec() validates the total argv length client-side and raises
+# InvalidError beyond ARG_MAX_BYTES (64 KiB: a quarter of the usual Linux
+# ARG_MAX, leaving room for its own `runsc exec ...` prefix). exec() stages
+# anything larger as a script inside the sandbox and runs that instead.
+# Mirrors Modal's private ARG_MAX_BYTES (modal.sandbox in modal < 1.6,
+# modal.sandbox._common from 1.6) rather than importing it, so a move in Modal
+# can't break import; a test checks the two still agree.
+_EXEC_ARG_MAX_BYTES = 2**16
+
+# Sandbox.exec()'s stdin writer buffers write() calls and raises BufferError as
+# soon as a single write() would push the buffer past its cap
+# (modal.io_streams.TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE, 16 MiB), so exec()
+# streams `input` in chunks and drains between them. 1 MiB is deliberately far
+# below the cap: it keeps each gRPC message small and is the size validated
+# against real sandboxes (50 MiB round-trips in the conformance suite).
+_STDIN_CHUNK_BYTES = 1024 * 1024
 
 _running_sandboxes: ContextVar[list[str]] = ContextVar("modal_running_sandboxes")
 
@@ -484,6 +503,24 @@ class ModalSandboxEnvironment(SandboxEnvironment):
         # parameter of its own.
         exec_cmd = _build_exec_cmd(cmd, user)
 
+        # Commands over Modal's cap are written to a script in the sandbox and
+        # run via /bin/sh instead. Size is measured in UTF-8 bytes: that covers
+        # everything Modal's character count rejects and also stays under the
+        # kernel's per-argument byte limit. The script uses `exec`, so the
+        # shell is replaced by the command and the process tree looks the same
+        # as the inline path. Needs /bin/sh in the image (the `user=` wrapper
+        # already does). The upload happens before the exec timeout starts.
+        script_file: str | None = None
+        if sum(len(arg.encode("utf-8")) for arg in exec_cmd) > _EXEC_ARG_MAX_BYTES:
+            script_file = f"/tmp/.inspect-cmd-{uuid.uuid4().hex}"
+            try:
+                await self._write_file_content(
+                    script_file, "exec " + shlex.join(cmd) + "\n"
+                )
+            except modal.exception.SandboxFilesystemError as e:
+                self._raise_filesystem_error(script_file, e)
+            exec_cmd = _build_exec_cmd(["/bin/sh", script_file], user)
+
         # Modal requires absolute paths for workdir
         workdir = cwd
         if workdir is not None and not PurePosixPath(workdir).is_absolute():
@@ -493,6 +530,16 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 "(relative to filesystem root). For clarity, consider using absolute paths.",
             )
             workdir = f"/{workdir}"
+
+        # Encode once, outside the retried/timed region: a large str input
+        # would otherwise be re-encoded on every attempt.
+        stdin_data: bytes | None
+        if input is None:
+            stdin_data = None
+        elif isinstance(input, str):
+            stdin_data = input.encode("utf-8")
+        else:
+            stdin_data = input
 
         @_exec_retry
         async def _run() -> ExecResult[str]:
@@ -504,21 +551,32 @@ class ModalSandboxEnvironment(SandboxEnvironment):
                 env=modal_env,
             )
 
-            if input is not None:
+            if stdin_data is not None:
+                # Chunk under Modal's stdin buffer cap and drain between
+                # chunks; EOF rides along with the last chunk's drain so a
+                # small input still costs a single stdin RPC.
+                eof_sent = False
                 try:
-                    data = input.encode("utf-8") if isinstance(input, str) else input
-                    process.stdin.write(data)
+                    for offset in range(0, len(stdin_data), _STDIN_CHUNK_BYTES):
+                        end = offset + _STDIN_CHUNK_BYTES
+                        process.stdin.write(stdin_data[offset:end])
+                        if end >= len(stdin_data):
+                            process.stdin.write_eof()
+                            eof_sent = True
+                        await process.stdin.drain.aio()
                 except modal.exception.InternalError as e:
                     logger.warning(f"Modal InternalError while writing stdin: {e}.")
                     raise
                 finally:
-                    # No kill() on Modal's ContainerProcess
-                    # Close stdin to unblock the process
-                    try:
-                        process.stdin.write_eof()
-                        await process.stdin.drain.aio()
-                    except Exception:
-                        pass
+                    # No kill() on Modal's ContainerProcess; close stdin to
+                    # unblock the process when the input was empty or the
+                    # upload failed part-way.
+                    if not eof_sent:
+                        try:
+                            process.stdin.write_eof()
+                            await process.stdin.drain.aio()
+                        except Exception:
+                            pass
 
             try:
                 stdout = await process.stdout.read.aio()
@@ -552,27 +610,41 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             attempt_timeouts = [timeout]
 
         last_timeout_exc: asyncio.TimeoutError | None = None
-        for t in attempt_timeouts:
-            try:
-                if t is not None:
-                    return await asyncio.wait_for(_run(), timeout=t)
-                else:
-                    return await _run()
-            except asyncio.TimeoutError as e:
-                last_timeout_exc = e
+        try:
+            for t in attempt_timeouts:
+                try:
+                    if t is not None:
+                        return await asyncio.wait_for(_run(), timeout=t)
+                    else:
+                        return await _run()
+                except asyncio.TimeoutError as e:
+                    last_timeout_exc = e
 
-        assert last_timeout_exc is not None
-        raise TimeoutError(
-            f"Command timed out after {timeout} seconds"
-        ) from last_timeout_exc
+            assert last_timeout_exc is not None
+            raise TimeoutError(
+                f"Command timed out after {timeout} seconds"
+            ) from last_timeout_exc
+        finally:
+            if script_file is not None:
+                try:
+                    await self._remove_file(script_file)
+                except Exception as e:
+                    trace_message(
+                        logger,
+                        "modal",
+                        f"Could not remove exec script {script_file}: {e}",
+                    )
 
     @override
-    async def write_file(self, file: str, contents: str | bytes) -> None:
+    async def write_file(
+        self, file: str, contents: str | bytes, *, user: str | None = None
+    ) -> None:
         """Creates parent directories automatically if they don't exist.
 
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
+        check_file_user(self, "write", user, as_root=True)
         file = await self._resolve_file_path(file)
         try:
             await self._write_file_content(file, contents)
@@ -580,13 +652,19 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             self._raise_filesystem_error(file, e)
 
     @overload
-    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+    async def read_file(
+        self, file: str, text: Literal[True] = True, *, user: str | None = None
+    ) -> str: ...
 
     @overload
-    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+    async def read_file(
+        self, file: str, text: Literal[False], *, user: str | None = None
+    ) -> bytes: ...
 
     @override
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:
+    async def read_file(
+        self, file: str, text: bool = True, *, user: str | None = None
+    ) -> str | bytes:
         """Read file from sandbox.
 
         Raises:
@@ -595,6 +673,7 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
+        check_file_user(self, "read", user, as_root=True)
         file = await self._resolve_file_path(file)
         try:
             info = await self._get_file_info(file)
@@ -707,6 +786,12 @@ class ModalSandboxEnvironment(SandboxEnvironment):
             await self.sandbox.filesystem.write_text.aio(contents, file)
         else:
             await self.sandbox.filesystem.write_bytes.aio(contents, file)
+
+    async def _remove_file(self, file: str) -> None:
+        # Best-effort, single attempt: this runs in exec()'s finally block, so
+        # retry backoff here would stall every exit path (including timeouts
+        # and cancellation) over a file nobody will read again.
+        await self.sandbox.filesystem.remove.aio(file)
 
     @_standard_retry
     async def _read_file_content(self, file: str) -> bytes:

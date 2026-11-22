@@ -1,8 +1,10 @@
 """Tests for Modal sandbox environment implementation."""
 
+import asyncio
+import importlib
 import shlex
 import subprocess
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -17,8 +19,10 @@ from inspect_ai.util import (
     OutputLimitExceededError,
     SandboxEnvironment,
     SandboxEnvironmentLimits,
+    SandboxUserUnsupportedError,
 )
 from inspect_sandboxes.modal._modal import (
+    _EXEC_ARG_MAX_BYTES,
     ModalSandboxEnvironment,
     _build_exec_cmd,
     _locate_su_snippet,
@@ -1149,6 +1153,18 @@ async def test_exec_relative_cwd_converted_to_absolute(
 
 
 @pytest.mark.asyncio
+async def test_file_operations_reject_an_explicit_user(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """An explicit file user is refused rather than ignored."""
+    env = sandbox_env
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.write_file("/test.txt", "hello", user="nobody")
+    with pytest.raises(SandboxUserUnsupportedError):
+        await env.read_file("/test.txt", user="nobody")
+
+
+@pytest.mark.asyncio
 async def test_write_file_text(sandbox_env: ModalSandboxEnvironment) -> None:
     """Test write_file with text content."""
     filesystem = _mock_filesystem(sandbox_env)
@@ -1168,8 +1184,11 @@ async def test_write_file_binary(sandbox_env: ModalSandboxEnvironment) -> None:
     filesystem.write_bytes.aio.assert_awaited_once_with(b"binary content", "/test.bin")
 
 
+@pytest.mark.parametrize("user", [None, "root"])
 @pytest.mark.asyncio
-async def test_read_file_text(sandbox_env: ModalSandboxEnvironment) -> None:
+async def test_read_file_text(
+    sandbox_env: ModalSandboxEnvironment, user: str | None
+) -> None:
     """Test read_file in text mode."""
     filesystem = _mock_filesystem(sandbox_env)
     info = MagicMock()
@@ -1178,7 +1197,7 @@ async def test_read_file_text(sandbox_env: ModalSandboxEnvironment) -> None:
     filesystem.stat.aio.return_value = info
     filesystem.read_bytes.aio.return_value = b"test content"
 
-    result = await sandbox_env.read_file("/test.txt", text=True)
+    result = await sandbox_env.read_file("/test.txt", text=True, user=user)
 
     assert isinstance(result, str)
     assert result == "test content"
@@ -1608,3 +1627,324 @@ async def test_connection_surfaces_declared_port(
     host = port.mappings[0]
     assert isinstance(host.host_ip, str) and host.host_ip, "expected a real host"
     assert host.host_port > 0
+
+
+def _modal_sandbox_private(name: str) -> Any:
+    """A private name from Modal's sandbox internals.
+
+    modal 1.6 turned modal.sandbox into a package and moved these into
+    modal.sandbox._common without re-exporting them.
+    """
+    for module_name in ("modal.sandbox._common", "modal.sandbox"):
+        try:
+            return getattr(importlib.import_module(module_name), name)
+        except (ImportError, AttributeError):
+            continue
+    raise AttributeError(f"modal.sandbox has no {name}")
+
+
+def _validate_modal_exec_args(args: Sequence[str]) -> None:
+    """Run Modal's own client-side argv check (raises InvalidError if too long)."""
+    _modal_sandbox_private("_validate_exec_args")(args)
+
+
+def test_exec_arg_max_matches_modal() -> None:
+    """The local argv cap mirrors Modal's private ARG_MAX_BYTES."""
+    assert _EXEC_ARG_MAX_BYTES == _modal_sandbox_private("ARG_MAX_BYTES")
+
+
+def _large_cmd() -> list[str]:
+    """~1 MiB argv: 16 x 64 KiB args, well over Modal's 64 KiB CMD cap."""
+    chunk = "x" * (64 * 1024)
+    return ["printf", "%s", *([chunk] * 16)]
+
+
+def _capture_exec(
+    sandbox_env: ModalSandboxEnvironment,
+    kwargs_out: list[dict[str, Any]] | None = None,
+) -> list[tuple[str, ...]]:
+    """Replace sandbox.exec with a mock recording the argv (and kwargs) of each call."""
+    calls: list[tuple[str, ...]] = []
+
+    async def mock_exec(*args: str, **kwargs: Any) -> MagicMock:
+        calls.append(args)
+        if kwargs_out is not None:
+            kwargs_out.append(kwargs)
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout.read = AsyncMock(return_value="")
+        process.stderr.read = AsyncMock(return_value="")
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = mock_exec
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_runs_via_script_file(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Modal's Sandbox.exec caps total argv at 64 KiB (ARG_MAX_BYTES).
+
+    A larger command is written to a temp script in the sandbox and exec'd
+    through /bin/sh instead, then the script is removed.
+    """
+    fs = _mock_filesystem(sandbox_env)
+    fs.remove.aio = AsyncMock()
+    exec_kwargs: list[dict[str, Any]] = []
+    calls = _capture_exec(sandbox_env, exec_kwargs)
+    cmd = _large_cmd()
+
+    result = await sandbox_env.exec(cmd, cwd="/work", env={"K": "v"})
+
+    assert result.success
+    fs.write_text.aio.assert_awaited_once()
+    script, path = fs.write_text.aio.call_args[0]
+    assert path.startswith("/tmp/.inspect-cmd-")
+    assert script == "exec " + shlex.join(cmd) + "\n"
+    assert calls == [("/bin/sh", path)]
+    # The staged argv is what Modal receives, so it must pass Modal's own check.
+    _validate_modal_exec_args(calls[0])
+    # cwd/env still travel with the exec call, not inside the script.
+    assert exec_kwargs == [{"workdir": "/work", "env": {"K": "v"}}]
+    fs.remove.aio.assert_awaited_once_with(path)
+
+
+@pytest.mark.asyncio
+async def test_exec_small_command_is_passed_inline(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Commands under the cap keep the direct argv path (no temp file)."""
+    fs = _mock_filesystem(sandbox_env)
+    fs.remove.aio = AsyncMock()
+    calls = _capture_exec(sandbox_env)
+
+    await sandbox_env.exec(["echo", "hi"])
+
+    assert calls == [("echo", "hi")]
+    fs.write_text.aio.assert_not_awaited()
+    fs.remove.aio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_with_user_wraps_script_in_su(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """user= still applies: the su wrapper runs the script, not the raw argv."""
+    fs = _mock_filesystem(sandbox_env)
+    fs.remove.aio = AsyncMock()
+    calls = _capture_exec(sandbox_env)
+
+    await sandbox_env.exec(_large_cmd(), user="agent")
+
+    _, path = fs.write_text.aio.call_args[0]
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[:2] == ("/bin/sh", "-c")
+    assert "su" in argv[2]
+    assert shlex.join(["/bin/sh", path]) in argv[2]
+    _validate_modal_exec_args(argv)
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_removes_script_when_exec_fails(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """The temp script is cleaned up even if the exec itself fails."""
+    fs = _mock_filesystem(sandbox_env)
+    fs.remove.aio = AsyncMock()
+
+    async def failing_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        raise modal.exception.RemoteError("permanent failure")
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = failing_exec
+
+    with pytest.raises(modal.exception.RemoteError):
+        await sandbox_env.exec(_large_cmd())
+
+    _, path = fs.write_text.aio.call_args[0]
+    fs.remove.aio.assert_awaited_once_with(path)
+
+
+@pytest.mark.asyncio
+async def test_exec_multibyte_args_are_measured_in_bytes(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """A 4-byte-per-char arg past the kernel's per-element byte cap is staged.
+
+    Modal's own check counts characters, so this argv would pass it and then
+    fail with E2BIG inside the sandbox if it were sent inline.
+    """
+    fs = _mock_filesystem(sandbox_env)
+    fs.remove.aio = AsyncMock()
+    calls = _capture_exec(sandbox_env)
+    cmd = ["printf", "%s", "\U0001f600" * 40_000]  # 40k chars, 160 KB
+    _validate_modal_exec_args(cmd)  # passes Modal's character count
+
+    await sandbox_env.exec(cmd)
+
+    fs.write_text.aio.assert_awaited_once()
+    assert calls[0][0] == "/bin/sh"
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_removes_script_after_timeout(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    fs = _mock_filesystem(sandbox_env)
+    fs.remove.aio = AsyncMock()
+
+    async def hanging_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        await asyncio.sleep(10)
+        return MagicMock()
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = hanging_exec
+
+    with pytest.raises(TimeoutError):
+        await sandbox_env.exec(_large_cmd(), timeout=1, timeout_retry=False)
+
+    _, path = fs.write_text.aio.call_args[0]
+    fs.remove.aio.assert_awaited_once_with(path)
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_failed_upload_raises_contract_error(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """A failing script upload surfaces as the contract's OSError; nothing to remove."""
+    fs = _mock_filesystem(sandbox_env)
+    fs.remove.aio = AsyncMock()
+    fs.write_text.aio = AsyncMock(
+        side_effect=modal.exception.SandboxFilesystemPermissionError("denied")
+    )
+    calls = _capture_exec(sandbox_env)
+
+    with pytest.raises(PermissionError):
+        await sandbox_env.exec(_large_cmd())
+
+    assert calls == []
+    fs.remove.aio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exec_large_command_remove_failure_does_not_mask_result(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    fs = _mock_filesystem(sandbox_env)
+    fs.remove.aio = AsyncMock(
+        side_effect=modal.exception.SandboxFilesystemError("gone")
+    )
+    _capture_exec(sandbox_env)
+
+    result = await sandbox_env.exec(_large_cmd())
+
+    assert result.success
+    fs.remove.aio.assert_awaited_once()
+
+
+def _fake_stdin(events: list[str], received: bytearray) -> MagicMock:
+    """A stdin double with the real writer's contract.
+
+    Mirrors modal.io_streams: write() buffers and raises BufferError past the
+    router cap; drain() flushes the buffer (and the EOF flag) to the process.
+    """
+    from modal.io_streams import TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE
+
+    buffer = bytearray()
+    stdin = MagicMock()
+
+    def write(data: bytes) -> None:
+        if len(buffer) + len(data) > TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE:
+            raise BufferError(
+                "Buffer size exceed limit. Call drain to flush the buffer."
+            )
+        buffer.extend(data)
+        events.append(f"write:{len(data)}")
+
+    async def drain() -> None:
+        received.extend(buffer)
+        buffer.clear()
+        events.append("drain")
+
+    stdin.write = write
+    stdin.write_eof = lambda: events.append("eof")
+    stdin.drain = MagicMock()
+    stdin.drain.aio = AsyncMock(side_effect=drain)
+    return stdin
+
+
+def _exec_with_fake_stdin(
+    sandbox_env: ModalSandboxEnvironment, events: list[str], received: bytearray
+) -> None:
+    async def mock_exec(*args: Any, **kwargs: Any) -> MagicMock:
+        process = MagicMock()
+        process.returncode = 0
+        process.stdout.read = AsyncMock(return_value="")
+        process.stderr.read = AsyncMock(return_value="")
+        process.stdin = _fake_stdin(events, received)
+        process.wait = AsyncMock()
+        return process
+
+    sandbox_env.sandbox.exec = MagicMock()
+    sandbox_env.sandbox.exec.aio = mock_exec
+
+
+@pytest.mark.asyncio
+async def test_exec_large_stdin_round_trips_through_the_buffered_writer(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """Input larger than Modal's stdin buffer cap must arrive intact and in order.
+
+    The fake stdin enforces the real cap, so a single oversized write() (the
+    bug in #81) raises BufferError here just as it does against Modal.
+    """
+    from modal.io_streams import TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE
+
+    events: list[str] = []
+    received = bytearray()
+    _exec_with_fake_stdin(sandbox_env, events, received)
+    payload = bytes(range(256)) * (TASK_COMMAND_ROUTER_MAX_BUFFER_SIZE // 256 + 1)
+
+    result = await sandbox_env.exec(["wc", "-c"], input=payload)
+
+    assert result.success
+    assert bytes(received) == payload
+    # Every write is flushed before the next one is buffered.
+    for index, event in enumerate(events):
+        if event.startswith("write:"):
+            assert events[index + 1] in ("drain", "eof")
+    assert events[-2:] == ["eof", "drain"]
+    assert events.count("eof") == 1
+
+
+@pytest.mark.asyncio
+async def test_exec_small_stdin_costs_a_single_drain(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    """EOF rides along with the only chunk: one stdin RPC, as before the fix."""
+    events: list[str] = []
+    received = bytearray()
+    _exec_with_fake_stdin(sandbox_env, events, received)
+
+    await sandbox_env.exec(["cat"], input="hi")
+
+    assert bytes(received) == b"hi"
+    assert events == ["write:2", "eof", "drain"]
+
+
+@pytest.mark.asyncio
+async def test_exec_empty_stdin_sends_eof_only(
+    sandbox_env: ModalSandboxEnvironment,
+) -> None:
+    events: list[str] = []
+    received = bytearray()
+    _exec_with_fake_stdin(sandbox_env, events, received)
+
+    await sandbox_env.exec(["cat"], input="")
+
+    assert bytes(received) == b""
+    assert events == ["eof", "drain"]

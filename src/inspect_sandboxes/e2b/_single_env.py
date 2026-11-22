@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import posixpath
 import shlex
 from logging import getLogger
 from typing import Literal, overload
@@ -30,6 +31,8 @@ from inspect_ai.util._sandbox.environment import (
 )
 from typing_extensions import override
 
+from inspect_sandboxes._util.file_user import check_file_user
+
 from ._command import (
     exceeds_inline_limit,
     remove_files_command,
@@ -54,6 +57,7 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         # Container ports declared via Compose `ports`, surfaced through
         # connection() as get_host URLs.
         self._connection_ports = connection_ports or []
+        self._working_dir: str | None = None
 
     @override
     @classmethod
@@ -98,12 +102,13 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         E2B's commands.run() doesn't expose stdin in foreground mode, so we
         write *input* to a temp file inside the sandbox and pipe it via shell
         redirection — same approach Daytona uses.
-
         commands.run() also passes the whole command line as a single
         ``bash -l -c`` argument, which the kernel caps at 128 KiB, so a longer
         command is staged in a temp script and sourced (see ``_command``).
         Temp files are removed afterwards, as root, in the ``finally`` below.
         """
+        if cwd is not None:
+            cwd = await self._absolute_path(cwd)
         temp_files: list[str] = []
         try:
             if input is not None:
@@ -184,25 +189,35 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             trace_message(logger, "e2b", f"Could not remove temp files {files}: {e}")
 
     @override
-    async def write_file(self, file: str, contents: str | bytes) -> None:
+    async def write_file(
+        self, file: str, contents: str | bytes, *, user: str | None = None
+    ) -> None:
         """Creates parent directories automatically.
 
         Raises:
             IsADirectoryError: File path already exists as a directory.
         """
+        check_file_user(self, "write", user, as_root=True)
+        file = await self._absolute_path(file)
         if await self._is_directory(file):
             raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
         data = contents.encode("utf-8") if isinstance(contents, str) else contents
         await self._write_file_content(file, data)
 
     @overload
-    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+    async def read_file(
+        self, file: str, text: Literal[True] = True, *, user: str | None = None
+    ) -> str: ...
 
     @overload
-    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+    async def read_file(
+        self, file: str, text: Literal[False], *, user: str | None = None
+    ) -> bytes: ...
 
     @override
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:
+    async def read_file(
+        self, file: str, text: bool = True, *, user: str | None = None
+    ) -> str | bytes:
         """Read file from sandbox.
 
         Raises:
@@ -211,6 +226,8 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             UnicodeDecodeError: Encoding error (text mode only).
             OutputLimitExceededError: File exceeds 100 MiB limit.
         """
+        check_file_user(self, "read", user, as_root=True)
+        file = await self._absolute_path(file)
         await self._verify_read_size(file)
 
         try:
@@ -266,6 +283,27 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             await sandbox.kill()
         except NotFoundException:
             pass  # already gone
+
+    async def _absolute_path(self, file: str) -> str:
+        """Resolve a relative path against the directory `exec` runs in.
+
+        E2B resolves a relative file path, or a relative `exec` cwd, against
+        the user's home (`/root`), while `exec` with no cwd runs in the
+        template's working directory. Without this, a relative file written by
+        `write_file` is not where `exec` looks for it.
+        """
+        if posixpath.isabs(file):
+            return file
+        if self._working_dir is None:
+            result = await self.exec(["pwd"], timeout=10)
+            working_dir = result.stdout.strip()
+            if not result.success or not posixpath.isabs(working_dir):
+                raise RuntimeError(
+                    "Could not resolve the sandbox working directory: "
+                    f"stdout={result.stdout!r} stderr={result.stderr!r}"
+                )
+            self._working_dir = working_dir
+        return posixpath.join(self._working_dir, file)
 
     @standard_retry
     async def _get_file_size(self, file: str) -> int:

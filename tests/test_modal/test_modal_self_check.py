@@ -17,6 +17,7 @@ from inspect_ai.util._sandbox.self_check import *  # noqa: F403  # pyright: igno
 from inspect_sandboxes.modal._modal import ModalSandboxEnvironment
 
 from tests.self_check_support import (
+    FILE_USER_XFAILS,
     ConfigAndEnv,
     SandboxConfig,
     XFail,
@@ -33,15 +34,7 @@ SANDBOX_CONFIGS = [
         id="default",
         config=None,
         xfails={
-            "test_exec_input_large": XFail(
-                "exec() writes stdin in one shot; Modal's stdin buffer overflows "
-                "with BufferError "
-                "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/81)"
-            ),
-            "test_exec_large_command": XFail(
-                "Modal caps CMD at 64 KiB (ARG_MAX); raw InvalidError "
-                "(https://github.com/meridianlabs-ai/inspect_sandboxes/issues/65)"
-            ),
+            **FILE_USER_XFAILS,
             "test_read_file_not_allowed": XFail("user is root"),
             "test_write_text_file_without_permissions": XFail("user is root"),
             "test_write_binary_file_without_permissions": XFail("user is root"),

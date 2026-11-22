@@ -175,3 +175,5 @@ inspect sandbox cleanup e2b <sandbox-id>    # delete one
 
 - **Per-sample resource overrides**: CPU and memory are baked into the template at build time; changing them produces a new cached template. Each unique resource profile maps to its own template.
 - **GPU**: E2B does not expose GPU allocation, so compose `deploy.resources.reservations.devices` is ignored.
+- **File user**: `read_file()` and `write_file()` accept `user="root"` and raise `SandboxUserUnsupportedError` for any other user.
+- **DinD file permissions**: Without a `user`, DinD `read_file()` and `write_file()` check the path as the service's default user, but `docker compose cp` moves the file as root. So the default user's permissions are not consistently enforced. For example, a write can create a file in a directory the default user cannot write to.

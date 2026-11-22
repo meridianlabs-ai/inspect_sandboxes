@@ -4,16 +4,46 @@ Thanks for contributing to Inspect Sandboxes, the collection of cloud sandbox en
 
 ## Development setup
 
-This project uses [uv](https://docs.astral.sh/uv/) and targets Python 3.12+.
+This project uses [uv](https://docs.astral.sh/uv/) 0.13.4 or later and targets
+Python 3.12+.
 
 ```bash
 git clone https://github.com/meridianlabs-ai/inspect_sandboxes.git
 cd inspect_sandboxes
-make install
+uv sync --locked
+uv run --no-sync pre-commit install
 ```
 
-`make install` runs `uv sync` to create the virtual environment and install the
-dev dependencies, then installs the pre-commit hooks.
+`uv sync --locked` creates the virtual environment with the exact versions in
+`uv.lock` and installs the dev dependencies. It fails if `uv.lock` is out of
+date with `pyproject.toml`. `pre-commit install` sets up the pre-commit hooks.
+The dev tools are in the
+`dev` extra. The `dev` dependency group includes that extra, so a plain
+`uv sync` or `uv run` installs them. `uv sync --extra dev` does the same.
+
+### Dependencies
+
+[DEPENDENCIES.md](https://github.com/meridianlabs-ai/actions/blob/main/DEPENDENCIES.md)
+in meridianlabs-ai/actions tells how the Inspect repositories install and change
+dependencies. It covers the lock file, the cooldown, Dependabot, the canaries,
+the release build tools, and the procedures to add or update a dependency.
+Follow it. It is the same for every Inspect repository, so this file does not
+repeat it.
+
+For this repository:
+
+- Inspect Sandboxes uses only released inspect_ai: `inspect-ai` comes from PyPI.
+- `[tool.uv.exclude-newer-package]` in `pyproject.toml` sets `inspect-ai` to
+  `false`, so it has no uv cooldown. Here a direct dependency that is a sandbox
+  provider SDK (`e2b`, `modal`) waits 6 hours. A `false` entry goes on the
+  Dependabot `cooldown.exclude` list and in the `six-hour-cooldown` group, the
+  same as a 6-hour entry.
+- `daytona` is not on the 6-hour list: each release pins its `daytona-*` client
+  packages to the same version, and they wait seven days, so a 6-hour entry for
+  `daytona` alone has no effect. An emergency entry does not shorten the
+  cooldown of a package's own dependencies. Thus it does not work for
+  `daytona`, whose `daytona-*` client packages are released with it and are not
+  direct dependencies.
 
 ## Checks and tests
 
@@ -31,6 +61,20 @@ make test-all
 
 Integration tests are marked with the `integration` marker and are skipped by
 default; run them explicitly with `make test-integration`.
+
+## Docs
+
+The docs live in `docs/` and are built with [Quarto](https://quarto.org). The
+docs tools are in the `doc` extra, which `uv sync` and `uv run` leave
+out, so ask for it:
+
+```bash
+# Preview the docs locally
+uv run --extra doc quarto preview docs
+```
+
+The release workflow publishes the site to GitHub Pages with each release, so
+docs changes go live with the next release.
 
 ## Commit messages and releases
 
