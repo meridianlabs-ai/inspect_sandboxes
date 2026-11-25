@@ -25,6 +25,7 @@ from inspect_ai.util._sandbox._privileged import pinned_command, pinned_shell_co
 from typing_extensions import override
 
 from inspect_sandboxes._util.compose import find_default_service
+from inspect_sandboxes._util.dind_compose import resolve_build_contexts
 from inspect_sandboxes._util.file_user import check_file_user
 
 from ._dind_project import (
@@ -86,6 +87,7 @@ class E2BDinDServiceEnvironment(SandboxEnvironment):
         """
         tmp_dir: Path | None = None
         if compose_file is None:
+            config = resolve_build_contexts(config, Path.cwd())
             try:
                 tmp_dir = Path(tempfile.mkdtemp(prefix="inspect-compose-"))
                 tmp_path = tmp_dir / "compose.yaml"

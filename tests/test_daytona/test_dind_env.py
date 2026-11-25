@@ -12,7 +12,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daytona import DaytonaError
-from inspect_ai.util import ComposeConfig, ComposeService, SandboxUserUnsupportedError
+from inspect_ai.util import (
+    ComposeBuild,
+    ComposeConfig,
+    ComposeService,
+    SandboxUserUnsupportedError,
+)
+from inspect_sandboxes._util.dind_compose import discover_build_contexts
 from inspect_sandboxes.daytona._daytona import _daytona_client, _init_context
 from inspect_sandboxes.daytona._dind_env import (
     DaytonaDinDServiceEnvironment,
@@ -782,3 +788,51 @@ async def test_sample_init_dind_serializes_compose_config() -> None:
 
     assert list(envs.keys())[0] == "web"
     assert "helper" in envs
+
+
+@pytest.mark.asyncio
+async def test_sample_init_dind_resolves_compose_config_build_context_against_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Relative build contexts in a ComposeConfig are found in the cwd."""
+    for name in ("app", "helper"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "Dockerfile").write_text("FROM alpine\n")
+    monkeypatch.chdir(tmp_path)
+    config = ComposeConfig(
+        services={
+            "web": ComposeService(build="app", **{"x-default": True}),  # type: ignore[arg-type]
+            "helper": ComposeService(build=ComposeBuild(context="./helper")),
+        }
+    )
+
+    mock_project = MagicMock()
+    mock_project.sandbox.id = "sb-123"
+    mock_project.services = ["web", "helper"]
+
+    with (
+        patch(
+            "inspect_sandboxes.daytona._dind_env.create_dind_project",
+            new_callable=AsyncMock,
+            return_value=mock_project,
+        ) as mock_create,
+        patch(
+            "inspect_sandboxes.daytona._dind_env.discover_working_dir",
+            new_callable=AsyncMock,
+            return_value="/",
+        ),
+    ):
+        await DaytonaDinDServiceEnvironment.sample_init_dind(
+            MagicMock(), config, None, {"created_by": "test"}
+        )
+
+    config_arg = mock_create.call_args[0][1]
+    compose_file_arg = mock_create.call_args[0][2]
+    context_map, needs_rewrite = discover_build_contexts(
+        config_arg, Path(compose_file_arg).parent, "/inspect/contexts"
+    )
+    assert {Path(local).resolve() for local in context_map} == {
+        (tmp_path / "app").resolve(),
+        (tmp_path / "helper").resolve(),
+    }
+    assert needs_rewrite is True
