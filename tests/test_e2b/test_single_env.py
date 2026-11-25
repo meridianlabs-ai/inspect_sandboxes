@@ -39,7 +39,7 @@ def make_mock_sandbox(sandbox_id: str = "sb-test-123") -> MagicMock:
     sandbox.commands = MagicMock()
     sandbox.commands.run = AsyncMock(return_value=_make_command_result(stdout="ok"))
     sandbox.files = MagicMock()
-    sandbox.files.read = AsyncMock(return_value="content")
+    sandbox.files.read = AsyncMock(return_value=bytearray(b"content"))
     sandbox.files.write = AsyncMock()
     sandbox.files.get_info = AsyncMock()
     sandbox.kill = AsyncMock()
@@ -107,7 +107,7 @@ async def test_file_ops_default_user_to_root(mock_sandbox: MagicMock) -> None:
     file_info.type = FileType.FILE
     file_info.size = 5
     mock_sandbox.files.get_info = AsyncMock(return_value=file_info)
-    mock_sandbox.files.read = AsyncMock(return_value="hello")
+    mock_sandbox.files.read = AsyncMock(return_value=bytearray(b"hello"))
 
     await env.read_file("/etc/anywhere", text=True)
     assert mock_sandbox.files.get_info.call_args[1]["user"] == "root"
@@ -291,10 +291,34 @@ async def test_read_file_text(mock_sandbox: MagicMock, user: str | None) -> None
     file_info.type = FileType.FILE
     file_info.size = 12
     mock_sandbox.files.get_info = AsyncMock(return_value=file_info)
-    mock_sandbox.files.read = AsyncMock(return_value="hello world\n")
+    mock_sandbox.files.read = AsyncMock(return_value=bytearray(b"hello world\n"))
 
     result = await env.read_file("/test.txt", text=True, user=user)
     assert result == "hello world\n"
+
+
+@pytest.mark.asyncio
+async def test_read_file_text_invalid_utf8_raises(mock_sandbox: MagicMock) -> None:
+    """Invalid UTF-8 raises UnicodeDecodeError rather than being replaced."""
+    content = b"caf\xe9\n"  # Latin-1, not valid UTF-8
+
+    async def files_read(path: str, format: str = "text", **kwargs: Any) -> Any:
+        # Mirror the SDK: format="text" returns httpx's Response.text, which
+        # decodes with errors="replace"; format="bytes" returns the raw bytes.
+        if format == "text":
+            return content.decode("utf-8", errors="replace")
+        return bytearray(content)
+
+    env = E2BSingleServiceEnvironment(mock_sandbox)
+    file_info = MagicMock()
+    file_info.type = FileType.FILE
+    file_info.size = len(content)
+    mock_sandbox.files.get_info = AsyncMock(return_value=file_info)
+    mock_sandbox.files.read = AsyncMock(side_effect=files_read)
+
+    with pytest.raises(UnicodeDecodeError, match="Failed to decode /test.txt"):
+        await env.read_file("/test.txt", text=True)
+    assert await env.read_file("/test.txt", text=False) == content
 
 
 @pytest.mark.asyncio

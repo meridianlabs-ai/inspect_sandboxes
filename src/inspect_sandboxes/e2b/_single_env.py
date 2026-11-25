@@ -192,12 +192,14 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
         file = await self._absolute_path(file)
         await self._verify_read_size(file)
 
+        data = await self._read_file_bytes(file)
+        if not text:
+            return data
+        # Decode here rather than reading with format="text": the SDK returns
+        # httpx's Response.text, which replaces invalid UTF-8 with U+FFFD
+        # instead of raising.
         try:
-            if text:
-                content = await self._read_file_text(file)
-                return content
-            data = await self._read_file_bytes(file)
-            return bytes(data)
+            return data.decode("utf-8")
         except UnicodeDecodeError as e:
             raise UnicodeDecodeError(
                 e.encoding,
@@ -304,21 +306,10 @@ class E2BSingleServiceEnvironment(SandboxEnvironment):
             )
 
     @standard_retry
-    async def _read_file_text(self, file: str) -> str:
+    async def _read_file_bytes(self, file: str) -> bytes:
         # Override the SDK's 60s default — too tight for large files
         # (e.g. multi-GB datasets passed via Sample.files). 30 min matches
         # the Daytona SDK's default for the same operation.
-        try:
-            return await self.sandbox.files.read(
-                file, format="text", user="root", request_timeout=FILE_REQUEST_TIMEOUT
-            )
-        except (FileNotFoundException, NotFoundException) as e:
-            raise FileNotFoundError(
-                errno.ENOENT, "No such file or directory", file
-            ) from e
-
-    @standard_retry
-    async def _read_file_bytes(self, file: str) -> bytes:
         try:
             data = await self.sandbox.files.read(
                 file, format="bytes", user="root", request_timeout=FILE_REQUEST_TIMEOUT
