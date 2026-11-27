@@ -1016,7 +1016,7 @@ wheels = [
 
 [[package]]
 name = "e2b"
-version = "2.64.0"
+version = "2.66.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -1032,9 +1032,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "wcmatch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a6/09/54b9afeb22f8af273c53bbdf10111f9e7f0ed98024c5b3926b386ddaa795/e2b-2.64.0.tar.gz", hash = "sha256:dbf6d9f673a0869dc34b1c73307dad1f7eedbd28101b4a25a8efd02f94b0b073", size = 279229, upload-time = "2026-11-13T19:10:37.087Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/6c/52195262f313445e31a8d0ce36fdd71fbdbc0fb3b57c48222ac0cdf95e6f/e2b-2.66.0.tar.gz", hash = "sha256:425cea78e36e2709baeb70c71079506df4edd4c94291950de7d5627e0e1473bd", size = 289165, upload-time = "2026-11-26T16:27:52.141Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/9b/ba5ea8c1e0c4884448d37c3aad6281ed2bd3edea2ca164784cf8bad8397b/e2b-2.64.0-py3-none-any.whl", hash = "sha256:a5fff266802661796539574878d82dbb8a17823be3013a6aeff1460b4cff1682", size = 438428, upload-time = "2026-11-13T19:10:35.601Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/e2/7bdb8af81902d90850a71d04b83de9118cefe38d1cf38a3f7c02d56e83d7/e2b-2.66.0-py3-none-any.whl", hash = "sha256:2d784610e86bcd7ba8c285604256681ae262c93a9f7b0f1db124ef9296ee77a0", size = 453696, upload-time = "2026-11-26T16:27:50.652Z" },
 ]
 
 [[package]]
@@ -1443,7 +1443,7 @@ wheels = [
 
 [[package]]
 name = "inspect-ai"
-version = "0.3.291"
+version = "0.3.292"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -1487,9 +1487,9 @@ dependencies = [
     { name = "zipp" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ab/38/11145421c7c312c7bc33e6aab635bdb63e315049f19c98d482d900fb39ce/inspect_ai-0.3.291.tar.gz", hash = "sha256:2ea302b1c35349e3efb95d1ee94937639c1760a62fcf471b86ad4646e6d52718", size = 7892590, upload-time = "2026-11-17T22:08:25.433Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6e/b8/c6aa885727a59b81cb622a5decab2dd8f322c36637cc247b93cc80e93700/inspect_ai-0.3.292.tar.gz", hash = "sha256:7018003b842dfc15dff0fad5c0da1a5423575e016e3270aa307921ca559de25d", size = 8038052, upload-time = "2026-11-23T17:59:47.057Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a8/0d/3e0ab49df0f679603d86cc0ab6f86c57c100ae9bb0b83a9e3bcb5335123f/inspect_ai-0.3.291-py3-none-any.whl", hash = "sha256:ef9e1df52757857103d10cb2fad92f369439cc254902422a49b207781c0114b0", size = 35832591, upload-time = "2026-11-17T22:08:21.847Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/6c/90ce10511dc40dfa997cfd90b0443a7d6b19f710fab0cfaf23773bc0309e/inspect_ai-0.3.292-py3-none-any.whl", hash = "sha256:65f33bf73612367a547c87ae5b96f81318e72dd9efdcd92c8e0e95aa3525e2d7", size = 35899179, upload-time = "2026-11-23T17:59:44.273Z" },
 ]
 
 [[package]]
